@@ -812,6 +812,7 @@ html[data-theme="light"] .mockup-frame {
   align-self: flex-start;
   transition: background 0.5s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.5s;
 }
+.workflow-step:last-child .workflow-connector { display: none; }
 .workflow-connector.done { background: var(--accent-gold); opacity: 0.6; }
 
 /* ═══════════════ CTA ═══════════════ */
@@ -1875,13 +1876,15 @@ function startWorkflowMarquee() {
 
   // Helper: clear all step states
   function resetSteps() {
-    steps.forEach(function(s) { s.className = s.className.replace(/ ?(active-glow|dimmed|dimmed-left)/g, ''); });
+    steps.forEach(function(s) { s.className = s.className.replace(/ ?(active-glow|dimmed-left|dimmed)/g, ''); });
     connArr.forEach(function(c) { c.classList.remove('done'); });
   }
 
   // Helper: set a step as active with the light running effect
   function illuminateStep(index) {
     resetSteps();
+    // Force reflow so browser records "before" state for CSS transitions
+    void document.getElementById('workflowSteps').offsetHeight;
     const total = steps.length;
 
     // Steps to the left of current: dimmed-left (passed)
@@ -1892,8 +1895,6 @@ function startWorkflowMarquee() {
 
     // Current step: gold glow
     steps[index].classList.add('active-glow');
-    // Also light connector into current step
-    if (index > 0 && connArr[index - 1]) connArr[index - 1].classList.add('done');
 
     // Steps to the right: dimmed (future)
     for (let i = index + 1; i < total; i++) steps[i].classList.add('dimmed');
