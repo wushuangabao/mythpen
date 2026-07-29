@@ -34,9 +34,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Copy WASM asset
+        run: node scripts/copy-wasm.mjs
+
       - name: Build sidecar (Express server)
         run: |
-          bun build --compile ./server/index.js --outfile src-tauri/binaries/mythpen-server
+          bun build --compile --assets server/sql-wasm.wasm ./server/index.js --outfile src-tauri/binaries/mythpen-server
           mv src-tauri/binaries/mythpen-server src-tauri/binaries/mythpen-server-aarch64-apple-darwin
 
       - name: Build Tauri app (DMG)
@@ -78,10 +81,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Copy WASM asset
+        run: node scripts/copy-wasm.mjs
+
       - name: Build sidecar (Express server)
         shell: bash
         run: |
-          bun build --compile ./server/index.js --outfile src-tauri/binaries/mythpen-server
+          bun build --compile --assets server/sql-wasm.wasm ./server/index.js --outfile src-tauri/binaries/mythpen-server
           mv src-tauri/binaries/mythpen-server src-tauri/binaries/mythpen-server-x86_64-pc-windows-msvc.exe
 
       - name: Build Tauri app (MSI / NSIS)
@@ -138,9 +144,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Copy WASM asset
+        run: node scripts/copy-wasm.mjs
+
       - name: Build sidecar (Express server)
         run: |
-          bun build --compile ./server/index.js --outfile src-tauri/binaries/mythpen-server
+          bun build --compile --assets server/sql-wasm.wasm ./server/index.js --outfile src-tauri/binaries/mythpen-server
           mv src-tauri/binaries/mythpen-server src-tauri/binaries/mythpen-server-x86_64-unknown-linux-gnu
 
       - name: Build Tauri app (deb)
