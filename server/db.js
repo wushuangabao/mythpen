@@ -198,18 +198,18 @@ async function initDatabase() {
   // binary explicitly via initSqlJs({ wasmBinary }).
   //
   // Multiple strategies tried in order:
-  //   1. require('./sql-wasm.wasm')  — works in bun --compile --assets
-  //   2. fs.readFileSync(__dirname + sql-wasm.wasm) — dev mode (file on disk)
-  //   3. fs.readFileSync(CWD/server/...) — fallback for bun if __dirname differs
+  //   1. base64-embedded module (works in both bun dev and --compile)
+  //   2. fs.readFileSync relative to __dirname (dev mode)
+  //   3. fs.readFileSync relative to CWD (fallback)
   let wasmBinary;
 
-  // Strategy 1: require() — bun --compile makes embedded .wasm assets
-  // resolvable via require() (returns Buffer). Also works in bun for dev mode.
+  // Strategy 1: base64-embedded WASM (prevents bun --assets bug in 1.3.14)
   try {
-    wasmBinary = require('./sql-wasm.wasm');
-    console.log('[DB] WASM loaded via require()');
-  } catch {
-    // strategy 1 failed, try next
+    const { getWasmBinary } = require('./wasm-binary');
+    wasmBinary = getWasmBinary();
+    console.log('[DB] WASM loaded via base64 embedded module');
+  } catch (e) {
+    console.log('[DB] Embedded WASM module not available:', e.message);
   }
 
   // Strategy 2: fs.readFileSync relative to this file (dev mode, file on disk)

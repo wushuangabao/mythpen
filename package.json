@@ -25,9 +25,9 @@
     "tauri": "tauri",
     "lint": "biome check --write src/",
     "format": "biome format --write src/",
-    "prepare": "simple-git-hooks",
+    "prepare": "simple-git-hooks && node scripts/embed-wasm.mjs",
     "preview": "vite preview",
-    "build:sidecar": "node scripts/copy-wasm.mjs && bun build --compile --assets server/sql-wasm.wasm ./server/index.js --outfile src-tauri/binaries/mythpen-server"
+    "build:sidecar": "node scripts/embed-wasm.mjs && bun build --compile ./server/index.js --outfile src-tauri/binaries/mythpen-server"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
