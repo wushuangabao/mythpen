@@ -36,13 +36,16 @@ function loadSettings(): AppSettings {
     const stored = localStorage.getItem(STORAGE_KEY)
     if (stored) {
       const parsed = JSON.parse(stored)
-      const restored: AppSettings = { ...DEFAULT_SETTINGS, ...parsed, apiKey: DEFAULT_SETTINGS.apiKey }
-      // Restore apiKey from current provider's per-provider slot (if saved)
-      // so the API key field isn't blank on page load
-      if (restored.apiBaseUrl.includes('deepseek') && restored.apiKeyDeepseek) restored.apiKey = restored.apiKeyDeepseek
-      else if (restored.apiBaseUrl.includes('anthropic') && restored.apiKeyAnthropic)
-        restored.apiKey = restored.apiKeyAnthropic
-      else if (restored.apiBaseUrl.includes('openai') && restored.apiKeyOpenai) restored.apiKey = restored.apiKeyOpenai
+      const restored: AppSettings = { ...DEFAULT_SETTINGS, ...parsed }
+      // If the active apiKey is empty, fall back to per-provider slot
+      if (!restored.apiKey) {
+        if (restored.apiBaseUrl.includes('deepseek') && restored.apiKeyDeepseek)
+          restored.apiKey = restored.apiKeyDeepseek
+        else if (restored.apiBaseUrl.includes('anthropic') && restored.apiKeyAnthropic)
+          restored.apiKey = restored.apiKeyAnthropic
+        else if (restored.apiBaseUrl.includes('openai') && restored.apiKeyOpenai)
+          restored.apiKey = restored.apiKeyOpenai
+      }
       return restored
     }
   } catch {
@@ -97,6 +100,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   updateSetting: (key, value) =>
     set((s) => {
       const newSettings = { ...s.settings, [key]: value }
+      // When the active apiKey changes, also sync to the matching per-provider slot
+      if (key === 'apiKey') {
+        const keyStr = String(value)
+        if (s.settings.apiBaseUrl.includes('deepseek')) newSettings.apiKeyDeepseek = keyStr
+        else if (s.settings.apiBaseUrl.includes('anthropic')) newSettings.apiKeyAnthropic = keyStr
+        else if (s.settings.apiBaseUrl.includes('openai')) newSettings.apiKeyOpenai = keyStr
+      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(newSettings))
 
       // Also sync to the backend server
