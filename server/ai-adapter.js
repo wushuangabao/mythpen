@@ -16,6 +16,16 @@ function detectProvider(model, apiType) {
   return 'openai';
 }
 
+function shouldOmitSamplingParameters(model) {
+  const modelId = String(model || '').trim().toLowerCase().split('/').pop();
+  return modelId === 'claude-opus-5';
+}
+
+function buildTemperatureParam(model, temperature, fallbackTemperature) {
+  if (shouldOmitSamplingParameters(model)) return {};
+  return { temperature: temperature ?? fallbackTemperature };
+}
+
 // ─── Tool format conversion ───
 // OpenAI: { type: 'function', function: { name, description, parameters } }
 // Claude: { name, description, input_schema }
@@ -92,7 +102,7 @@ class OpenAIProvider {
       model: apiConfig.apiModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       tools: tools || undefined,
-      temperature: temperature ?? 0.8,
+      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.8),
       max_tokens: 4096,
       stream: false,
     };
@@ -135,7 +145,7 @@ class OpenAIProvider {
     const body = {
       model: apiConfig.apiModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      temperature: temperature ?? 0.85,
+      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.85),
       max_tokens: 4096,
       stream: true,
     };
@@ -204,7 +214,7 @@ class ClaudeProvider {
       system: systemPrompt,
       messages: toClaudeMessages(messages),
       max_tokens: 4096,
-      temperature: temperature ?? 0.8,
+      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.8),
     };
 
     if (tools && tools.length > 0) {
@@ -240,7 +250,7 @@ class ClaudeProvider {
       system: systemPrompt,
       messages: toClaudeMessages(messages),
       max_tokens: 4096,
-      temperature: temperature ?? 0.85,
+      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.85),
     });
 
     let inputTokens = 0;
