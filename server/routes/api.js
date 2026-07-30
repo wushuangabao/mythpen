@@ -4,6 +4,7 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const db = require('../db');
+const { readRecentProject } = require('../recent-projects');
 
 function project(name) {
   // Ensure project DB is accessible
@@ -31,29 +32,7 @@ function updateRecord(projectName, table, id, body, allowedFields, addUpdatedAt)
 
 router.get('/projects', (req, res) => {
   const rows = db.dbQuery('SELECT * FROM recent_projects ORDER BY last_opened DESC');
-  const projects = rows.map(r => {
-    let status = '刚起步';
-    try {
-      const db2 = db.openProjectDb(r.file_path);
-      const meta = {};
-      db2.prepare('SELECT key, value FROM project_meta').all().forEach(m => meta[m.key] = m.value);
-      const chCount = db2.prepare('SELECT COUNT(*) as c FROM chapters').get().c;
-      const genres = db2.prepare('SELECT genre FROM project_genres').all().map(g => g.genre);
-      const wordCount = parseInt(meta.word_count || '0');
-      const iconMap = { 'sci-fi': 'Rocket', 'fantasy': 'Wand', 'romance': 'Heart', 'history': 'Landmark', 'urban': 'Building', 'power-fantasy': 'Zap', 'biography': 'BookOpen', 'other': 'Scroll' };
-      const iconName = genres.map(g => iconMap[g] || 'BookOpen').join(' ');
-      const genreLabels = { 'sci-fi': '科幻', 'fantasy': '玄幻', 'romance': '言情', 'history': '历史', 'urban': '都市', 'power-fantasy': '爽文', 'biography': '传记', 'other': '其他' };
-      return {
-        id: r.id, name: r.name, iconName: iconName || 'BookOpen',
-        genres: genres.map(g => genreLabels[g] || g),
-        wordCount, chapterCount: chCount, lastOpened: r.last_opened,
-        mode: meta.mode || 'medium-novel',
-        status: wordCount > 30000 ? '写作中' : wordCount > 5000 ? '进行中' : '刚起步',
-      };
-    } catch (e) {
-      return { id: r.id, name: r.name, iconName: 'BookOpen', genres: [], wordCount: r.word_count || 0, chapterCount: 0, lastOpened: r.last_opened, mode: 'medium-novel', status: '未知' };
-    }
-  });
+  const projects = rows.map((row) => readRecentProject(row, { openProjectDb: db.openProjectDb }));
   res.json(projects);
 });
 
@@ -699,7 +678,7 @@ router.get('/:project/export', async (req, res) => {
   db.projectQuery(pn, 'SELECT key, value FROM project_meta').forEach(m => meta[m.key] = m.value);
 
   const totalWords = chapters.reduce((s, c) => s + (c.content?.replace(/\s/g, '').length || 0), 0);
-  const EXPORT_DIR = path.join(require('os').homedir(), '.mythpen', 'exports', pn);
+  const EXPORT_DIR = path.join(db.getExportDir(), pn);
   if (!fs.existsSync(EXPORT_DIR)) fs.mkdirSync(EXPORT_DIR, { recursive: true });
 
   // Find cover image

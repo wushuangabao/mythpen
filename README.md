@@ -32,6 +32,14 @@
 
 - **Node.js** >= 20
 - **pnpm** >= 9
+- **Bun 1.3.14** — required for `pnpm build:sidecar`, which produces the standalone sidecars used by desktop packaging. Bun is not required for regular frontend development (`pnpm dev:all` or `pnpm build`).
+
+Install Bun from the [official installation documentation](https://bun.sh/docs/installation).
+On Windows, use:
+
+```powershell
+winget install --id Oven-sh.Bun --exact
+```
 
 ## Quick Start
 
@@ -41,6 +49,10 @@ pnpm dev:all        # Start in browser (frontend + backend + seed data)
 pnpm tauri dev      # Desktop development mode
 pnpm tauri build    # Build desktop installer (.dmg/.msi/.AppImage)
 ```
+
+## Storage CLI
+
+The desktop installation includes `mythpen-cli.exe` next to `mythpen.exe` and `mythpen-server.exe`. For commands, migration behavior, and safety guarantees, see [docs/storage-cli.md](./docs/storage-cli.md).
 
 ## Tech Stack
 

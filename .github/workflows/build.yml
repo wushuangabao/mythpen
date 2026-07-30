@@ -30,17 +30,11 @@ jobs:
 
       - name: Install bun (for sidecar)
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: pnpm install
-
-      - name: Embed WASM into JS
-        run: node scripts/embed-wasm.mjs
-
-      - name: Build sidecar (Express server)
-        run: |
-          bun build --compile ./server/index.js --outfile src-tauri/binaries/mythpen-server
-          mv src-tauri/binaries/mythpen-server src-tauri/binaries/mythpen-server-aarch64-apple-darwin
 
       - name: Build Tauri app (DMG)
         run: pnpm tauri build
@@ -77,18 +71,11 @@ jobs:
 
       - name: Install bun (for sidecar)
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: pnpm install
-
-      - name: Embed WASM into JS
-        run: node scripts/embed-wasm.mjs
-
-      - name: Build sidecar (Express server)
-        shell: bash
-        run: |
-          bun build --compile ./server/index.js --outfile src-tauri/binaries/mythpen-server
-          mv src-tauri/binaries/mythpen-server src-tauri/binaries/mythpen-server-x86_64-pc-windows-msvc.exe
 
       - name: Build Tauri app (MSI / NSIS)
         run: pnpm tauri build
@@ -140,17 +127,11 @@ jobs:
 
       - name: Install bun (for sidecar)
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: pnpm install
-
-      - name: Embed WASM into JS
-        run: node scripts/embed-wasm.mjs
-
-      - name: Build sidecar (Express server)
-        run: |
-          bun build --compile ./server/index.js --outfile src-tauri/binaries/mythpen-server
-          mv src-tauri/binaries/mythpen-server src-tauri/binaries/mythpen-server-x86_64-unknown-linux-gnu
 
       - name: Build Tauri app (deb)
         run: pnpm tauri build --bundles deb,rpm

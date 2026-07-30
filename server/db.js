@@ -4,10 +4,14 @@
 
 const path = require('path');
 const fs = require('fs');
+const { resolveStoragePaths } = require('./storage-paths');
+const { repairRecentProjectPaths } = require('./recent-project-paths');
 
-const DB_DIR = path.join(require('os').homedir(), '.mythpen');
-const CONFIG_DB = path.join(DB_DIR, 'config.db');
-const PROJECTS_DIR = path.join(DB_DIR, 'projects');
+const STORAGE_PATHS = resolveStoragePaths();
+const DB_DIR = STORAGE_PATHS.dataDir;
+const CONFIG_DB = STORAGE_PATHS.configDbPath;
+const PROJECTS_DIR = STORAGE_PATHS.projectsDir;
+const EXPORT_DIR = STORAGE_PATHS.exportDir;
 
 // ─── Ensure directories ───
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
@@ -262,6 +266,7 @@ function _openConfig() {
   db.run('PRAGMA foreign_keys = ON');
   const wrapped = _wrapDb(db, CONFIG_DB);
   migrateConfig(wrapped);
+  repairRecentProjectPaths(wrapped, PROJECTS_DIR);
   return wrapped;
 }
 
@@ -693,6 +698,8 @@ module.exports = {
   projectExecute,
   projectTransaction,
   recalculateWordCount,
+  getDataDir: () => DB_DIR,
+  getExportDir: () => EXPORT_DIR,
   getCoverDir,
   findCoverPath,
   MIME_TO_EXT,

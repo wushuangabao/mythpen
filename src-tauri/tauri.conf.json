@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "pnpm dev:all",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "pnpm build && pnpm build:sidecar"
   },
   "app": {
     "windows": [
@@ -37,7 +37,8 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/mythpen-server"
+      "binaries/mythpen-server",
+      "binaries/mythpen-cli"
     ]
   }
 }
