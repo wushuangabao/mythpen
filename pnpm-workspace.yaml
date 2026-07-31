@@ -1,0 +1,3 @@
+allowBuilds:
+  ejs: true
+  simple-git-hooks: true

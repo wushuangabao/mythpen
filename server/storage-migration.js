@@ -292,6 +292,29 @@ function fileManifest(root, fsApi = fs) {
   return files.sort((a, b) => a.relative.localeCompare(b.relative));
 }
 
+function copyDirectoryContents(source, target, fsApi = fs) {
+  for (const entry of fsApi.readdirSync(source, { withFileTypes: true })) {
+    const sourcePath = path.join(source, entry.name);
+    const targetPath = path.join(target, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`迁移源目录不允许包含符号链接或重解析点：${sourcePath}`);
+    }
+    if (entry.isDirectory()) {
+      fsApi.mkdirSync(targetPath);
+      copyDirectoryContents(sourcePath, targetPath, fsApi);
+    }
+    else if (entry.isFile()) {
+      fsApi.cpSync(sourcePath, targetPath, {
+        force: false,
+        errorOnExist: true,
+      });
+    }
+    else {
+      throw new Error(`迁移源目录包含不支持的文件系统条目：${sourcePath}`);
+    }
+  }
+}
+
 async function copyAndVerifyDirectory(sourceDir, targetDir, options = {}) {
   const fsApi = options.fsApi || fs;
   const { source, target } = validateMigrationPaths(sourceDir, targetDir, fsApi);
@@ -307,7 +330,7 @@ async function copyAndVerifyDirectory(sourceDir, targetDir, options = {}) {
   let stagingCleaned = false;
 
   try {
-    fsApi.cpSync(source, staging, { recursive: true, force: false, errorOnExist: true });
+    copyDirectoryContents(source, staging, fsApi);
     const sourceManifest = fileManifest(source, fsApi);
     const stagingManifest = fileManifest(staging, fsApi);
     if (JSON.stringify(sourceManifest) !== JSON.stringify(stagingManifest)) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,30 @@ export function validateBunVersion(output) {
   if (version !== REQUIRED_BUN_VERSION) {
     throw new Error(`Bun ${REQUIRED_BUN_VERSION} is required; found ${version || 'unknown'}.`)
   }
+}
+
+function resolveBunExecutable() {
+  const pathEntries = (process.env.PATH || '').split(process.platform === 'win32' ? ';' : ':')
+  for (const pathEntry of pathEntries) {
+    if (!pathEntry) continue
+    const directExecutable = join(pathEntry, process.platform === 'win32' ? 'bun.exe' : 'bun')
+    if (existsSync(directExecutable)) return directExecutable
+
+    if (process.platform === 'win32') {
+      const npmInstalledExecutable = join(pathEntry, 'node_modules', 'bun', 'bin', 'bun.exe')
+      if (existsSync(npmInstalledExecutable)) return npmInstalledExecutable
+    }
+  }
+  return 'bun'
+}
+
+function prepareBunExecutable(bun, repositoryRoot) {
+  if (process.platform !== 'win32' || /^[\x00-\x7F]*$/.test(bun)) return bun
+
+  const cachedBun = join(repositoryRoot, 'src-tauri', 'target', 'bun-runtime', 'bun.exe')
+  mkdirSync(dirname(cachedBun), { recursive: true })
+  copyFileSync(bun, cachedBun)
+  return cachedBun
 }
 
 export function sidecarOutputPaths(repositoryRoot, triple) {
@@ -50,13 +74,14 @@ function run(command, args, options = {}) {
 }
 
 export function buildSidecars(repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')) {
+  const bun = prepareBunExecutable(resolveBunExecutable(), repositoryRoot)
   const rustcOutput = run('rustc', ['-vV'], {
     cwd: repositoryRoot,
     capture: true,
     label: 'rustc',
   })
   const triple = parseRustcHostTriple(rustcOutput)
-  const bunVersion = run('bun', ['--version'], {
+  const bunVersion = run(bun, ['--version'], {
     cwd: repositoryRoot,
     capture: true,
     label: 'Bun',
@@ -74,7 +99,7 @@ export function buildSidecars(repositoryRoot = resolve(dirname(fileURLToPath(imp
     ['server/index.js', outputs.server],
     ['server/cli.js', outputs.cli],
   ]) {
-    run('bun', ['build', '--compile', entry, '--outfile', output], {
+    run(bun, ['build', '--compile', entry, '--outfile', output], {
       cwd: repositoryRoot,
       label: `Bun compile (${entry})`,
     })
