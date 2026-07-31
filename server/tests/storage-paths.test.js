@@ -16,6 +16,10 @@ test('defaults writing data to <home>/.mythpen', () => {
   assert.equal(paths.dataDir, path.resolve('C:\\Users\\author', '.mythpen'));
   assert.equal(paths.projectsDir, path.join(paths.dataDir, 'projects'));
   assert.equal(paths.configDbPath, path.join(paths.dataDir, 'config.db'));
+  assert.equal(
+    paths.aiRequestParametersPath,
+    path.join(paths.dataDir, 'ai-request-parameters.json'),
+  );
   assert.equal(paths.exportDir, path.join(paths.dataDir, 'exports'));
 });
 
@@ -26,6 +30,10 @@ test('registry overrides defaults and export defaults under configured data dir'
     store: fakeStore({ DataDir: 'D:\\MythpenData' }),
   });
   assert.equal(paths.dataDir, path.resolve('D:\\MythpenData'));
+  assert.equal(
+    paths.aiRequestParametersPath,
+    path.join(paths.dataDir, 'ai-request-parameters.json'),
+  );
   assert.equal(paths.exportDir, path.join(paths.dataDir, 'exports'));
 });
 
@@ -42,5 +50,9 @@ test('explicit export directory and process environment take precedence', () => 
     }),
   });
   assert.equal(paths.dataDir, path.resolve('E:\\SessionData'));
+  assert.equal(
+    paths.aiRequestParametersPath,
+    path.join(paths.dataDir, 'ai-request-parameters.json'),
+  );
   assert.equal(paths.exportDir, path.resolve('F:\\SessionExports'));
 });

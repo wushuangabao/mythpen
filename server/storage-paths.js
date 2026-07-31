@@ -21,6 +21,7 @@ function resolveStoragePaths(options = {}) {
     dataDir,
     configDbPath: path.join(dataDir, 'config.db'),
     projectsDir: path.join(dataDir, 'projects'),
+    aiRequestParametersPath: path.join(dataDir, 'ai-request-parameters.json'),
     exportDir,
   };
 }

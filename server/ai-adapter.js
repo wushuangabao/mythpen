@@ -3,6 +3,15 @@
 // Auto-detects provider from model name.
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { resolveStoragePaths } = require('./storage-paths');
+const {
+  createRequestParameterConfigLoader,
+  resolveRequestBody,
+} = require('./ai-request-parameters');
+
+const defaultRequestParameterLoader = createRequestParameterConfigLoader({
+  configPath: resolveStoragePaths().aiRequestParametersPath,
+});
 
 // ─── Provider detection ───
 // apiType takes priority; fallback to model name heuristic
@@ -14,16 +23,6 @@ function detectProvider(model, apiType) {
   const m = model.toLowerCase();
   if (m.startsWith('claude') || m.startsWith('anthropic/')) return 'claude';
   return 'openai';
-}
-
-function shouldOmitSamplingParameters(model) {
-  const modelId = String(model || '').trim().toLowerCase().split('/').pop();
-  return modelId === 'claude-opus-5';
-}
-
-function buildTemperatureParam(model, temperature, fallbackTemperature) {
-  if (shouldOmitSamplingParameters(model)) return {};
-  return { temperature: temperature ?? fallbackTemperature };
 }
 
 // ─── Tool format conversion ───
@@ -88,8 +87,19 @@ function makeResponse(content, toolCalls, inputTokens, outputTokens) {
 // ═══════════════════════════════════════════
 
 class OpenAIProvider {
-  constructor(apiConfig) {
+  constructor(apiConfig, requestParameterConfig) {
     this.apiConfig = apiConfig;
+    this.requestParameterConfig = requestParameterConfig;
+  }
+
+  requestBody(baseBody, operation, temperature) {
+    return resolveRequestBody(this.requestParameterConfig, {
+      baseBody,
+      model: this.apiConfig.apiModel,
+      apiType: 'openai',
+      operation,
+      runtimeParams: temperature === undefined ? {} : { temperature },
+    });
   }
 
   /**
@@ -98,14 +108,12 @@ class OpenAIProvider {
    */
   async complete(systemPrompt, messages, tools, temperature) {
     const { apiConfig } = this;
-    const body = {
+    const body = this.requestBody({
       model: apiConfig.apiModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       tools: tools || undefined,
-      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.8),
-      max_tokens: 4096,
       stream: false,
-    };
+    }, 'complete', temperature);
 
     const response = await fetch(apiConfig.chatUrl, {
       method: 'POST',
@@ -142,13 +150,11 @@ class OpenAIProvider {
    */
   async *stream(systemPrompt, messages, temperature) {
     const { apiConfig } = this;
-    const body = {
+    const body = this.requestBody({
       model: apiConfig.apiModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.85),
-      max_tokens: 4096,
       stream: true,
-    };
+    }, 'stream', temperature);
 
     const response = await fetch(apiConfig.chatUrl, {
       method: 'POST',
@@ -198,9 +204,20 @@ class OpenAIProvider {
 // ═══════════════════════════════════════════
 
 class ClaudeProvider {
-  constructor(apiConfig) {
+  constructor(apiConfig, requestParameterConfig) {
     this.apiConfig = apiConfig;
+    this.requestParameterConfig = requestParameterConfig;
     this.client = new Anthropic({ apiKey: apiConfig.apiKey });
+  }
+
+  requestBody(baseBody, operation, temperature) {
+    return resolveRequestBody(this.requestParameterConfig, {
+      baseBody,
+      model: this.apiConfig.apiModel,
+      apiType: 'claude',
+      operation,
+      runtimeParams: temperature === undefined ? {} : { temperature },
+    });
   }
 
   /**
@@ -209,17 +226,16 @@ class ClaudeProvider {
   async complete(systemPrompt, messages, tools, temperature) {
     const { apiConfig, client } = this;
 
-    const params = {
+    const baseBody = {
       model: apiConfig.apiModel,
       system: systemPrompt,
       messages: toClaudeMessages(messages),
-      max_tokens: 4096,
-      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.8),
     };
 
     if (tools && tools.length > 0) {
-      params.tools = toClaudeTools(tools);
+      baseBody.tools = toClaudeTools(tools);
     }
+    const params = this.requestBody(baseBody, 'complete', temperature);
 
     const response = await client.messages.create(params);
     const toolCalls = [];
@@ -245,13 +261,12 @@ class ClaudeProvider {
   async *stream(systemPrompt, messages, temperature) {
     const { apiConfig, client } = this;
 
-    const stream = client.messages.stream({
+    const params = this.requestBody({
       model: apiConfig.apiModel,
       system: systemPrompt,
       messages: toClaudeMessages(messages),
-      max_tokens: 4096,
-      ...buildTemperatureParam(apiConfig.apiModel, temperature, 0.85),
-    });
+    }, 'stream', temperature);
+    const stream = client.messages.stream(params);
 
     let inputTokens = 0;
     let outputTokens = 0;
@@ -280,8 +295,10 @@ class ClaudeProvider {
 // FACTORY
 // ═══════════════════════════════════════════
 
-function createAIAdapter(model, apiConfig, apiType) {
+function createAIAdapter(model, apiConfig, apiType, options = {}) {
   const provider = detectProvider(model, apiType);
+  const requestParameterLoader = options.requestParameterLoader || defaultRequestParameterLoader;
+  const requestParameterConfig = requestParameterLoader.getSnapshot();
   console.log(`[AI Adapter] Using ${provider} provider for model "${model}" (apiType: ${apiType || 'auto'})`);
 
   // Ensure chatUrl is set for OpenAI-compatible
@@ -292,10 +309,10 @@ function createAIAdapter(model, apiConfig, apiType) {
 
   switch (provider) {
     case 'claude':
-      return new ClaudeProvider(apiConfig);
+      return new ClaudeProvider(apiConfig, requestParameterConfig);
     case 'openai':
     default:
-      return new OpenAIProvider(apiConfig);
+      return new OpenAIProvider(apiConfig, requestParameterConfig);
   }
 }
 
