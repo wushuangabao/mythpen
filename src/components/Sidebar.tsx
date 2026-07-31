@@ -23,6 +23,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useDataRefresh } from '@/hooks/useDataRefresh'
 import { useT } from '@/hooks/useT'
+import { activateOnKeyDown } from '@/lib/a11y'
 import { projectsApi, statsApi } from '@/lib/api'
 import { refreshAllData } from '@/lib/dataEvents'
 import { NEXT_STATUS } from '@/lib/status'
@@ -64,8 +65,8 @@ export function Sidebar() {
   const targetInputRef = useRef<HTMLInputElement>(null)
 
   const handleSaveTargetWords = useCallback(async () => {
-    const val = parseInt(targetInput)
-    if (!isNaN(val) && val >= 1000 && currentProject) {
+    const val = parseInt(targetInput, 10)
+    if (!Number.isNaN(val) && val >= 1000 && currentProject) {
       try {
         await statsApi.updateTargetWords(currentProject, val)
         reloadStats()
@@ -77,7 +78,7 @@ export function Sidebar() {
     setTargetInput('')
   }, [targetInput, currentProject, reloadStats])
 
-  const handleResetTargetWords = useCallback(async () => {
+  const _handleResetTargetWords = useCallback(async () => {
     if (!currentProject) return
     try {
       await statsApi.resetTargetWords(currentProject)
@@ -147,6 +148,7 @@ export function Sidebar() {
             <BookOpen className="w-3.5 h-3.5" />
             {t('sidebar.outline')}
             <button
+              type="button"
               className="ml-auto flex items-center gap-1 px-1.5 py-[2px] rounded text-[var(--ink-mute)] cursor-pointer border-none bg-transparent hover:text-[var(--accent-gold)] hover:bg-[var(--accent-gold-soft-bg)] transition-colors"
               onClick={handleRefresh}
               title={t('sidebar.refreshTooltip')}
@@ -157,8 +159,12 @@ export function Sidebar() {
 
           {volumes.map((vol) => (
             <div key={vol.id}>
+              {/* biome-ignore lint/a11y/useSemanticElements: this composite row contains a separate navigation action. */}
               <div
                 className="flex items-center gap-1.5 px-3 py-1.5 text-[var(--ink)] text-lg font-display font-medium cursor-pointer select-none"
+                role="button"
+                tabIndex={0}
+                onKeyDown={activateOnKeyDown}
                 onClick={() => toggleVolume(vol.id)}
               >
                 <span
@@ -166,8 +172,12 @@ export function Sidebar() {
                 >
                   ▼
                 </span>
+                {/* biome-ignore lint/a11y/useSemanticElements: this is the separate navigation action within the composite volume row. */}
                 <span
                   className="flex-1"
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={activateOnKeyDown}
                   onClick={(e) => {
                     e.stopPropagation()
                     setActivePage('page-writing')
@@ -180,11 +190,15 @@ export function Sidebar() {
               </div>
               {!collapsedVols.has(vol.id) &&
                 vol.chapters.map((ch) => (
+                  /* biome-ignore lint/a11y/useSemanticElements: the chapter row contains a separate status-cycling action. */
                   <div
                     key={ch.id}
                     className={`flex items-center gap-1.5 px-4 pl-5 py-1 text-[13px] cursor-pointer relative transition-colors
                   ${currentChapter?.id === ch.id && activePage === 'page-writing' ? 'text-[var(--ink)] bg-[var(--canvas-elevated)]' : 'text-[var(--ink-secondary)]'}
                   hover:bg-[var(--canvas-card)]`}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={activateOnKeyDown}
                     onClick={() => {
                       setActivePage('page-writing')
                       setCurrentChapter(ch)
@@ -220,13 +234,14 @@ export function Sidebar() {
                   </div>
                 ))}
               {/* Per-volume new chapter button */}
-              <div
-                className="flex items-center gap-1.5 px-4 pl-5 py-1 text-[13px] text-[var(--accent-gold)] cursor-pointer transition-colors hover:bg-[var(--canvas-card)]"
+              <button
+                type="button"
+                className="flex w-full items-center gap-1.5 border-none bg-transparent px-4 py-1 pl-5 text-[13px] text-[var(--accent-gold)] cursor-pointer transition-colors hover:bg-[var(--canvas-card)]"
                 onClick={() => handleNewChapter(vol.id)}
               >
                 <Plus className="w-3.5 h-3.5 shrink-0" />
                 <span className="flex-1">{t('editor.newChapter')}</span>
-              </div>
+              </button>
             </div>
           ))}
         </div>
@@ -244,9 +259,10 @@ export function Sidebar() {
               const Icon = ICON_MAP[item.icon]
               if (!Icon || !item.labelKey) return null
               return (
-                <div
+                <button
+                  type="button"
                   key={item.id}
-                  className={`flex items-center gap-2 px-4 pl-5 py-1 text-[13px] cursor-pointer transition-colors relative
+                  className={`relative flex w-full items-center gap-2 border-none bg-transparent px-4 py-1 pl-5 text-[13px] cursor-pointer transition-colors
                   ${activePage === item.route ? 'text-[var(--ink)] bg-[var(--canvas-card)]' : 'text-[var(--ink-secondary)]'}
                   hover:bg-[var(--canvas-mid)] hover:text-[var(--ink)]`}
                   onClick={() => setActivePage(item.route)}
@@ -256,7 +272,7 @@ export function Sidebar() {
                   )}
                   <Icon className="w-4 h-4 shrink-0" />
                   <span className="flex-1">{t(item.labelKey)}</span>
-                </div>
+                </button>
               )
             })}
           </div>
@@ -265,8 +281,9 @@ export function Sidebar() {
         {/* About Section */}
         <div className="h-px bg-[var(--hairline)] mx-3" />
         <div className="py-3">
-          <div
-            className="px-4 pb-2 flex items-center gap-2 cursor-pointer transition-colors
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 border-none bg-transparent px-4 pb-2 text-left cursor-pointer transition-colors
             text-[var(--ink-secondary)] hover:text-[var(--ink)] hover:bg-[var(--canvas-mid)]"
             onClick={() => setActivePage('page-about')}
           >
@@ -274,7 +291,7 @@ export function Sidebar() {
               <Info className="w-4 h-4 shrink-0" />
               <span className="text-[13px]">{t('sidebar.about')}</span>
             </div>
-          </div>
+          </button>
         </div>
       </div>
       {/* end scrollable top */}
@@ -316,8 +333,9 @@ export function Sidebar() {
                         }}
                       />
                     ) : (
-                      <span
-                        className="cursor-pointer hover:text-[var(--accent-gold)] transition-colors"
+                      <button
+                        type="button"
+                        className="cursor-pointer border-none bg-transparent p-0 font-inherit text-inherit hover:text-[var(--accent-gold)] transition-colors"
                         onClick={() => {
                           setTargetInput(String(stats.targetWords))
                           setEditingTarget(true)
@@ -325,7 +343,7 @@ export function Sidebar() {
                         title={t('sidebar.clickToEditTarget')}
                       >
                         {stats.targetWords.toLocaleString()}
-                      </span>
+                      </button>
                     )}
                   </span>
                 </div>
@@ -353,21 +371,25 @@ export function Sidebar() {
             {(() => {
               const dw = stats?.dailyWords || []
               const mx = Math.max(...dw, 1)
-              return dw.map((v: number, i: number) => (
-                <div
-                  key={i}
-                  className="flex-1 rounded-[1px] relative group"
-                  style={{
-                    height: `${Math.max((v / mx) * 22, v > 0 ? 2 : 0)}px`,
-                    background: v > 0 ? 'var(--accent-gold)' : 'var(--canvas-mid)',
-                    opacity: v > 0 ? 0.55 : 0.25,
-                  }}
-                >
-                  <span className="absolute -top-3.5 left-1/2 -translate-x-1/2 text-[8px] font-mono text-[var(--ink-mute)] whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                    {v.toLocaleString()}
-                  </span>
-                </div>
-              ))
+              return dw.map((v: number, i: number) => {
+                const date = new Date()
+                date.setDate(date.getDate() - (6 - i))
+                return (
+                  <div
+                    key={`daily-word-${date.toISOString()}`}
+                    className="flex-1 rounded-[1px] relative group"
+                    style={{
+                      height: `${Math.max((v / mx) * 22, v > 0 ? 2 : 0)}px`,
+                      background: v > 0 ? 'var(--accent-gold)' : 'var(--canvas-mid)',
+                      opacity: v > 0 ? 0.55 : 0.25,
+                    }}
+                  >
+                    <span className="absolute -top-3.5 left-1/2 -translate-x-1/2 text-[8px] font-mono text-[var(--ink-mute)] whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                      {v.toLocaleString()}
+                    </span>
+                  </div>
+                )
+              })
             })()}
           </div>
           <div className="flex gap-[1.5px] mt-[2px]">
@@ -379,7 +401,10 @@ export function Sidebar() {
                 const d = new Date(today)
                 d.setDate(d.getDate() - (6 - i))
                 return (
-                  <div key={i} className="flex-1 text-center text-[7px] text-[var(--ink-mute)] leading-none">
+                  <div
+                    key={`daily-label-${d.toISOString()}`}
+                    className="flex-1 text-center text-[7px] text-[var(--ink-mute)] leading-none"
+                  >
                     {days[d.getDay()].slice(0, 2)}
                   </div>
                 )
@@ -429,9 +454,13 @@ function StatusBadge({
   }
   const c = colorMap[status] || colorMap.pending
   return (
+    /* biome-ignore lint/a11y/useSemanticElements: this status action is nested in an interactive chapter row. */
     <span
       className={`text-[10px] font-medium px-[7px] py-[1px] rounded-full font-sans shrink-0 inline-flex items-center gap-1 ${onCycle ? 'cursor-pointer hover:brightness-110' : ''}`}
       style={{ background: c.bg, color: c.text }}
+      role="button"
+      tabIndex={onCycle ? 0 : -1}
+      onKeyDown={activateOnKeyDown}
       onClick={(e) => {
         if (onCycle) {
           e.stopPropagation()
@@ -440,7 +469,7 @@ function StatusBadge({
       }}
       title={
         onCycle
-          ? translate('sidebar.switchToStatus', { status: translate('status.' + (NEXT_STATUS[status] || 'writing')) })
+          ? translate('sidebar.switchToStatus', { status: translate(`status.${NEXT_STATUS[status] || 'writing'}`) })
           : undefined
       }
     >

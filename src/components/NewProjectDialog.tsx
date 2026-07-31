@@ -63,13 +63,17 @@ export function NewProjectDialog() {
     'px-[14px] h-[30px] rounded-full border-none font-sans text-[13px] cursor-pointer bg-[var(--canvas-mid)] text-[var(--ink-secondary)] hover:bg-[var(--canvas-pop)] transition-all'
 
   return (
-    <div
-      className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]"
-      onClick={() => setProjectDialogOpen(false)}
-    >
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]" role="presentation">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default border-none bg-transparent p-0"
+        aria-label={t('project.cancel')}
+        onClick={() => setProjectDialogOpen(false)}
+      />
       <div
-        className="bg-[var(--canvas-card)] border border-[var(--hairline-light)] rounded-xl p-8 w-[520px] max-w-[90vw] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+        className="relative z-10 bg-[var(--canvas-card)] border border-[var(--hairline-light)] rounded-xl p-8 w-[520px] max-w-[90vw] shadow-2xl"
+        role="dialog"
+        aria-modal="true"
       >
         <h2 className="font-display text-[28px] font-semibold leading-[1.3] mb-1">{t('project.new')}</h2>
         <p className="text-[var(--ink-tertiary)] text-[13px] mb-6">{t('project.subtitle')}</p>
@@ -82,10 +86,14 @@ export function NewProjectDialog() {
         )}
 
         <div className="mb-5">
-          <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5">
+          <label
+            htmlFor="project-name"
+            className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5"
+          >
             {t('project.nameLabel')}
           </label>
           <input
+            id="project-name"
             type="text"
             className="w-full h-9 bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-lg px-3 font-sans text-[15px] text-[var(--ink)] outline-none transition-colors focus:border-[var(--accent-gold)] focus:shadow-[0_0_0_2px_rgba(201,169,110,0.2)]"
             placeholder={t('project.namePlaceholder')}
@@ -95,12 +103,13 @@ export function NewProjectDialog() {
         </div>
 
         <div className="mb-5">
-          <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5">
+          <div className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5">
             {t('project.genresLabel')}
-          </label>
+          </div>
           <div className="flex flex-wrap gap-2">
             {GENRES.map((g) => (
               <button
+                type="button"
                 key={g.key}
                 className={selectedGenres.includes(g.key) ? activeBtn : inactiveBtn}
                 onClick={() => toggleGenre(g.key)}
@@ -112,12 +121,17 @@ export function NewProjectDialog() {
         </div>
 
         <div className="mb-5">
-          <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5">
+          <div className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5">
             {t('project.modeLabel')}
-          </label>
+          </div>
           <div className="flex gap-2">
             {MODES.map((m) => (
-              <button key={m.key} className={mode === m.key ? activeBtn : inactiveBtn} onClick={() => setMode(m.key)}>
+              <button
+                type="button"
+                key={m.key}
+                className={mode === m.key ? activeBtn : inactiveBtn}
+                onClick={() => setMode(m.key)}
+              >
                 {t(m.labelKey)}
               </button>
             ))}
@@ -125,12 +139,13 @@ export function NewProjectDialog() {
         </div>
 
         <div className="mb-5">
-          <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5">
+          <div className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1.5">
             {t('project.languageLabel')}
-          </label>
+          </div>
           <div className="flex gap-2">
             {LANGUAGES.map((l) => (
               <button
+                type="button"
                 key={l.key}
                 className={language === l.key ? activeBtn : inactiveBtn}
                 onClick={() => setLanguage(l.key)}
@@ -143,12 +158,14 @@ export function NewProjectDialog() {
 
         <div className="flex gap-2 justify-end mt-6 pt-4 border-t border-[var(--hairline)]">
           <button
+            type="button"
             className="h-[34px] px-5 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] text-[var(--ink)] text-[13px] cursor-pointer transition-colors hover:bg-[var(--canvas-mid)]"
             onClick={() => setProjectDialogOpen(false)}
           >
             {t('project.cancel')}
           </button>
           <button
+            type="button"
             className="h-[34px] px-5 rounded-lg border-none bg-[var(--accent-gold)] text-[var(--canvas)] font-medium text-[13px] cursor-pointer transition-colors hover:bg-[var(--accent-gold-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
             onClick={handleCreate}
             disabled={loading || !name.trim()}

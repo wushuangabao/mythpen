@@ -54,7 +54,7 @@ export function Consistency() {
 
       setIssues(found)
       setStats({ passed: Math.max(0, chapters?.length - found.length), conflicts, warnings, sciErrors: 0 })
-    } catch (e) {}
+    } catch (_e) {}
     setLoading(false)
   }, [project, t])
 
@@ -115,6 +115,7 @@ export function Consistency() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-secondary"
             style={{ height: 30, padding: '0 14px' }}
             onClick={runCheck}
@@ -123,6 +124,7 @@ export function Consistency() {
             {loading ? t('consistency.checking') : t('pages.quickScan')}
           </button>
           <button
+            type="button"
             className="btn-primary flex items-center gap-1.5"
             style={{ height: 30, padding: '0 14px' }}
             onClick={handleDeepCheck}
@@ -152,8 +154,11 @@ export function Consistency() {
           </div>
         ) : (
           <div style={{ maxWidth: 680 }}>
-            {issues.map((issue, i) => (
-              <div key={i} className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-lg p-3 mb-2.5">
+            {issues.map((issue) => (
+              <div
+                key={`${issue.loc || ''}-${issue.tag}-${issue.title}`}
+                className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-lg p-3 mb-2.5"
+              >
                 <div className="flex gap-1.5 items-start">
                   <span
                     className={`text-[9px] px-[5px] py-[1px] rounded-full shrink-0 mt-[1px]

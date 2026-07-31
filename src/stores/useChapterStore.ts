@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { t } from '@/i18n'
-import { chaptersApi, statsApi, volumesApi } from '@/lib/api'
+import { chaptersApi, volumesApi } from '@/lib/api'
 import { useProjectStore } from '@/stores/useProjectStore'
 
 interface Chapter {
@@ -107,7 +107,7 @@ export const useChapterStore = create<ChapterState>((set) => ({
     try {
       const ch = await chaptersApi.get(project, num, volumeId)
       if (ch) {
-        set((s) => {
+        set((_s) => {
           const chapter = {
             id: ch.id,
             volumeId: ch.volume_id,

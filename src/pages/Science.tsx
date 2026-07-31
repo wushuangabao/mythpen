@@ -6,7 +6,7 @@ import { useT } from '@/hooks/useT'
 import { scienceApi } from '@/lib/api'
 import { useProjectName, useScienceEntries } from '@/lib/useProjectData'
 
-const FILTERS = ['all', 'known', 'extrapolation', 'hypothesis']
+const _FILTERS = ['all', 'known', 'extrapolation', 'hypothesis']
 
 export function Science() {
   const { data: entries, loading, reload } = useScienceEntries()
@@ -33,7 +33,12 @@ export function Science() {
           <FlaskConical className="w-5 h-5" /> {t('pages.scienceSettings')}
         </h2>
         <div className="page-header-actions">
-          <button className="btn-primary" style={{ height: 30, padding: '0 14px' }} onClick={() => setShowCreate(true)}>
+          <button
+            type="button"
+            className="btn-primary"
+            style={{ height: 30, padding: '0 14px' }}
+            onClick={() => setShowCreate(true)}
+          >
             + {t('pages.newSetting')}
           </button>
           <select

@@ -92,7 +92,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       merged.apiKeyOpenai = get().settings.apiKeyOpenai || DEFAULT_SETTINGS.apiKeyOpenai
       localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
       set({ settings: merged })
-    } catch (e) {
+    } catch (_e) {
       // server not reachable, keep local defaults
     }
   },

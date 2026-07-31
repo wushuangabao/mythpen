@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProjectStore } from '@/stores/useProjectStore'
 import type {
   Chapter,
@@ -29,30 +29,39 @@ import {
 // ─── Generic fetch hook ───
 function useApiData<T>(
   fetcher: () => Promise<T>,
-  deps: unknown[] = [],
+  dependencyKey: string,
 ): { data: T | null; loading: boolean; error: string | null; reload: () => void } {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const load = useCallback(async () => {
+  const fetcherRef = useRef(fetcher)
+  const activeDependencyKeyRef = useRef(dependencyKey)
+  fetcherRef.current = fetcher
+
+  const load = useCallback(async (requestDependencyKey: string) => {
+    activeDependencyKeyRef.current = requestDependencyKey
     setLoading(true)
     setError(null)
     try {
-      const result = await fetcher()
-      setData(result)
+      const result = await fetcherRef.current()
+      if (activeDependencyKeyRef.current === requestDependencyKey) setData(result)
     } catch (e) {
-      setError((e as Error).message)
+      if (activeDependencyKeyRef.current === requestDependencyKey) setError((e as Error).message)
     } finally {
-      setLoading(false)
+      if (activeDependencyKeyRef.current === requestDependencyKey) setLoading(false)
     }
-  }, deps)
+  }, [])
 
   useEffect(() => {
-    load()
-  }, [load])
+    void load(dependencyKey)
+  }, [dependencyKey, load])
 
-  return { data, loading, error, reload: load }
+  const reload = useCallback(() => {
+    void load(dependencyKey)
+  }, [dependencyKey, load])
+
+  return { data, loading, error, reload }
 }
 
 // ─── Project-specific hooks ───
@@ -80,7 +89,7 @@ export function useChapters(): { chapters: Chapter[]; loading: boolean } {
 
 export function useVolumes(): { data: Volume[] | null; loading: boolean; error: string | null; reload: () => void } {
   const project = useProjectName()
-  return useApiData<Volume[]>(() => volumesApi.list(project), [project])
+  return useApiData<Volume[]>(() => volumesApi.list(project), project)
 }
 
 export function useCharacters(): {
@@ -90,7 +99,7 @@ export function useCharacters(): {
   reload: () => void
 } {
   const project = useProjectName()
-  return useApiData<Character[]>(() => charactersApi.list(project), [project])
+  return useApiData<Character[]>(() => charactersApi.list(project), project)
 }
 
 export function useWorldEntries(): {
@@ -100,7 +109,7 @@ export function useWorldEntries(): {
   reload: () => void
 } {
   const project = useProjectName()
-  return useApiData<WorldEntry[]>(() => worldApi.list(project), [project])
+  return useApiData<WorldEntry[]>(() => worldApi.list(project), project)
 }
 
 export function useScienceEntries(): {
@@ -110,7 +119,7 @@ export function useScienceEntries(): {
   reload: () => void
 } {
   const project = useProjectName()
-  return useApiData<ScienceEntry[]>(() => scienceApi.list(project), [project])
+  return useApiData<ScienceEntry[]>(() => scienceApi.list(project), project)
 }
 
 export function useForeshadows(status?: string): {
@@ -120,7 +129,7 @@ export function useForeshadows(status?: string): {
   reload: () => void
 } {
   const project = useProjectName()
-  return useApiData<Foreshadow[]>(() => foreshadowsApi.list(project, status), [project, status])
+  return useApiData<Foreshadow[]>(() => foreshadowsApi.list(project, status), JSON.stringify([project, status]))
 }
 
 export function useRelations(): {
@@ -130,12 +139,12 @@ export function useRelations(): {
   reload: () => void
 } {
   const project = useProjectName()
-  return useApiData<CharacterRelation[]>(() => relationsApi.list(project), [project])
+  return useApiData<CharacterRelation[]>(() => relationsApi.list(project), project)
 }
 
 export function useMemories(): { data: Memory[] | null; loading: boolean; error: string | null; reload: () => void } {
   const project = useProjectName()
-  return useApiData<Memory[]>(() => memoriesApi.list(project), [project])
+  return useApiData<Memory[]>(() => memoriesApi.list(project), project)
 }
 
 export function useTimelineEvents(): {
@@ -145,20 +154,20 @@ export function useTimelineEvents(): {
   reload: () => void
 } {
   const project = useProjectName()
-  return useApiData<TimelineEvent[]>(() => timelineApi.list(project), [project])
+  return useApiData<TimelineEvent[]>(() => timelineApi.list(project), project)
 }
 
 export function useStats(): { data: ProjectStats | null; loading: boolean; error: string | null; reload: () => void } {
   const project = useProjectName()
-  return useApiData<ProjectStats>(() => statsApi.get(project), [project])
+  return useApiData<ProjectStats>(() => statsApi.get(project), project)
 }
 
 export function useSettings() {
-  return useApiData(() => settingsApi.get(), [])
+  return useApiData(() => settingsApi.get(), 'settings')
 }
 
 // ─── Chapter content ───
 export function useChapterContent(num: number) {
   const project = useProjectName()
-  return useApiData(() => chaptersApi.get(project, num), [project, num])
+  return useApiData(() => chaptersApi.get(project, num), JSON.stringify([project, num]))
 }

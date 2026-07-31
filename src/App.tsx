@@ -60,7 +60,7 @@ function App() {
   useEffect(() => {
     loadProjects()
     loadSettings()
-  }, [])
+  }, [loadSettings, loadProjects])
 
   // Global keyboard shortcut: ⌘⇧R / Ctrl+Shift+R — manual refresh
   useEffect(() => {
@@ -74,20 +74,20 @@ function App() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentProject])
+  }, [currentProject, showToast])
 
   // Reload chapters when project changes
   useEffect(() => {
     if (currentProject) {
       loadChapters(currentProject)
     }
-  }, [currentProject])
+  }, [currentProject, loadChapters])
 
   // Restore right panel width from localStorage
   useEffect(() => {
     const saved = localStorage.getItem('mythpen-right-panel-width')
     if (saved) setRightPanelWidth(Number(saved))
-  }, [])
+  }, [setRightPanelWidth])
 
   return (
     <>

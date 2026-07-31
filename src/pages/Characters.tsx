@@ -40,7 +40,12 @@ export function Characters() {
           <Users className="w-5 h-5" /> {t('pages.characters')}
         </h2>
         <div className="page-header-actions">
-          <button className="btn-primary" style={{ height: 30, padding: '0 14px' }} onClick={() => setShowCreate(true)}>
+          <button
+            type="button"
+            className="btn-primary"
+            style={{ height: 30, padding: '0 14px' }}
+            onClick={() => setShowCreate(true)}
+          >
             + {t('pages.newCharacter')}
           </button>
         </div>
@@ -90,9 +95,10 @@ export function Characters() {
       <div className="flex flex-1 min-h-0">
         <div className="w-[240px] shrink-0 border-r border-[var(--hairline)] overflow-y-auto py-3 custom-scrollbar">
           {(characters || []).map((c, idx) => (
-            <div
+            <button
+              type="button"
               key={c.id}
-              className={`flex items-center gap-2.5 px-4 py-2 cursor-pointer transition-colors
+              className={`flex w-full items-center gap-2.5 border-none bg-transparent px-4 py-2 text-left cursor-pointer transition-colors
                 ${selected?.id === c.id ? 'bg-[var(--accent-gold-soft-bg)] border-l-2 border-[var(--accent-gold)]' : 'hover:bg-[var(--canvas-card)]'}`}
               onClick={() => setSelected(c)}
             >
@@ -121,7 +127,7 @@ export function Characters() {
                   {(c.chapterCount ?? 0) > 0 && ` · ${c.chapterCount}${t('characters.chapterAppearances')}`}
                 </div>
               </div>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -180,9 +186,9 @@ export function Characters() {
 function FormField({ label, children, full }: { label: string; children: React.ReactNode; full?: boolean }) {
   return (
     <div className={full ? 'flex-1' : ''}>
-      <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1">
+      <div className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1">
         {label}
-      </label>
+      </div>
       {children}
     </div>
   )

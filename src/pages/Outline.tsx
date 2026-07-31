@@ -1,5 +1,5 @@
 import { Check, Loader, Pen, Plus, Save, ScrollText, Sparkles } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { useT } from '@/hooks/useT'
 import { aiApi, extractAIJsonObject, getAIResponseText } from '@/lib/api'
 import { useChapterStore } from '@/stores/useChapterStore'
@@ -32,7 +32,7 @@ export function Outline() {
     if (!activeChapterId || !volumes.flatMap((v) => v.chapters).find((c) => c.id === activeChapterId)) {
       setActiveChapterId(first)
     }
-  }, [volumes])
+  }, [volumes, activeChapterId])
 
   // Sync local state when switching chapters or when volumes reload
   useEffect(() => {
@@ -47,7 +47,7 @@ export function Outline() {
       })
       setAiSuggestion('')
     }
-  }, [activeChapterId, activeChapter?.outline, activeChapter?.cognitiveFrame])
+  }, [activeChapter?.outline, activeChapter?.cognitiveFrame, activeChapter])
 
   const handleSaveOutline = async () => {
     if (!currentProject || !activeChapter) return
@@ -199,6 +199,7 @@ export function Outline() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-primary flex items-center gap-1.5"
             style={{ height: 30, padding: '0 14px', minWidth: 110 }}
             onClick={handleGenerateOutline}
@@ -216,8 +217,9 @@ export function Outline() {
             const collapsed = collapsedVolumes.has(vol.id)
             return (
               <div key={vol.id}>
-                <div
-                  className="px-4 pb-2 pt-1 font-display text-sm font-medium text-[var(--ink)] flex items-center gap-1 cursor-pointer select-none hover:opacity-80 transition-opacity"
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1 border-none bg-transparent px-4 pb-2 pt-1 font-display text-sm font-medium text-[var(--ink)] cursor-pointer select-none hover:opacity-80 transition-opacity"
                   onClick={() => toggleVolumeCollapse(vol.id)}
                 >
                   <span
@@ -232,13 +234,14 @@ export function Outline() {
                   <span className="text-[10px] text-[var(--ink-tertiary)] ml-auto">
                     {t('outline.chapterCount', { n: vol.chapters.length })}
                   </span>
-                </div>
+                </button>
                 {!collapsed && (
                   <>
                     {vol.chapters.map((ch) => (
-                      <div
+                      <button
+                        type="button"
                         key={ch.id}
-                        className={`p-3 mx-3 mb-1.5 rounded-lg border cursor-pointer transition-colors
+                        className={`mx-3 mb-1.5 block w-[calc(100%_-_1.5rem)] rounded-lg border p-3 text-left cursor-pointer transition-colors
                           ${
                             activeChapterId === ch.id
                               ? 'bg-[var(--accent-gold-soft-bg)] border-[var(--accent-gold)]'
@@ -266,16 +269,17 @@ export function Outline() {
                             : t('sidebar.chapterTitle', { num: ch.num, title: ch.title })}
                         </div>
                         <div className="text-[12px] text-[var(--ink-tertiary)] mt-1 line-clamp-2">{ch.outline}</div>
-                      </div>
+                      </button>
                     ))}
                     {/* Per-volume new chapter */}
-                    <div
-                      className="flex items-center gap-1 mx-3 mb-2 px-3 py-1.5 rounded-lg text-[12px] text-[var(--accent-gold)] cursor-pointer transition-colors hover:bg-[var(--canvas-card)]"
+                    <button
+                      type="button"
+                      className="mx-3 mb-2 flex w-[calc(100%_-_1.5rem)] items-center gap-1 rounded-lg border-none bg-transparent px-3 py-1.5 text-[12px] text-[var(--accent-gold)] cursor-pointer transition-colors hover:bg-[var(--canvas-card)]"
                       onClick={() => handleNewChapter(vol.id)}
                     >
                       <Plus className="w-3 h-3" />
                       {t('pages.newChapter')}
-                    </div>
+                    </button>
                   </>
                 )}
               </div>
@@ -320,10 +324,14 @@ export function Outline() {
               </div>
 
               <div className="mb-3">
-                <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1">
+                <label
+                  htmlFor="outline-overview"
+                  className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1"
+                >
                   {t('pages.outlineOverview')}
                 </label>
                 <textarea
+                  id="outline-overview"
                   rows={3}
                   className="w-full bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-[var(--radius-sm)] p-2.5 font-sans text-[13px] text-[var(--ink)] outline-none resize-vertical focus:border-[var(--accent-gold)]"
                   value={outlineText}
@@ -379,6 +387,7 @@ export function Outline() {
 
               <div className="flex gap-2 mt-5">
                 <button
+                  type="button"
                   className="btn-primary flex items-center gap-1.5"
                   style={{ height: 30, padding: '0 16px', minWidth: 110 }}
                   onClick={handleSaveOutline}
@@ -387,6 +396,7 @@ export function Outline() {
                   <Save className="w-3.5 h-3.5" /> {saving ? t('common.saving') : t('pages.outlineSave')}
                 </button>
                 <button
+                  type="button"
                   className="btn-secondary flex items-center gap-1.5"
                   style={{ height: 30, padding: '0 16px', minWidth: 135 }}
                   onClick={handleAIOptimize}
@@ -421,12 +431,17 @@ function FiveDimField({
   onChange: (v: string) => void
   placeholder?: string
 }) {
+  const fieldId = useId()
   return (
     <div>
-      <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1">
+      <label
+        htmlFor={fieldId}
+        className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1"
+      >
         {label}
       </label>
       <textarea
+        id={fieldId}
         rows={2}
         className="w-full bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-[var(--radius-sm)] p-2 font-sans text-[13px] text-[var(--ink)] outline-none resize-vertical min-h-[50px] focus:border-[var(--accent-gold)]"
         value={value}

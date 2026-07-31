@@ -1,5 +1,5 @@
 // Auto-refresh hook — subscribe to data change events and re-fetch.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type EntityType, onDataChanged, refreshAllData } from '@/lib/dataEvents'
 
 /**
@@ -26,23 +26,24 @@ import { type EntityType, onDataChanged, refreshAllData } from '@/lib/dataEvents
 export function useDataRefresh(
   entity: EntityType | EntityType[],
   refresher: () => void,
-  deps: React.DependencyList = [],
+  _deps: React.DependencyList = [],
 ): { refresh: () => void; refreshing: boolean } {
   const refresherRef = useRef(refresher)
   refresherRef.current = refresher
 
   const [refreshing, setRefreshing] = useState(false)
-  const entities = Array.isArray(entity) ? entity : [entity]
+  const entityKey = Array.isArray(entity) ? entity.join(',') : entity
+  const entities = useMemo(() => new Set(entityKey.split(',') as EntityType[]), [entityKey])
 
   // Auto-subscribe to data change events
   useEffect(() => {
     const unsub = onDataChanged((event) => {
-      if (event.entity === 'all' || entities.includes(event.entity)) {
+      if (event.entity === 'all' || entities.has(event.entity)) {
         refresherRef.current()
       }
     })
     return unsub
-  }, [entities.join(',')])
+  }, [entities])
 
   // Manual refresh trigger
   const refresh = useCallback(() => {

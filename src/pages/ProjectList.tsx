@@ -2,6 +2,7 @@ import { BookOpen, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { useT } from '@/hooks/useT'
+import { activateOnKeyDown } from '@/lib/a11y'
 import { useProjectStore } from '@/stores/useProjectStore'
 import { useUIStore } from '@/stores/useUIStore'
 
@@ -9,7 +10,7 @@ function formatDate(dateStr: string): string {
   if (!dateStr) return ''
   try {
     const d = new Date(dateStr)
-    if (isNaN(d.getTime())) return dateStr
+    if (Number.isNaN(d.getTime())) return dateStr
     const pad = (n: number) => n.toString().padStart(2, '0')
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   } catch {
@@ -45,7 +46,7 @@ export function ProjectList() {
                 {t('project.total', { count: projects.length, words: totalWords.toLocaleString() })}
               </div>
             </div>
-            <button className="btn-primary h-[34px] px-5" onClick={() => setProjectDialogOpen(true)}>
+            <button type="button" className="btn-primary h-[34px] px-5" onClick={() => setProjectDialogOpen(true)}>
               + {t('project.new')}
             </button>
           </div>
@@ -65,13 +66,18 @@ export function ProjectList() {
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-4">
               {projects.map((p) => (
+                /* biome-ignore lint/a11y/useSemanticElements: the project card contains a separate delete button. */
                 <div
                   key={p.id}
                   className="group relative bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-lg p-5 cursor-pointer transition-all hover:border-[var(--hairline-light)] hover:bg-[var(--canvas-elevated)] hover:-translate-y-px"
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={activateOnKeyDown}
                   onClick={() => setCurrentProject(p.name)}
                 >
                   {/* Delete button — visible on hover */}
                   <button
+                    type="button"
                     className="absolute top-3 right-3 w-7 h-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 hover:bg-[var(--canvas-mid)] text-[var(--ink-tertiary)] hover:text-red-500 transition-all"
                     onClick={(e) => {
                       e.stopPropagation()
@@ -112,13 +118,14 @@ export function ProjectList() {
               ))}
 
               {/* New project card */}
-              <div
-                className="border border-dashed border-[var(--hairline-light)] rounded-lg flex items-center justify-center min-h-[160px] text-[var(--ink-tertiary)] text-[13px] gap-1.5 flex-col cursor-pointer hover:border-[var(--accent-gold)] hover:text-[var(--accent-gold)] hover:bg-[var(--canvas-card)] transition-colors"
+              <button
+                type="button"
+                className="flex min-h-[160px] items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--hairline-light)] bg-transparent text-[13px] text-[var(--ink-tertiary)] cursor-pointer flex-col transition-colors hover:border-[var(--accent-gold)] hover:text-[var(--accent-gold)] hover:bg-[var(--canvas-card)]"
                 onClick={() => setProjectDialogOpen(true)}
               >
                 <span className="text-[28px] leading-none">+</span>
                 <span>{t('project.new')}</span>
-              </div>
+              </button>
             </div>
           )}
         </div>
@@ -126,17 +133,22 @@ export function ProjectList() {
 
       {/* Delete confirmation dialog */}
       {deleteTarget && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          onClick={() => setDeleteTarget(null)}
-        >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" role="presentation">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default border-none bg-transparent p-0"
+            aria-label={t('project.cancel')}
+            onClick={() => setDeleteTarget(null)}
+          />
           <div
-            className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-xl w-[400px] p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
+            className="relative z-10 bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-xl w-[400px] p-6 shadow-xl"
+            role="dialog"
+            aria-modal="true"
           >
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-display text-lg font-semibold text-[var(--ink)]">{t('project.deleteTooltip')}</h2>
               <button
+                type="button"
                 className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-[var(--canvas-mid)] text-[var(--ink-tertiary)]"
                 onClick={() => setDeleteTarget(null)}
               >
@@ -149,10 +161,11 @@ export function ProjectList() {
               {t('project.permanentDelete')}
             </p>
             <div className="flex justify-end gap-2">
-              <button className="btn-secondary h-[34px] px-4" onClick={() => setDeleteTarget(null)}>
+              <button type="button" className="btn-secondary h-[34px] px-4" onClick={() => setDeleteTarget(null)}>
                 {t('project.cancel')}
               </button>
               <button
+                type="button"
                 className="btn-primary h-[34px] px-4 !bg-red-600 !border-red-600 hover:!bg-red-700"
                 onClick={handleDelete}
               >

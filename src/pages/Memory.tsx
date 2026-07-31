@@ -1,5 +1,5 @@
 import { Brain, Loader, Search, Sparkles, X } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useDataRefresh } from '@/hooks/useDataRefresh'
 import { useT } from '@/hooks/useT'
 import { aiApi, extractAIJsonArray, getAIResponseText, memoriesApi } from '@/lib/api'
@@ -27,6 +27,7 @@ export function Memory() {
   const { t } = useT()
   const project = useProjectName()
   const [searchMode, setSearchMode] = useState(false)
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<any[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -49,6 +50,10 @@ export function Memory() {
     setSearchQuery('')
     setSearchResults(null)
   }
+
+  useEffect(() => {
+    if (searchMode) searchInputRef.current?.focus()
+  }, [searchMode])
 
   const handleExtract = async () => {
     if (!project) return
@@ -96,6 +101,7 @@ export function Memory() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-secondary flex items-center gap-1.5"
             style={{ height: 30, padding: '0 14px' }}
             onClick={() => setSearchMode(!searchMode)}
@@ -103,6 +109,7 @@ export function Memory() {
             <Search className="w-3.5 h-3.5" /> {t('pages.semanticSearch')}
           </button>
           <button
+            type="button"
             className="btn-primary flex items-center gap-1.5"
             style={{ height: 30, padding: '0 14px' }}
             onClick={handleExtract}
@@ -119,15 +126,16 @@ export function Memory() {
         <div className="px-6 py-3 border-b border-[var(--hairline)] bg-[var(--canvas-soft)]">
           <div className="flex gap-2 max-w-[500px]">
             <input
+              ref={searchInputRef}
               type="text"
               className="w-full h-8 bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-lg px-3 font-sans text-[13px] text-[var(--ink)] outline-none focus:border-[var(--accent-gold)]"
               placeholder={t('memory.searchPlaceholder')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              autoFocus
             />
             <button
+              type="button"
               className="h-8 px-4 min-w-[72px] rounded-lg bg-[var(--accent-gold)] text-[var(--canvas)] text-[12px] cursor-pointer border-none font-medium whitespace-nowrap"
               onClick={handleSearch}
               disabled={searching || !searchQuery.trim()}
@@ -135,6 +143,7 @@ export function Memory() {
               {searching ? t('common.searching') : t('common.search')}
             </button>
             <button
+              type="button"
               className="h-8 w-8 rounded-lg flex items-center justify-center border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-tertiary)] cursor-pointer hover:text-[var(--ink)]"
               onClick={handleClearSearch}
             >
@@ -147,6 +156,7 @@ export function Memory() {
                 ? t('memory.noResults')
                 : t('memory.searchResultsCount', { n: searchResults.length })}
               <button
+                type="button"
                 className="ml-2 text-[var(--accent-gold)] underline cursor-pointer bg-transparent border-none"
                 onClick={() => {
                   setSearchResults(null)

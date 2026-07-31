@@ -1,4 +1,4 @@
-import { HeartHandshake, Link2, Loader, Plus, RefreshCcw, Sparkles, Users } from 'lucide-react'
+import { HeartHandshake, Link2, Loader, RefreshCcw, Sparkles, Users } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
 import { useDataRefresh } from '@/hooks/useDataRefresh'
 import { useT } from '@/hooks/useT'
@@ -18,6 +18,7 @@ interface PositionedNode {
 }
 
 interface PositionedLink {
+  id: string
   source: string
   target: string
   type: string
@@ -92,6 +93,7 @@ function computeCircleLayout(
   const links: PositionedLink[] = relations
     .filter((r) => nodeMap.has(r.character_a_id) && nodeMap.has(r.character_b_id))
     .map((r) => ({
+      id: r.id,
       source: r.character_a_id,
       target: r.character_b_id,
       type: r.relation_type,
@@ -223,7 +225,9 @@ export function Relations() {
 
   const sortedByChapter = [...chars].sort((a, b) => (b.chapterCount || 0) - (a.chapterCount || 0))
   const relTypeCount = new Map<string, number>()
-  rels.forEach((r: any) => relTypeCount.set(r.relation_type, (relTypeCount.get(r.relation_type) || 0) + 1))
+  rels.forEach((r: any) => {
+    relTypeCount.set(r.relation_type, (relTypeCount.get(r.relation_type) || 0) + 1)
+  })
   const sortedRelTypes = [...relTypeCount.entries()].sort((a, b) => b[1] - a[1])
 
   return (
@@ -234,6 +238,7 @@ export function Relations() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-secondary flex items-center gap-1.5"
             style={{ height: 30, padding: '0 14px' }}
             onClick={handleRelayout}
@@ -246,21 +251,23 @@ export function Relations() {
         {/* Graph */}
         <div className="flex-1 flex items-center justify-center relative overflow-hidden bg-[var(--canvas)]">
           <svg
+            aria-label={t('pages.relationGraph')}
             width="100%"
             height="100%"
             viewBox="0 0 800 500"
             preserveAspectRatio="xMidYMid meet"
             style={{ maxHeight: '100%' }}
           >
+            <title>{t('pages.relationGraph')}</title>
             <defs>
-              {links.map((link, i) => {
+              {links.map((link) => {
                 const from = nodeById.get(link.source)
                 const to = nodeById.get(link.target)
                 if (!from || !to) return null
                 return (
                   <marker
-                    key={`arrow-${i}`}
-                    id={`arrow-${i}`}
+                    key={`arrow-${link.id}`}
+                    id={`arrow-${link.id}`}
                     viewBox="0 0 8 8"
                     refX="8"
                     refY="4"
@@ -275,7 +282,7 @@ export function Relations() {
             </defs>
 
             {/* Edges */}
-            {links.map((link, i) => {
+            {links.map((link) => {
               const from = nodeById.get(link.source)
               const to = nodeById.get(link.target)
               if (!from || !to) return null
@@ -283,7 +290,7 @@ export function Relations() {
               const my = (from.y + to.y) / 2 - 14
               const labelW = link.label.length * 7 + 12
               return (
-                <g key={`link-${i}`}>
+                <g key={link.id}>
                   <line
                     x1={from.x}
                     y1={from.y}
@@ -293,7 +300,7 @@ export function Relations() {
                     strokeWidth={1 + link.intensity * 0.6}
                     strokeLinecap="round"
                     strokeDasharray={link.dashed ? '6,4' : undefined}
-                    markerEnd={`url(#arrow-${i})`}
+                    markerEnd={`url(#arrow-${link.id})`}
                     opacity="0.7"
                   />
                   {/* Label background */}
@@ -406,6 +413,7 @@ export function Relations() {
           {/* AI Organize */}
           <div className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-lg p-3">
             <button
+              type="button"
               className="w-full h-[32px] rounded-lg bg-[var(--accent-gold)] text-[var(--canvas)] text-[12px] font-medium cursor-pointer border-none flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={handleOrganize}
               disabled={organizing}
@@ -428,8 +436,8 @@ export function Relations() {
             <div className="text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-2 flex items-center gap-1.5">
               <Users className="w-3 h-3" /> {t('relations.appearsIn')}
             </div>
-            {sortedByChapter.slice(0, 8).map((c: any, i) => (
-              <div key={i} className="flex justify-between items-center py-[2px] text-[12px]">
+            {sortedByChapter.slice(0, 8).map((c: any) => (
+              <div key={c.id} className="flex justify-between items-center py-[2px] text-[12px]">
                 <span className="text-[var(--ink-mute)] truncate max-w-[130px]">{c.name}</span>
                 <span className="font-mono text-[11px] text-[var(--ink-tertiary)]">{c.chapterCount || 0}章</span>
               </div>
@@ -444,8 +452,8 @@ export function Relations() {
             <div className="text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-2 flex items-center gap-1.5">
               <Link2 className="w-3 h-3" /> {t('relations.relationType')}
             </div>
-            {sortedRelTypes.map(([type, count], i) => (
-              <div key={i} className="flex justify-between items-center py-[2px] text-[12px]">
+            {sortedRelTypes.map(([type, count]) => (
+              <div key={type} className="flex justify-between items-center py-[2px] text-[12px]">
                 <span className="text-[var(--ink-mute)] truncate max-w-[130px]">{type}</span>
                 <span className="font-mono text-[11px] text-[var(--ink-tertiary)]">{count}</span>
               </div>

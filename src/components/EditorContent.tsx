@@ -7,6 +7,33 @@ import { useProjectStore } from '@/stores/useProjectStore'
 import { useSettingsStore } from '@/stores/useSettingsStore'
 import { useSidebarStore } from '@/stores/useSidebarStore'
 
+function inlineToHtml(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\*(.+?)\*/g, '<i>$1</i>')
+    .replace(/__(.+?)__/g, '<u>$1</u>')
+    .replace(/`(.+?)`/g, '<code>$1</code>')
+}
+
+function getInlineText(el: HTMLElement): string {
+  let result = ''
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      result += node.textContent
+    } else if (node instanceof HTMLElement) {
+      const tag = node.tagName.toLowerCase()
+      const inner = getInlineText(node)
+      if (tag === 'b' || tag === 'strong') result += `**${inner}**`
+      else if (tag === 'i' || tag === 'em') result += `*${inner}*`
+      else if (tag === 'u') result += `__${inner}__`
+      else if (tag === 'code') result += `\`${inner}\``
+      else if (tag === 'br') result += '\n'
+      else result += inner
+    }
+  }
+  return result
+}
+
 export function EditorContent() {
   const { fontSize, fontFamily } = useEditorStore()
   const { currentChapter, volumes, updateChapter, createChapter, setSaveStatus } = useChapterStore()
@@ -15,7 +42,7 @@ export function EditorContent() {
   const { t } = useT()
   const chapter = currentChapter
   const editorRef = useRef<HTMLDivElement>(null)
-  const titleRef = useRef<HTMLHeadingElement>(null)
+  const titleInputRef = useRef<HTMLInputElement>(null)
   const isEditingRef = useRef(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSavedContentRef = useRef('')
@@ -33,17 +60,8 @@ export function EditorContent() {
     setActivePage('page-writing')
   }
 
-  // Convert inline markers to HTML
-  function inlineToHtml(text: string): string {
-    return text
-      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-      .replace(/\*(.+?)\*/g, '<i>$1</i>')
-      .replace(/__(.+?)__/g, '<u>$1</u>')
-      .replace(/`(.+?)`/g, '<code>$1</code>')
-  }
-
   // Parse content to HTML for display
-  function renderContent(content: string | undefined) {
+  const renderContent = useCallback((content: string | undefined) => {
     if (!content) return ''
     const lines = content.split('\n').filter((l) => l.trim())
     return lines
@@ -56,10 +74,10 @@ export function EditorContent() {
         return `<p>${inlineToHtml(line)}</p>`
       })
       .join('')
-  }
+  }, [])
 
   // Extract HTML editor content back to plain text with simple formatting markers
-  function extractContent(html: string): string {
+  const extractContent = useCallback((html: string): string => {
     const div = document.createElement('div')
     div.innerHTML = html
     const lines: string[] = []
@@ -83,27 +101,7 @@ export function EditorContent() {
       if (text) lines.push(text)
     }
     return lines.join('\n')
-  }
-
-  // Serialize inline formatting to simple markers
-  function getInlineText(el: HTMLElement): string {
-    let result = ''
-    for (const node of el.childNodes) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        result += node.textContent
-      } else if (node instanceof HTMLElement) {
-        const tag = node.tagName.toLowerCase()
-        const inner = getInlineText(node)
-        if (tag === 'b' || tag === 'strong') result += `**${inner}**`
-        else if (tag === 'i' || tag === 'em') result += `*${inner}*`
-        else if (tag === 'u') result += `__${inner}__`
-        else if (tag === 'code') result += `\`${inner}\``
-        else if (tag === 'br') result += '\n'
-        else result += inner
-      }
-    }
-    return result
-  }
+  }, [])
 
   // Persist editor content to server — capture snapshot before any async gap
   const doSave = useCallback(async () => {
@@ -134,7 +132,7 @@ export function EditorContent() {
       setSaveStatus('saved')
     }
     setIsDirty(false)
-  }, [updateChapter, setSaveStatus]) // no longer depends on chapter/currentProject
+  }, [updateChapter, setSaveStatus, extractContent]) // no longer depends on chapter/currentProject
 
   // Debounced auto-save — reads autoSaveInterval from settings
   const doSaveRef = useRef(doSave)
@@ -163,7 +161,7 @@ export function EditorContent() {
       editorRef.current.setAttribute('data-placeholder', t('editor.startWriting'))
     }
     lastSavedContentRef.current = chapter.content || ''
-  }, [chapter])
+  }, [chapter, t, renderContent])
 
   // Watch chapter changes (switching chapters) and external content updates (AI generation)
   useEffect(() => {
@@ -184,7 +182,11 @@ export function EditorContent() {
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     }
-  }, [chapter?.id, chapter?.num, syncContent])
+  }, [
+    syncContent,
+    chapter?.content, // Empty chapter with no saves yet
+    setSaveStatus,
+  ])
 
   // Mark unsaved when user starts editing
   useEffect(() => {
@@ -215,7 +217,7 @@ export function EditorContent() {
       const timer = setTimeout(() => editorRef.current?.focus(), 100)
       return () => clearTimeout(timer)
     }
-  }, [chapter?.id, activePage])
+  }, [chapter?.id, activePage, chapter])
 
   const handleFocus = useCallback(() => {
     isEditingRef.current = true
@@ -226,6 +228,10 @@ export function EditorContent() {
     setEditingTitle(true)
     setTitleDraft(chapter?.title || '')
   }, [chapter?.title])
+
+  useEffect(() => {
+    if (editingTitle) titleInputRef.current?.focus()
+  }, [editingTitle])
 
   const handleTitleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setTitleDraft(e.target.value)
@@ -257,24 +263,25 @@ export function EditorContent() {
           <>
             {editingTitle ? (
               <input
+                ref={titleInputRef}
                 className="font-display text-[36px] font-semibold leading-[1.25] tracking-[-0.01em] mb-[1.5em] w-full bg-transparent border-none outline-none text-[var(--ink)]"
                 style={{ fontFamily }}
                 value={titleDraft}
                 onChange={handleTitleChange}
                 onBlur={handleTitleSave}
                 onKeyDown={handleTitleKeyDown}
-                autoFocus
               />
             ) : (
-              <h1
-                ref={titleRef}
-                className="font-display text-[36px] font-semibold leading-[1.25] tracking-[-0.01em] mb-[1.5em] cursor-pointer hover:text-[var(--accent-gold)] transition-colors"
+              <button
+                type="button"
+                className="font-display text-left text-[36px] font-semibold leading-[1.25] tracking-[-0.01em] mb-[1.5em] cursor-pointer border-none bg-transparent p-0 text-[var(--ink)] hover:text-[var(--accent-gold)] transition-colors"
                 onClick={handleTitleClick}
                 title={t('editor.clickToEditTitle')}
               >
                 {t('sidebar.chapterTitle', { num: chapter.num, title: chapter.title })}
-              </h1>
+              </button>
             )}
+            {/* biome-ignore lint/a11y/noStaticElementInteractions: contentEditable is the rich text editor control. */}
             <div
               ref={editorRef}
               className="editor-body outline-none cursor-text"
@@ -291,6 +298,7 @@ export function EditorContent() {
               {hasChapters ? t('editor.chooseChapter') : t('editor.noChaptersYet')}
             </p>
             <button
+              type="button"
               className="h-[36px] px-6 rounded-lg border-none bg-[var(--accent-gold)] text-[var(--canvas)] font-medium text-[14px] cursor-pointer transition-colors hover:bg-[var(--accent-gold-soft)]"
               onClick={handleNewChapter}
             >

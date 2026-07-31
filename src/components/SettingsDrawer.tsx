@@ -12,7 +12,7 @@ const ACCENT_COLORS = ['#c9a96e', '#e06c75', '#61afef', '#98c379', '#c678dd', '#
 function applyAccentColor(color: string) {
   document.documentElement.style.setProperty('--accent-gold', color)
   // The soft variant: lighten by adjusting transparency
-  document.documentElement.style.setProperty('--accent-gold-soft', color + 'cc')
+  document.documentElement.style.setProperty('--accent-gold-soft', `${color}cc`)
 }
 
 export function SettingsDrawer() {
@@ -102,12 +102,18 @@ export function SettingsDrawer() {
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/50 z-[200]" onClick={closeSettings} />
+      <button
+        type="button"
+        className="fixed inset-0 bg-black/50 z-[200]"
+        aria-label={t('project.cancel')}
+        onClick={closeSettings}
+      />
       <div className="fixed top-0 right-0 bottom-0 w-[380px] bg-[var(--canvas-card)] border-l border-[var(--hairline-light)] z-[210] flex flex-col shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--hairline)] shrink-0">
           <h2 className="font-display text-[22px] font-medium text-[var(--ink)]">{t('settings.title')}</h2>
           <button
+            type="button"
             className="w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] border-none bg-none text-[var(--ink-tertiary)] text-xl cursor-pointer hover:bg-[var(--canvas-mid)] hover:text-[var(--ink)] transition-colors"
             onClick={closeSettings}
           >
@@ -125,6 +131,7 @@ export function SettingsDrawer() {
             <SettingRow label={t('settings.uiLanguage')} desc={t('settings.uiLanguageDesc')}>
               <div className="flex gap-1">
                 <button
+                  type="button"
                   className={`px-3 py-[5px] rounded-[var(--radius-sm)] border border-[var(--hairline)] text-[13px] cursor-pointer transition-colors
                     ${settings.uiLanguage === 'zh' ? 'bg-[var(--accent-gold)] text-[var(--canvas)] border-[var(--accent-gold)] font-medium' : 'bg-[var(--canvas-elevated)] text-[var(--ink-secondary)] hover:bg-[var(--canvas-mid)]'}`}
                   onClick={() => updateSetting('uiLanguage', 'zh')}
@@ -132,6 +139,7 @@ export function SettingsDrawer() {
                   {t('project.chinese')}
                 </button>
                 <button
+                  type="button"
                   className={`px-3 py-[5px] rounded-[var(--radius-sm)] border border-[var(--hairline)] text-[13px] cursor-pointer transition-colors
                     ${settings.uiLanguage === 'en' ? 'bg-[var(--accent-gold)] text-[var(--canvas)] border-[var(--accent-gold)] font-medium' : 'bg-[var(--canvas-elevated)] text-[var(--ink-secondary)] hover:bg-[var(--canvas-mid)]'}`}
                   onClick={() => updateSetting('uiLanguage', 'en')}
@@ -149,9 +157,10 @@ export function SettingsDrawer() {
             </div>
             <div className="flex gap-3">
               {(['dark', 'light'] as const).map((themeVal) => (
-                <div
+                <button
+                  type="button"
                   key={themeVal}
-                  className="text-center cursor-pointer"
+                  className="cursor-pointer border-none bg-transparent p-0 text-center"
                   onClick={() => {
                     updateSetting('theme', themeVal)
                     document.documentElement.setAttribute('data-theme', themeVal)
@@ -165,7 +174,7 @@ export function SettingsDrawer() {
                   <div className="text-[11px] text-[var(--ink-tertiary)] mt-1">
                     {themeVal === 'dark' ? t('settings.dark') : t('settings.light')}
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -178,6 +187,7 @@ export function SettingsDrawer() {
             <SettingRow label={t('settings.fontSize')} desc={t('settings.fontSizeDesc')}>
               <div className="flex items-center gap-2">
                 <button
+                  type="button"
                   className="px-2.5 py-[3px] rounded-[var(--radius-sm)] border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-secondary)] text-[13px] cursor-pointer hover:bg-[var(--canvas-mid)]"
                   onClick={() => handleFontSizeChange(settings.editorFontSize - 1)}
                 >
@@ -189,9 +199,10 @@ export function SettingsDrawer() {
                   value={settings.editorFontSize}
                   min={14}
                   max={24}
-                  onChange={(e) => handleFontSizeChange(parseInt(e.target.value) || 17)}
+                  onChange={(e) => handleFontSizeChange(parseInt(e.target.value, 10) || 17)}
                 />
                 <button
+                  type="button"
                   className="px-2.5 py-[3px] rounded-[var(--radius-sm)] border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-secondary)] text-[13px] cursor-pointer hover:bg-[var(--canvas-mid)]"
                   onClick={() => handleFontSizeChange(settings.editorFontSize + 1)}
                 >
@@ -209,6 +220,7 @@ export function SettingsDrawer() {
               }
             >
               <button
+                type="button"
                 className={`w-9 h-5 rounded-full border-none cursor-pointer relative transition-colors shrink-0
                   ${settings.autoSaveInterval > 0 ? 'bg-[var(--accent-gold)]' : 'bg-[var(--canvas-mid)]'}`}
                 onClick={() => updateSetting('autoSaveInterval', settings.autoSaveInterval > 0 ? 0 : 30)}
@@ -238,9 +250,10 @@ export function SettingsDrawer() {
             </div>
             <div className="flex gap-2 flex-wrap mb-2">
               {ACCENT_COLORS.map((c) => (
-                <div
+                <button
+                  type="button"
                   key={c}
-                  className={`w-[30px] h-[30px] rounded-full border-2 cursor-pointer transition-all hover:scale-110 shrink-0
+                  className={`w-[30px] h-[30px] rounded-full border-2 cursor-pointer appearance-none p-0 transition-all hover:scale-110 shrink-0
                     ${settings.accentColor === c ? 'border-[var(--ink)] shadow-[0_0_0_1px_var(--canvas)]' : 'border-transparent'}`}
                   style={{ background: c }}
                   onClick={() => handleAccentChange(c)}
@@ -302,6 +315,7 @@ export function SettingsDrawer() {
                   onChange={(e) => updateSetting('apiKey', e.target.value)}
                 />
                 <button
+                  type="button"
                   className="w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] border-none bg-none text-[var(--ink-tertiary)] cursor-pointer hover:text-[var(--ink)] transition-colors shrink-0"
                   onClick={() => setShowApiKey(!showApiKey)}
                   title={showApiKey ? t('settings.hideKey') : t('settings.showKey')}
@@ -313,6 +327,7 @@ export function SettingsDrawer() {
             <div className="pt-2.5 flex flex-col gap-1.5">
               <div className="flex items-center gap-2.5">
                 <button
+                  type="button"
                   className="h-[30px] px-4 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] text-[var(--ink)] text-[13px] cursor-pointer transition-colors hover:bg-[var(--canvas-mid)] disabled:opacity-50 flex items-center gap-1.5"
                   onClick={handleTestConnection}
                   disabled={testStatus === 'testing'}
@@ -359,6 +374,7 @@ export function SettingsDrawer() {
               desc={t('settings.currentVersion', { version: __APP_VERSION__ })}
             >
               <button
+                type="button"
                 className="h-[32px] px-4 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] text-[var(--ink)] text-[13px] cursor-pointer transition-colors hover:bg-[var(--canvas-mid)] disabled:opacity-50 flex items-center gap-1.5"
                 onClick={checkForUpdates}
                 disabled={updateStatus === 'checking'}
@@ -397,6 +413,7 @@ export function SettingsDrawer() {
         {/* Footer */}
         <div className="px-5 py-4 border-t border-[var(--hairline)] flex items-center shrink-0 gap-2">
           <button
+            type="button"
             className="w-6 h-6 flex items-center justify-center rounded-[var(--radius-sm)] border-none text-[var(--ink-mute)] cursor-pointer hover:text-[var(--accent-ember)] hover:bg-[var(--canvas-mid)] transition-colors shrink-0"
             onClick={() => refreshAllData()}
             title={t('settings.forceRefreshDesc')}
@@ -405,6 +422,7 @@ export function SettingsDrawer() {
           </button>
           <span className="text-[11px] text-[var(--ink-mute)] flex-1">{t('settings.footer')}</span>
           <button
+            type="button"
             className="h-[34px] px-5 rounded-lg border-none bg-[var(--accent-gold)] text-[var(--canvas)] font-medium text-[13px] cursor-pointer transition-colors hover:bg-[var(--accent-gold-soft)]"
             onClick={closeSettings}
           >

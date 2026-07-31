@@ -168,7 +168,10 @@ function aiRequest(path: string, options: any = {}) {
 
 // Shared SSE stream reader — handles buffering, line splitting, event dispatch
 async function readSSEStream(response: Response, handlers: Record<string, (payload: any) => void>): Promise<void> {
-  const reader = response.body!.getReader()
+  const reader = response.body?.getReader()
+  if (!reader) {
+    throw new Error('Cannot read an empty SSE response body')
+  }
   const decoder = new TextDecoder()
   let buffer = ''
   let currentEvent = ''
@@ -251,7 +254,7 @@ export const aiApi = {
       signal: controller.signal,
     })
       .then(async (response) => {
-        let gotError = false
+        let _gotError = false
         await readSSEStream(response, {
           content_chunk: (data) => onChunk(data.text || ''),
           done: (data) => {
@@ -259,7 +262,7 @@ export const aiApi = {
             onEnd(data)
           },
           error: (data) => {
-            gotError = true
+            _gotError = true
             finished = true
             onError(data)
           },

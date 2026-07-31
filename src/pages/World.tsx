@@ -56,7 +56,12 @@ export function World() {
           <Globe className="w-5 h-5" /> {t('pages.world')}
         </h2>
         <div className="page-header-actions">
-          <button className="btn-primary" style={{ height: 30, padding: '0 14px' }} onClick={() => setShowCreate(true)}>
+          <button
+            type="button"
+            className="btn-primary"
+            style={{ height: 30, padding: '0 14px' }}
+            onClick={() => setShowCreate(true)}
+          >
             + {t('pages.newEntry')}
           </button>
         </div>
@@ -96,16 +101,17 @@ export function World() {
 
       <div className="flex gap-0 border-b border-[var(--hairline)] px-6 shrink-0 bg-[var(--canvas-soft)]">
         {TABS.map((t) => (
-          <span
+          <button
+            type="button"
             key={t}
-            className={`px-4 py-2.5 text-[13px] cursor-pointer border-b-2 transition-colors
+            className={`border-x-0 border-t-0 bg-transparent px-4 py-2.5 text-[13px] cursor-pointer border-b-2 transition-colors
               ${activeTab === t ? 'text-[var(--ink)] border-b-2 border-[var(--accent-gold)]' : 'text-[var(--ink-tertiary)] border-b-2 border-transparent hover:text-[var(--ink-secondary)]'}`}
             onClick={() => setActiveTab(t)}
           >
             <span className="flex items-center gap-1">
               {TAB_ICONS[t]} {tabLabels[t] || t}
             </span>
-          </span>
+          </button>
         ))}
       </div>
       <div className="page-body" style={{ padding: 0 }}>

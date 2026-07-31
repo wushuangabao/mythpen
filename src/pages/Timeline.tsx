@@ -24,6 +24,7 @@ export function Timeline() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-primary flex items-center gap-1"
             style={{ height: 30, padding: '0 14px' }}
             onClick={() => setShowCreate(true)}
@@ -62,7 +63,7 @@ export function Timeline() {
               year: vals.year,
               title: vals.title,
               description: vals.description,
-              importance: parseInt(vals.importance) || 3,
+              importance: parseInt(vals.importance, 10) || 3,
             })
             reload()
           }}
@@ -73,7 +74,7 @@ export function Timeline() {
       <div className="page-body" style={{ padding: 0 }}>
         <div className="relative px-8 pb-8 pt-6">
           <div className="absolute left-12 top-6 bottom-0 w-[2px] bg-[var(--hairline-light)]" />
-          {(events || []).map((ev, i) => (
+          {(events || []).map((ev, _i) => (
             <div key={ev.id} className="flex gap-[18px] pb-[18px] relative">
               <div
                 className={`w-3 h-3 rounded-full shrink-0 z-[1] mt-1 ml-[30px]

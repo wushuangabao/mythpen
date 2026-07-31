@@ -57,7 +57,7 @@ export function ServerStatusGate({ children }: Props) {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [retryCount])
+  }, [retryCount, t])
 
   if (status === 'ready') return <>{children}</>
 
@@ -77,7 +77,7 @@ export function ServerStatusGate({ children }: Props) {
       }}
     >
       {/* Logo / brand mark */}
-      <svg width="56" height="56" viewBox="0 0 56 56" fill="none" style={{ marginBottom: 24 }}>
+      <svg aria-hidden="true" width="56" height="56" viewBox="0 0 56 56" fill="none" style={{ marginBottom: 24 }}>
         <rect width="56" height="56" rx="12" fill="var(--accent-gold, #c9a96e)" />
         <path d="M18 40V18h4l6 14 6-14h4v22h-4V26l-6 14-6-14v14h-4Z" fill="var(--canvas, #0e0e10)" />
       </svg>
@@ -142,6 +142,7 @@ export function ServerStatusGate({ children }: Props) {
           {detail && <p style={{ fontSize: 12, color: 'var(--ink-mute, #5e5c56)', marginTop: 4 }}>{detail}</p>}
           <div style={{ marginTop: 20, display: 'flex', gap: 10 }}>
             <button
+              type="button"
               onClick={() => {
                 setStatus('checking')
                 setRetryCount(0)
@@ -161,6 +162,7 @@ export function ServerStatusGate({ children }: Props) {
               {t('serverStatus.retry')}
             </button>
             <button
+              type="button"
               onClick={() => window.close()}
               style={{
                 padding: '8px 22px',

@@ -53,7 +53,7 @@ export function EditorToolbar() {
     }
     document.addEventListener('selectionchange', handler)
     return () => document.removeEventListener('selectionchange', handler)
-  }, [])
+  }, [fmt.italic, fmt.underline, fmt.bold])
 
   const exec = useCallback((command: string, value?: string) => {
     document.execCommand(command, false, value)
@@ -78,7 +78,7 @@ export function EditorToolbar() {
     if (document.activeElement !== editor) editor.focus()
 
     const sel = window.getSelection()
-    if (!sel || !sel.rangeCount) return
+    if (!sel?.rangeCount) return
     const range = sel.getRangeAt(0)
 
     // Toggle: if inside same heading type, unwrap to paragraph
@@ -119,7 +119,7 @@ export function EditorToolbar() {
     const editor = document.querySelector('[contenteditable]')
     if (!editor) return
     const sel = window.getSelection()
-    if (!sel || !sel.rangeCount) return
+    if (!sel?.rangeCount) return
     const range = sel.getRangeAt(0)
     const block = document.createElement('p')
     block.className = 'dialogue'
@@ -144,7 +144,7 @@ export function EditorToolbar() {
     const editor = document.querySelector('[contenteditable]')
     if (!editor) return
     const sel = window.getSelection()
-    if (!sel || !sel.rangeCount) return
+    if (!sel?.rangeCount) return
     const range = sel.getRangeAt(0)
     const pre = document.createElement('pre')
     const code = document.createElement('code')
@@ -153,7 +153,7 @@ export function EditorToolbar() {
     range.deleteContents()
     range.insertNode(pre)
     editor.dispatchEvent(new Event('input', { bubbles: true }))
-  }, [])
+  }, [t])
 
   // Start AI continue writing
   const handleContinue = useCallback(() => {
@@ -180,7 +180,7 @@ export function EditorToolbar() {
         setLoading(null)
       },
     )
-  }, [loading, currentProject, currentChapter, loadChapterContent])
+  }, [loading, currentProject, currentChapter, loadChapterContent, t])
 
   // Clear formatting on selected text
   const handleClearFormat = useCallback(() => {
@@ -190,7 +190,7 @@ export function EditorToolbar() {
 
     // Unwrap headings (h1/h2/h3) back to paragraphs
     const sel = window.getSelection()
-    if (sel && sel.rangeCount) {
+    if (sel?.rangeCount) {
       const heading = findAncestor(sel.getRangeAt(0).startContainer, editor, (el) =>
         ['h1', 'h2', 'h3'].includes(el.tagName.toLowerCase()),
       )
@@ -221,7 +221,7 @@ export function EditorToolbar() {
         setLoading(null)
       },
     )
-  }, [loading, currentProject, currentChapter, loadChapterContent])
+  }, [loading, currentProject, currentChapter, loadChapterContent, t])
 
   return (
     <div className="h-[var(--toolbar-h)] bg-[var(--canvas-soft)] border-b border-[var(--hairline)] flex items-center px-3 gap-0.5 shrink-0">
@@ -253,6 +253,7 @@ export function EditorToolbar() {
       </div>
       <div className="ml-auto flex items-center gap-1">
         <button
+          type="button"
           className={`tool-btn-ai-pill inline-flex items-center gap-1 ${loading === 'polish' ? 'opacity-60 pointer-events-none' : ''}`}
           onClick={handlePolish}
           disabled={!!loading}
@@ -265,6 +266,7 @@ export function EditorToolbar() {
           <span className="text-[12px]">{loading === 'polish' ? t('editor.polishing') : t('editor.polish')}</span>
         </button>
         <button
+          type="button"
           className={`tool-btn-ai-pill inline-flex items-center gap-1 ${loading === 'continue' ? 'opacity-60 pointer-events-none' : ''}`}
           onClick={handleContinue}
           disabled={!!loading}
@@ -280,6 +282,7 @@ export function EditorToolbar() {
 function ToolBtn({ children, onClick, active }: { children: React.ReactNode; onClick?: () => void; active?: boolean }) {
   return (
     <button
+      type="button"
       className={`w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] text-sm transition-colors cursor-pointer border-none
         ${active ? 'text-[var(--accent-gold)]' : 'text-[var(--ink-tertiary)]'}
         hover:bg-[var(--canvas-card)] hover:text-[var(--ink)]`}

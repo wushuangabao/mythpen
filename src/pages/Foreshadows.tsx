@@ -93,6 +93,7 @@ export function Foreshadows() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-primary flex items-center gap-1.5"
             style={{ height: 30, padding: '0 14px' }}
             onClick={handleAIDesign}
@@ -102,6 +103,7 @@ export function Foreshadows() {
             {generating ? t('common.generating') : t('pages.aiDesign')}
           </button>
           <button
+            type="button"
             className="btn-secondary flex items-center gap-1"
             style={{ height: 30, padding: '0 14px' }}
             onClick={() => setShowCreate(true)}

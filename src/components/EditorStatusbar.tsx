@@ -40,10 +40,11 @@ export function EditorStatusbar() {
         {(currentChapter.wordCount || 0).toLocaleString()} {t('editor.words')}
       </span>
       <button
+        type="button"
         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-sm)] border-none bg-none cursor-pointer hover:bg-[var(--canvas-card)] transition-colors font-mono text-[12px]"
         style={{ color: STATUS_COLORS[currentChapter.status] || 'var(--ink-tertiary)' }}
         onClick={handleCycleStatus}
-        title={t('editor.switchTo', { status: t('status.' + (NEXT_STATUS[currentChapter.status] || 'writing')) })}
+        title={t('editor.switchTo', { status: t(`status.${NEXT_STATUS[currentChapter.status] || 'writing'}`) })}
       >
         {t(`status.${currentChapter.status}`)}
         <span className="text-[10px] opacity-60">↻</span>

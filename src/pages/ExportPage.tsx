@@ -23,7 +23,7 @@ export function ExportPage() {
   const [exportMsg, setExportMsg] = useState('')
   const [exportStatus, setExportStatus] = useState<'success' | 'error' | ''>('')
   const [coverUrl, setCoverUrl] = useState('')
-  const [coverMime, setCoverMime] = useState('')
+  const [_coverMime, setCoverMime] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const project = useProjectName()
   const { t } = useT()
@@ -106,6 +106,7 @@ export function ExportPage() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-primary"
             style={{ height: 30, padding: '0 14px' }}
             onClick={handleExport}
@@ -126,9 +127,10 @@ export function ExportPage() {
 
       <div className="grid grid-cols-2 gap-3 p-6">
         {FORMATS.map((f) => (
-          <div
+          <button
+            type="button"
             key={f.name}
-            className={`p-5 rounded-lg text-center cursor-pointer transition-colors
+            className={`w-full appearance-none rounded-lg p-5 text-center cursor-pointer transition-colors
               ${
                 activeFormat === f.name
                   ? 'bg-[var(--accent-gold-soft-bg)] border border-[var(--accent-gold)]'
@@ -145,7 +147,7 @@ export function ExportPage() {
             </div>
             <div className="text-[15px] text-[var(--ink)] mb-1">{f.label}</div>
             <div className="text-[12px] text-[var(--ink-tertiary)]">{t(f.descKey)}</div>
-          </div>
+          </button>
         ))}
       </div>
 
@@ -179,6 +181,7 @@ export function ExportPage() {
             />
             <div className="flex gap-2">
               <button
+                type="button"
                 className="h-[28px] px-3 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] text-[var(--ink)] text-[11px] cursor-pointer transition-colors hover:bg-[var(--canvas-mid)] flex items-center gap-1"
                 onClick={() => fileInputRef.current?.click()}
               >
@@ -187,6 +190,7 @@ export function ExportPage() {
               </button>
               {coverUrl && (
                 <button
+                  type="button"
                   className="h-[28px] px-3 rounded-lg border border-red-500/25 bg-red-500/5 text-red-500 text-[11px] cursor-pointer transition-colors hover:bg-red-500/10 flex items-center gap-1"
                   onClick={handleCoverDelete}
                 >

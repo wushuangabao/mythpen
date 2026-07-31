@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useDataRefresh } from '@/hooks/useDataRefresh'
 import { useT } from '@/hooks/useT'
+import { activateOnKeyDown } from '@/lib/a11y'
 import { statsApi } from '@/lib/api'
 import { useProjectName, useStats } from '@/lib/useProjectData'
 import { useProjectStore } from '@/stores/useProjectStore'
@@ -74,7 +75,7 @@ export function Dashboard() {
 
   useEffect(() => {
     if (project) loadPhase(project)
-  }, [project])
+  }, [project, loadPhase])
 
   const currentIdx = PHASE_ORDER.indexOf(workflowPhase)
 
@@ -111,8 +112,8 @@ export function Dashboard() {
   const targetInputRef = useRef<HTMLInputElement>(null)
 
   const handleSaveTargetWords = useCallback(async () => {
-    const val = parseInt(targetInput)
-    if (!isNaN(val) && val >= 1000 && project) {
+    const val = parseInt(targetInput, 10)
+    if (!Number.isNaN(val) && val >= 1000 && project) {
       try {
         await statsApi.updateTargetWords(project, val)
         reloadStats()
@@ -124,7 +125,7 @@ export function Dashboard() {
     setTargetInput('')
   }, [targetInput, project, reloadStats])
 
-  const handleResetTargetWords = useCallback(async () => {
+  const _handleResetTargetWords = useCallback(async () => {
     if (!project) return
     try {
       await statsApi.resetTargetWords(project)
@@ -185,6 +186,7 @@ export function Dashboard() {
         </h2>
         <div className="page-header-actions">
           <button
+            type="button"
             className="btn-primary flex items-center gap-1.5"
             style={{ height: 30, padding: '0 14px' }}
             onClick={() => setActivePage('page-writing')}
@@ -262,8 +264,9 @@ export function Dashboard() {
                   }}
                 />
               ) : (
-                <span
-                  className="cursor-pointer hover:text-[var(--accent-gold)] transition-colors"
+                <button
+                  type="button"
+                  className="cursor-pointer border-none bg-transparent p-0 font-inherit text-inherit hover:text-[var(--accent-gold)] transition-colors"
                   onClick={() => {
                     setTargetInput(String(s.targetWords))
                     setEditingTarget(true)
@@ -271,7 +274,7 @@ export function Dashboard() {
                   title={t('sidebar.clickToEditTarget')}
                 >
                   {s.targetWords?.toLocaleString() || '0'}
-                </span>
+                </button>
               )}
             </span>
             <span>{wordProgressPct.toFixed(1)}%</span>
@@ -282,7 +285,7 @@ export function Dashboard() {
         <DashCard icon={Library} title={t('pages.cardGenre')}>
           <div className="flex flex-wrap gap-1.5 mt-1">
             {(s.genres || []).length > 0 ? (
-              s.genres!.map((g) => {
+              s.genres?.map((g) => {
                 const info = GENRE_LABELS[g] || { labelKey: 'pages.genre.other', color: '#8b8b8b' }
                 return (
                   <span
@@ -360,7 +363,7 @@ export function Dashboard() {
         {(s.volumes || []).length > 0 && (
           <DashCard icon={ScrollText} title={t('pages.cardVolumes')}>
             <div className="space-y-1.5 mt-1">
-              {s.volumes!.map((v) => (
+              {s.volumes?.map((v) => (
                 <div key={v.id} className="flex items-center justify-between text-[12px]">
                   <span className="text-[var(--ink)] truncate mr-2">{v.title}</span>
                   <span className="text-[var(--ink-tertiary)] shrink-0 font-mono">
@@ -448,13 +451,17 @@ export function Dashboard() {
       </div>
 
       {confirmPhase && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[200]"
-          onClick={() => setConfirmPhase(null)}
-        >
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[200]" role="presentation">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default border-none bg-transparent p-0"
+            aria-label={t('project.cancel')}
+            onClick={() => setConfirmPhase(null)}
+          />
           <div
-            className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-xl p-6 w-[360px] shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
+            className="relative z-10 bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-xl p-6 w-[360px] shadow-2xl"
+            role="dialog"
+            aria-modal="true"
           >
             <h3 className="text-[16px] font-medium text-[var(--ink)] mb-2">{t('dashboard.switchPhaseTitle')}</h3>
             <p className="text-[13px] text-[var(--ink-tertiary)] mb-5">
@@ -464,12 +471,14 @@ export function Dashboard() {
             </p>
             <div className="flex justify-end gap-2">
               <button
+                type="button"
                 className="h-[32px] px-4 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] text-[var(--ink)] text-[13px] cursor-pointer hover:bg-[var(--canvas-mid)]"
                 onClick={() => setConfirmPhase(null)}
               >
                 {t('common.cancel')}
               </button>
               <button
+                type="button"
                 className="h-[32px] px-4 rounded-lg bg-[var(--accent-gold)] text-[var(--canvas)] text-[13px] font-medium cursor-pointer border-none hover:brightness-110"
                 onClick={handleConfirmPhase}
               >
@@ -508,11 +517,15 @@ function PhaseStep({
   advanceTitle?: string
 }) {
   return (
+    /* biome-ignore lint/a11y/useSemanticElements: this phase selector contains a separate advance button. */
     <span
       className={`inline-flex items-center gap-1.5 text-[12px] whitespace-nowrap px-2 py-1 rounded-[var(--radius-sm)]
       ${onSelect ? 'cursor-pointer' : ''}
       ${state === 'active' ? 'text-[var(--ink)] font-medium' : state === 'done' ? 'text-[var(--ink-tertiary)]' : 'text-[var(--ink-mute)]'}
       hover:bg-[var(--canvas-card)]`}
+      role="button"
+      tabIndex={onSelect ? 0 : -1}
+      onKeyDown={activateOnKeyDown}
       onClick={() => onSelect?.()}
     >
       <span
@@ -530,6 +543,7 @@ function PhaseStep({
       {label}
       {active && onAdvance && (
         <button
+          type="button"
           className="ml-1 w-[18px] h-[18px] flex items-center justify-center rounded-full bg-[var(--accent-gold)] text-[var(--canvas)] hover:brightness-110 transition-all cursor-pointer border-none"
           onClick={(e) => {
             e.stopPropagation()

@@ -45,10 +45,17 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
   }
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[300]" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[300]" role="presentation">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default border-none bg-transparent p-0"
+        aria-label={t('project.cancel')}
+        onClick={onClose}
+      />
       <div
-        className="bg-[var(--canvas-card)] border border-[var(--hairline-light)] rounded-xl p-6 w-[460px] max-w-[90vw] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+        className="relative z-10 bg-[var(--canvas-card)] border border-[var(--hairline-light)] rounded-xl p-6 w-[460px] max-w-[90vw] shadow-2xl"
+        role="dialog"
+        aria-modal="true"
       >
         <h3 className="font-display text-[20px] font-semibold mb-4">{title}</h3>
 
@@ -61,11 +68,15 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
         <div className="space-y-3 mb-5">
           {fields.map((f) => (
             <div key={f.key}>
-              <label className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1">
+              <label
+                htmlFor={`simple-create-${f.key}`}
+                className="block text-[11px] font-medium text-[var(--ink-secondary)] tracking-[0.04em] uppercase mb-1"
+              >
                 {f.label}
               </label>
               {f.type === 'textarea' ? (
                 <textarea
+                  id={`simple-create-${f.key}`}
                   className="w-full bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-[var(--radius-sm)] p-2.5 font-sans text-[13px] text-[var(--ink)] outline-none resize-vertical min-h-[60px] focus:border-[var(--accent-gold)]"
                   placeholder={f.placeholder}
                   value={values[f.key] || ''}
@@ -73,6 +84,7 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
                 />
               ) : f.type === 'select' && f.options ? (
                 <select
+                  id={`simple-create-${f.key}`}
                   className="w-full h-[34px] px-2.5 bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-[var(--radius-sm)] text-[var(--ink)] text-[13px] outline-none cursor-pointer focus:border-[var(--accent-gold)]"
                   value={values[f.key] || ''}
                   onChange={(e) => update(f.key, e.target.value)}
@@ -86,6 +98,7 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
                 </select>
               ) : (
                 <input
+                  id={`simple-create-${f.key}`}
                   type={f.type === 'number' ? 'number' : 'text'}
                   className="w-full h-[34px] px-2.5 bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-[var(--radius-sm)] text-[var(--ink)] text-[13px] outline-none focus:border-[var(--accent-gold)]"
                   placeholder={f.placeholder}
@@ -99,12 +112,14 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
 
         <div className="flex gap-2 justify-end border-t border-[var(--hairline)] pt-4">
           <button
+            type="button"
             className="h-[32px] px-4 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] text-[var(--ink)] text-[13px] cursor-pointer hover:bg-[var(--canvas-mid)]"
             onClick={onClose}
           >
             {t('project.cancel')}
           </button>
           <button
+            type="button"
             className="h-[32px] px-4 rounded-lg border-none bg-[var(--accent-gold)] text-[var(--canvas)] font-medium text-[13px] cursor-pointer hover:bg-[var(--accent-gold-soft)] disabled:opacity-40"
             onClick={handleSubmit}
             disabled={submitting}

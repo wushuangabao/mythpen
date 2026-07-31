@@ -51,6 +51,9 @@ export function AIPanel() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const { toasts, show: showToast } = useToast()
   const { t } = useT()
+  const scrollState = `${messages.map((message) => message.id).join(':')}|${streamText.length}|${toolCalls
+    .map((toolCall) => `${toolCall.id}:${toolCall.status}`)
+    .join(':')}`
 
   // Resize handle drag logic
   const handleResizeMouseDown = useCallback(
@@ -84,6 +87,18 @@ export function AIPanel() {
     [setRightPanelWidth],
   )
 
+  const handleResizeKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+
+      event.preventDefault()
+      const currentWidth =
+        parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--right-panel-w')) || 320
+      setRightPanelWidth(currentWidth + (event.key === 'ArrowLeft' ? 20 : -20))
+    },
+    [setRightPanelWidth],
+  )
+
   // Generate AI title for a new session based on first exchange
   const generateAITitle = useCallback(
     async (userMsg: string, aiResponse?: string) => {
@@ -109,7 +124,7 @@ export function AIPanel() {
         // Silently fail — timestamp title stays as fallback
       }
     },
-    [project, currentSessionId, sessions, updateSessionTitle],
+    [project, currentSessionId, sessions, updateSessionTitle, t],
   )
 
   // Unique message ID generator
@@ -126,13 +141,14 @@ export function AIPanel() {
       .catch((e) => console.warn('[AIPanel] Failed to save message:', e))
   }
 
-  // Auto-scroll to bottom when messages or stream text changes
+  // Auto-scroll to bottom when messages, streamed text, or tool calls change.
   useEffect(() => {
+    if (scrollState === '|0|') return
     if (msgEndRef.current && scrollContainerRef.current) {
       // Use direct scrollTop for reliable scrolling (scrollIntoView can fail in nested scroll contexts)
       scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight
     }
-  }, [messages, streamText, toolCalls])
+  }, [scrollState])
 
   // Load sessions and messages when project changes, auto-create session if none exists
   useEffect(() => {
@@ -156,7 +172,7 @@ export function AIPanel() {
         useAgentStore.getState().loadMessages(project)
       }
     })
-  }, [project])
+  }, [project, loadSessions, t, createSession])
 
   // Tool type detection for colored indicators
   const getToolType = (name: string): 'read' | 'create' | 'update' | 'delete' => {
@@ -179,7 +195,7 @@ export function AIPanel() {
     const entries = Object.entries(args).slice(0, 2)
     return entries
       .map(
-        ([k, v]) => `${k}=${typeof v === 'string' ? (v.length > 20 ? v.slice(0, 20) + '...' : v) : JSON.stringify(v)}`,
+        ([k, v]) => `${k}=${typeof v === 'string' ? (v.length > 20 ? `${v.slice(0, 20)}...` : v) : JSON.stringify(v)}`,
       )
       .join(', ')
   }
@@ -309,9 +325,12 @@ export function AIPanel() {
   return (
     <aside className="w-[var(--right-panel-w)] bg-[var(--canvas-soft)] border-l border-[var(--hairline)] shrink-0 flex flex-col min-h-0 relative">
       {/* Resize handle */}
-      <div
-        className="absolute left-0 top-0 bottom-0 w-[4px] cursor-col-resize z-10 transition-colors hover:bg-[var(--accent-gold)] active:bg-[var(--accent-gold)]"
+      <button
+        type="button"
+        className="absolute left-0 top-0 bottom-0 w-[4px] cursor-col-resize z-10 border-0 bg-transparent p-0 transition-colors hover:bg-[var(--accent-gold)] active:bg-[var(--accent-gold)]"
+        aria-label="Resize AI panel"
         onMouseDown={handleResizeMouseDown}
+        onKeyDown={handleResizeKeyDown}
       />
       {/* Fixed header area */}
       <div className="shrink-0 px-4 pt-4 pb-2">
@@ -339,6 +358,7 @@ export function AIPanel() {
           {/* Mode toggle */}
           <div className="flex mt-2 bg-[var(--canvas-card)] rounded-[var(--radius-sm)] p-[2px] border border-[var(--hairline)]">
             <button
+              type="button"
               className={`flex-1 h-[26px] rounded-[4px] text-[12px] font-medium transition-colors cursor-pointer border-none ${
                 mode === 'collab'
                   ? 'bg-[var(--accent-gold)] text-[var(--canvas)]'
@@ -349,6 +369,7 @@ export function AIPanel() {
               {t('ai.modeCollab')}
             </button>
             <button
+              type="button"
               className={`flex-1 h-[26px] rounded-[4px] text-[12px] font-medium transition-colors cursor-pointer border-none ${
                 mode === 'writing'
                   ? 'bg-[var(--accent-gold)] text-[var(--canvas)]'
@@ -370,13 +391,14 @@ export function AIPanel() {
             value={currentSessionId || ''}
             onChange={(e) => e.target.value && switchSession(project, e.target.value)}
           >
-            {sessions.map((s: any, i) => (
-              <option key={`${s.id}-${i}`} value={s.id}>
+            {sessions.map((s: any) => (
+              <option key={s.id} value={s.id}>
                 {s.title}
               </option>
             ))}
           </select>
           <button
+            type="button"
             className="w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-tertiary)] cursor-pointer hover:text-[var(--ink)] hover:bg-[var(--canvas-mid)] transition-colors shrink-0"
             onClick={() => {
               const now = new Date()
@@ -389,6 +411,7 @@ export function AIPanel() {
           </button>
           {currentSessionId && sessions.length > 1 && (
             <button
+              type="button"
               className="w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-tertiary)] cursor-pointer hover:text-[var(--error)] hover:bg-[var(--error-soft)] hover:border-[var(--error)] transition-colors shrink-0"
               onClick={() => setConfirmDelete(true)}
               title={t('ai.deleteSession')}
@@ -423,6 +446,7 @@ export function AIPanel() {
                 </div>
               </div>
               <button
+                type="button"
                 className="w-[26px] h-[26px] flex items-center justify-center rounded-[var(--radius-sm)] border border-[var(--hairline-light)] text-[var(--ink-tertiary)] text-[13px] cursor-pointer shrink-0 hover:bg-[var(--error-soft)] hover:text-[var(--error)] hover:border-[var(--error)] transition-colors"
                 onClick={stopTask}
                 title={t('ai.cancel')}
@@ -443,6 +467,7 @@ export function AIPanel() {
               <ShieldCheck className="w-3.5 h-3.5 inline-block mr-1" />
               {t('ai.consistencyActive')}
               <button
+                type="button"
                 className="ml-auto text-[10px] text-[var(--ink-mute)] cursor-pointer bg-none border-none hover:text-[var(--ink)]"
                 onClick={() => {
                   setShowConsistency(false)
@@ -585,6 +610,7 @@ export function AIPanel() {
             disabled={isRunning}
           />
           <button
+            type="button"
             className="w-7 h-7 rounded-[var(--radius-sm)] border-none bg-[var(--accent-gold)] text-[var(--canvas)] text-sm cursor-pointer flex items-center justify-center shrink-0 hover:bg-[var(--accent-gold-soft)] transition-colors disabled:opacity-40"
             onClick={handleSend}
             disabled={isRunning || !input.trim()}
@@ -606,24 +632,30 @@ export function AIPanel() {
       <ToastContainer toasts={toasts} />
 
       {confirmDelete && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[200]"
-          onClick={() => setConfirmDelete(false)}
-        >
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[200]" role="presentation">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default border-none bg-transparent p-0"
+            aria-label={t('ai.cancelAction')}
+            onClick={() => setConfirmDelete(false)}
+          />
           <div
-            className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-xl p-6 w-[360px] shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
+            className="relative z-10 bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-xl p-6 w-[360px] shadow-2xl"
+            role="dialog"
+            aria-modal="true"
           >
             <h3 className="text-[16px] font-medium text-[var(--ink)] mb-2">{t('ai.deleteSessionTitle')}</h3>
             <p className="text-[13px] text-[var(--ink-tertiary)] mb-5">{t('ai.deleteSessionConfirm')}</p>
             <div className="flex justify-end gap-2">
               <button
+                type="button"
                 className="h-[32px] px-4 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] text-[var(--ink)] text-[13px] cursor-pointer hover:bg-[var(--canvas-mid)]"
                 onClick={() => setConfirmDelete(false)}
               >
                 {t('ai.cancelAction')}
               </button>
               <button
+                type="button"
                 className="h-[32px] px-4 rounded-lg bg-[var(--error)] text-white text-[13px] font-medium cursor-pointer border-none hover:brightness-110"
                 onClick={() => {
                   if (!currentSessionId) return
