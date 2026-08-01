@@ -1,4 +1,4 @@
-# AGENTS.md — Mythpen
+# CLAUDE.md — Mythpen
 
 ## AI 功能
 
