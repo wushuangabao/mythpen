@@ -9,7 +9,7 @@ const API_BASE = isTauri ? 'http://127.0.0.1:3001/api' : '/api'
 
 // Normalize double slashes (e.g. /api//stats → /api/stats) that happen
 // when a project name is empty. Skip the protocol colon so http:// stays.
-const apiUrl = (path: string) => `${API_BASE}${path}`.replace(/([^:]\/)\/+/g, '$1')
+export const apiUrl = (path: string) => `${API_BASE}${path}`.replace(/([^:]\/)\/+/g, '$1')
 
 async function request(path: string, options: any = {}) {
   const url = apiUrl(path)
@@ -54,7 +54,7 @@ export const projectsApi = {
   uploadCover: (name: string, data: string, mime: string) =>
     request(`/${encodeURIComponent(name)}/cover`, { method: 'POST', body: { data, mime } }),
   deleteCover: (name: string) => request(`/${encodeURIComponent(name)}/cover`, { method: 'DELETE' }),
-  getCoverUrl: (name: string) => `/api/${encodeURIComponent(name)}/cover`,
+  getCoverUrl: (name: string) => apiUrl(`/${encodeURIComponent(name)}/cover`),
 }
 
 // ─── Chapters ───

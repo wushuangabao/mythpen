@@ -1,7 +1,7 @@
 import { Book, Download, File, FileEdit, FileText, type LucideIcon, Trash2, Upload } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useT } from '@/hooks/useT'
-import { projectsApi } from '@/lib/api'
+import { apiUrl, projectsApi } from '@/lib/api'
 import { useProjectName } from '@/lib/useProjectData'
 
 interface Format {
@@ -51,7 +51,7 @@ export function ExportPage() {
       const base64 = (reader.result as string).split(',')[1]
       try {
         await projectsApi.uploadCover(project, base64, file.type)
-        setCoverUrl(`/api/${encodeURIComponent(project)}/cover?t=${Date.now()}`)
+        setCoverUrl(`${projectsApi.getCoverUrl(project)}?t=${Date.now()}`)
         setCoverMime(file.type)
       } catch (err: any) {
         setExportMsg(t('export.coverUploadError', { msg: err.message }))
@@ -79,14 +79,23 @@ export function ExportPage() {
     setExportMsg('')
     try {
       const fmt = activeFormat
-      // Single request: the backend generates + sends the file
+      // The Tauri app is served from its own origin, so download through the
+      // local API explicitly rather than a relative URL handled by the SPA.
+      const response = await fetch(apiUrl(`/${encodeURIComponent(project)}/export?format=${fmt}&download=1`))
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ message: response.statusText }))
+        throw new Error(error.error?.message || error.message || `HTTP ${response.status}`)
+      }
+
+      const downloadUrl = URL.createObjectURL(await response.blob())
       const a = document.createElement('a')
-      a.href = `/api/${encodeURIComponent(project)}/export?format=${fmt}&download=1`
+      a.href = downloadUrl
       const extMap: Record<string, string> = { epub: 'epub', html: 'html', md: 'md', txt: 'txt' }
       a.download = `${project}.${extMap[fmt] || 'txt'}`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
+      URL.revokeObjectURL(downloadUrl)
       setExportMsg(t('export.downloadingFile', { fmt: fmt.toUpperCase() }))
       setExportStatus('success')
       setTimeout(() => setExportMsg(''), 3000)
