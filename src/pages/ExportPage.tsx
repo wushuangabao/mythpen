@@ -1,11 +1,18 @@
 import { Book, Download, File, FileEdit, FileText, type LucideIcon, Trash2, Upload } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useT } from '@/hooks/useT'
-import { apiUrl, projectsApi } from '@/lib/api'
-import { useProjectName } from '@/lib/useProjectData'
+import { projectsApi } from '@/lib/api'
+import {
+  consumeProjectExport,
+  type ProjectExportFormat,
+  ProjectExportSupersededError,
+  readProjectCover,
+} from '@/lib/projectExport'
+import { getProjectInstanceId, isCurrentProjectInstance } from '@/lib/projectInstanceRegistry'
+import { useProjectInstanceId, useProjectName } from '@/lib/useProjectData'
 
 interface Format {
-  name: string
+  name: ProjectExportFormat
   label: string
   descKey: string
 }
@@ -17,8 +24,12 @@ const FORMATS: Format[] = [
   { name: 'txt', label: 'TXT', descKey: 'export.formatTxtDesc' },
 ]
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 export function ExportPage() {
-  const [activeFormat, setActiveFormat] = useState('epub')
+  const [activeFormat, setActiveFormat] = useState<ProjectExportFormat>('epub')
   const [exporting, setExporting] = useState(false)
   const [exportMsg, setExportMsg] = useState('')
   const [exportStatus, setExportStatus] = useState<'success' | 'error' | ''>('')
@@ -26,35 +37,78 @@ export function ExportPage() {
   const [_coverMime, setCoverMime] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const project = useProjectName()
+  const projectInstanceId = useProjectInstanceId()
+  const projectRef = useRef(project)
+  const coverObjectUrlRef = useRef('')
+  const exportAttemptRef = useRef(0)
+  const exportMessageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { t } = useT()
+  projectRef.current = project
+
+  const replaceCoverPreview = useCallback((url: string, mime = '') => {
+    if (coverObjectUrlRef.current) URL.revokeObjectURL(coverObjectUrlRef.current)
+    coverObjectUrlRef.current = url
+    setCoverUrl(url)
+    setCoverMime(mime)
+  }, [])
 
   // Check if cover exists on mount and when project changes
   useEffect(() => {
-    if (!project) return
-    fetch(projectsApi.getCoverUrl(project))
-      .then((r) => {
-        if (r.ok) {
-          setCoverMime(r.headers.get('content-type') || 'image/png')
-          setCoverUrl(`${projectsApi.getCoverUrl(project)}?t=${Date.now()}`)
-        } else {
-          setCoverUrl('')
+    exportAttemptRef.current += 1
+    if (exportMessageTimerRef.current) clearTimeout(exportMessageTimerRef.current)
+    exportMessageTimerRef.current = null
+    setExporting(false)
+    setExportMsg('')
+
+    let active = true
+    replaceCoverPreview('')
+    if (!project || !projectInstanceId)
+      return () => {
+        active = false
+      }
+    readProjectCover(project)
+      .then((cover) => {
+        if (!active || projectRef.current !== project || !cover.isCurrent()) return
+        const objectUrl = URL.createObjectURL(cover.blob)
+        if (!active || projectRef.current !== project || !cover.isCurrent()) {
+          URL.revokeObjectURL(objectUrl)
+          return
         }
+        replaceCoverPreview(objectUrl, cover.mime)
       })
-      .catch(() => setCoverUrl(''))
-  }, [project])
+      .catch(() => {
+        if (active && projectRef.current === project) replaceCoverPreview('')
+      })
+    return () => {
+      active = false
+    }
+  }, [project, projectInstanceId, replaceCoverPreview])
+
+  useEffect(
+    () => () => {
+      if (coverObjectUrlRef.current) URL.revokeObjectURL(coverObjectUrlRef.current)
+      if (exportMessageTimerRef.current) clearTimeout(exportMessageTimerRef.current)
+    },
+    [],
+  )
 
   const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !project) return
+    const uploadProject = project
+    const uploadInstanceId = getProjectInstanceId(uploadProject)
     const reader = new FileReader()
     reader.onload = async () => {
+      if (projectRef.current !== uploadProject || !isCurrentProjectInstance(uploadProject, uploadInstanceId)) return
       const base64 = (reader.result as string).split(',')[1]
       try {
-        await projectsApi.uploadCover(project, base64, file.type)
-        setCoverUrl(`${projectsApi.getCoverUrl(project)}?t=${Date.now()}`)
-        setCoverMime(file.type)
-      } catch (err: any) {
-        setExportMsg(t('export.coverUploadError', { msg: err.message }))
+        await projectsApi.uploadCover(uploadProject, base64, file.type)
+        const cover = await readProjectCover(uploadProject)
+        if (projectRef.current !== uploadProject || !cover.isCurrent()) return
+        replaceCoverPreview(URL.createObjectURL(cover.blob), cover.mime)
+      } catch (err) {
+        if (projectRef.current !== uploadProject || !isCurrentProjectInstance(uploadProject, uploadInstanceId)) return
+        setExportMsg(t('export.coverUploadError', { msg: errorMessage(err) }))
         setExportStatus('error')
       }
     }
@@ -63,47 +117,69 @@ export function ExportPage() {
 
   const handleCoverDelete = async () => {
     if (!project) return
+    const deleteProject = project
+    const deleteInstanceId = getProjectInstanceId(deleteProject)
     try {
-      await projectsApi.deleteCover(project)
-      setCoverUrl('')
-      setCoverMime('')
+      await projectsApi.deleteCover(deleteProject)
+      if (projectRef.current !== deleteProject || !isCurrentProjectInstance(deleteProject, deleteInstanceId)) return
+      replaceCoverPreview('')
       if (fileInputRef.current) fileInputRef.current.value = ''
-    } catch (err: any) {
-      setExportMsg(t('export.coverDeleteError', { msg: err.message }))
+    } catch (err) {
+      if (projectRef.current !== deleteProject || !isCurrentProjectInstance(deleteProject, deleteInstanceId)) return
+      setExportMsg(t('export.coverDeleteError', { msg: errorMessage(err) }))
       setExportStatus('error')
     }
   }
 
   const handleExport = async () => {
+    if (!project) return
+    const exportProject = project
+    const exportInstanceId = getProjectInstanceId(exportProject)
+    const attempt = ++exportAttemptRef.current
     setExporting(true)
     setExportMsg('')
     try {
       const fmt = activeFormat
-      // The Tauri app is served from its own origin, so download through the
-      // local API explicitly rather than a relative URL handled by the SPA.
-      const response = await fetch(apiUrl(`/${encodeURIComponent(project)}/export?format=${fmt}&download=1`))
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ message: response.statusText }))
-        throw new Error(error.error?.message || error.message || `HTTP ${response.status}`)
-      }
+      await consumeProjectExport(exportProject, fmt, (download) => {
+        if (exportAttemptRef.current !== attempt || projectRef.current !== exportProject || !download.isCurrent())
+          return
 
-      const downloadUrl = URL.createObjectURL(await response.blob())
-      const a = document.createElement('a')
-      a.href = downloadUrl
-      const extMap: Record<string, string> = { epub: 'epub', html: 'html', md: 'md', txt: 'txt' }
-      a.download = `${project}.${extMap[fmt] || 'txt'}`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(downloadUrl)
-      setExportMsg(t('export.downloadingFile', { fmt: fmt.toUpperCase() }))
-      setExportStatus('success')
-      setTimeout(() => setExportMsg(''), 3000)
-    } catch (err: any) {
-      setExportMsg(t('export.exportError', { msg: err.message }))
+        const downloadUrl = URL.createObjectURL(download.blob)
+        const anchor = document.createElement('a')
+        try {
+          anchor.href = downloadUrl
+          anchor.download = download.fileName
+          document.body.appendChild(anchor)
+          anchor.click()
+        } finally {
+          anchor.remove()
+          URL.revokeObjectURL(downloadUrl)
+        }
+        setExportMsg(t('export.downloadingFile', { fmt: fmt.toUpperCase() }))
+        setExportStatus('success')
+        if (exportMessageTimerRef.current) clearTimeout(exportMessageTimerRef.current)
+        exportMessageTimerRef.current = setTimeout(() => {
+          if (exportAttemptRef.current === attempt && projectRef.current === exportProject && download.isCurrent())
+            setExportMsg('')
+        }, 3000)
+      })
+    } catch (err) {
+      if (
+        err instanceof ProjectExportSupersededError ||
+        exportAttemptRef.current !== attempt ||
+        projectRef.current !== exportProject ||
+        !isCurrentProjectInstance(exportProject, exportInstanceId)
+      )
+        return
+      setExportMsg(t('export.exportError', { msg: errorMessage(err) }))
       setExportStatus('error')
     } finally {
-      setExporting(false)
+      if (
+        exportAttemptRef.current === attempt &&
+        projectRef.current === exportProject &&
+        isCurrentProjectInstance(exportProject, exportInstanceId)
+      )
+        setExporting(false)
     }
   }
 

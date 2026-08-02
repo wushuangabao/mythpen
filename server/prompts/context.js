@@ -21,6 +21,12 @@ const PHASE_LABELS = {
   writing: '写作', review: '审阅', consistency: '一致性', export: '导出',
 };
 
+const CHARACTER_ROLE_LABELS = {
+  major: '主角',
+  minor: '配角',
+  extra: '客串',
+};
+
 function buildProjectContext(projectName) {
   try {
     const pdb = db.getProjectDb(projectName);
@@ -28,7 +34,7 @@ function buildProjectContext(projectName) {
     pdb.prepare('SELECT key, value FROM project_meta').all().forEach(m => meta[m.key] = m.value);
     const genres = pdb.prepare('SELECT genre FROM project_genres').all().map(g => g.genre);
     const chars = pdb.prepare('SELECT * FROM characters').all();
-    const chapters = pdb.prepare('SELECT num, title, outline, status FROM chapters ORDER BY num').all();
+    const chapters = pdb.prepare('SELECT id, volume_id, num, title, outline, status FROM chapters ORDER BY volume_id, num').all();
     const foreshadows = pdb.prepare("SELECT * FROM foreshadows WHERE status IN ('planted','progressing')").all();
 
     const genreStr = genres.map(g => GENRE_LABELS[g] || g).join('、') || '未设定';
@@ -45,10 +51,10 @@ function buildProjectContext(projectName) {
 当前总字数: ${meta.word_count || '0'}
 
 角色列表:
-${chars.map(c => `- ${c.name}（${c.age}岁，${c.gender}）：${c.personality || ''} ${c.background || ''}`).join('\n')}
+${chars.map(c => `- [${CHARACTER_ROLE_LABELS[c.role] || '配角'}] ${c.name}（${c.age}岁，${c.gender}）：${c.personality || ''} ${c.background || ''}`).join('\n')}
 
 章节概览:
-${chapters.map(ch => `[${ch.status}] 第${ch.num}章 ${ch.title} - ${ch.outline || '（暂无大纲）'}`).join('\n')}
+${chapters.map(ch => `[${ch.status}] [chapter_id=${ch.id}, volume_id=${ch.volume_id}] 第${ch.num}章 ${ch.title} - ${ch.outline || '（暂无大纲）'}`).join('\n')}
 
 活跃伏笔:
 ${foreshadows.map(f => `[${f.priority}] ${f.title}：${f.description || ''}`).join('\n')}`;

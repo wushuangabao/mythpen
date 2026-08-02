@@ -30,7 +30,7 @@ const DEFAULT_AI_REQUEST_PARAMETER_CONFIG = deepFreeze({
     {
       name: 'Kimi K3',
       match: {
-        models: ['kimi-k3'],
+        models: ['kimi-k3', 'kimi-k3-preview'],
         apiTypes: ['openai'],
       },
       params: {},
@@ -219,11 +219,15 @@ function resolveRequestBody(config, context) {
     apiType,
     operation,
     runtimeParams = {},
+    requestOverrides,
   } = context;
   if (!isPlainObject(baseBody)) throw new Error('baseBody must be an object');
   if (!SUPPORTED_API_TYPES.has(apiType)) throw new Error(`Unsupported apiType "${apiType}"`);
   if (!SUPPORTED_OPERATIONS.has(operation)) throw new Error(`Unsupported operation "${operation}"`);
   const validatedRuntimeParams = validateParams(runtimeParams, 'runtimeParams');
+  const validatedRequestOverrides = requestOverrides === undefined
+    ? {}
+    : validateOperation(requestOverrides, 'requestOverrides');
 
   const matches = config.models.filter(rule => ruleMatches(rule, model, apiType));
   if (matches.length > 1) throw new Error(`Multiple request parameter rules match "${model}"`);
@@ -234,12 +238,17 @@ function resolveRequestBody(config, context) {
   mergeParams(resolved, validatedRuntimeParams);
   mergeParams(resolved, rule?.params);
   mergeParams(resolved, rule?.operations?.[operation]?.params);
+  // Per-task values (for example a Kimi completion budget) remain stronger
+  // than configurable defaults. Omissions below are intentionally applied
+  // after this merge so users can still remove unsupported provider fields.
+  mergeParams(resolved, validatedRequestOverrides.params);
 
   const omit = [
     ...(config.defaults.omit || []),
     ...(config.defaults.operations?.[operation]?.omit || []),
     ...(rule?.omit || []),
     ...(rule?.operations?.[operation]?.omit || []),
+    ...(validatedRequestOverrides.omit || []),
   ];
   for (const key of omit) delete resolved[key];
   return resolved;

@@ -4,8 +4,11 @@
 
 const path = require('path');
 const fs = require('fs');
+const { AsyncLocalStorage } = require('node:async_hooks');
+const { randomUUID } = require('node:crypto');
 const { resolveStoragePaths } = require('./storage-paths');
 const { repairRecentProjectPaths } = require('./recent-project-paths');
+const { compareTimelineEvents } = require('./timeline-order');
 
 const STORAGE_PATHS = resolveStoragePaths();
 const DB_DIR = STORAGE_PATHS.dataDir;
@@ -25,7 +28,7 @@ let configDb;    // wrapped config database
 // ═══════════════════════════════════════════════════════════════
 
 const CONFIG_SCHEMA_VERSION = 1;
-const PROJECT_SCHEMA_VERSION = 2;
+const PROJECT_SCHEMA_VERSION = 10;
 
 // ═══════════════════════════════════════════════════════════════
 // sql.js wrapper — provides a better-sqlite3-compatible API
@@ -39,8 +42,47 @@ function _loadDb(filePath) {
   return new SQL.Database();
 }
 
+function attachSecondaryError(primaryError, property, secondaryError) {
+  if ((typeof primaryError !== 'object' && typeof primaryError !== 'function') || primaryError === null) return;
+  try {
+    Object.defineProperty(primaryError, property, {
+      value: secondaryError,
+      configurable: true,
+    });
+  } catch {
+    // A frozen/custom thrown value still keeps its original identity below.
+  }
+}
+
 function _flushDb(db, filePath) {
-  const data = db.export();
+  let data;
+  let exportFailed = false;
+  let exportError;
+  try {
+    data = db.export();
+  } catch (error) {
+    exportFailed = true;
+    exportError = error;
+  }
+
+  let restoreFailed = false;
+  let restoreError;
+  try {
+    // sql.js resets connection-local PRAGMAs when export() rebuilds the
+    // underlying database. Every persistence path (scheduled writes,
+    // transactions, migrations, and close) comes through here, so restore
+    // referential-integrity enforcement before returning to callers.
+    db.run('PRAGMA foreign_keys = ON');
+  } catch (error) {
+    restoreFailed = true;
+    restoreError = error;
+  }
+
+  if (exportFailed) {
+    if (restoreFailed) attachSecondaryError(exportError, 'foreignKeyRestoreError', restoreError);
+    throw exportError;
+  }
+  if (restoreFailed) throw restoreError;
   fs.writeFileSync(filePath, Buffer.from(data));
 }
 
@@ -80,7 +122,7 @@ function _buildSql(sqlText, bindMeta) {
 
 /**
  * Wrap a raw sql.js Database instance so it quacks like better-sqlite3.
- * Supports: .pragma(), .prepare(sql).{all,get,run}(), .exec(), .run(), .transaction(), .close()
+ * Supports: .pragma(), .prepare(sql).{all,get,run}(), .exec(), .run(), .transaction(), .flush(), .close()
  *
  * IMPORTANT: Each .run()/.all()/.get() creates its own fresh prepared statement
  * because sql.js's db.export() (called by _flushDb) invalidates ALL existing statements.
@@ -164,16 +206,28 @@ function _wrapDb(db, filePath) {
     transaction(fn) {
       return (...args) => {
         db.run('BEGIN');
+        let result;
         try {
-          const result = fn(...args);
+          result = fn(...args);
           db.run('COMMIT');
-          _flushSync(); // flush immediately after commit for data safety
-          return result;
         } catch (e) {
-          db.run('ROLLBACK');
+          try {
+            db.run('ROLLBACK');
+          } catch (rollbackError) {
+            attachSecondaryError(e, 'rollbackError', rollbackError);
+          }
           throw e;
         }
+        // Keep persistence outside the transaction catch: once COMMIT succeeds,
+        // a flush failure must not trigger an invalid ROLLBACK that hides the
+        // original persistence error.
+        _flushSync(); // flush immediately after commit for data safety
+        return result;
       };
+    },
+
+    flush() {
+      _flushSync();
     },
 
     close() {
@@ -371,6 +425,34 @@ function migrateConfig(db) {
 // ═══════════════════════════════════════════════════════════════
 
 const projectConnections = new Map();
+const projectInstanceContext = new AsyncLocalStorage();
+
+function projectInstanceMismatchError(name) {
+  const error = new Error(`项目"${name}"已被删除并重建，请刷新后重试`);
+  error.code = 'PROJECT_INSTANCE_MISMATCH';
+  error.status = 409;
+  error.recoverable = true;
+  return error;
+}
+
+function readProjectInstanceId(projectDb) {
+  return projectDb
+    .prepare("SELECT value FROM project_meta WHERE key = 'project_instance_id'")
+    .get()?.value || '';
+}
+
+function validateProjectInstance(projectDb, name, expectedInstanceId) {
+  if (!expectedInstanceId) return;
+  const actual = readProjectInstanceId(projectDb);
+  if (!actual || actual !== expectedInstanceId) throw projectInstanceMismatchError(name);
+}
+
+function runWithProjectInstance(name, expectedInstanceId, callback) {
+  return projectInstanceContext.run(
+    { name, expectedInstanceId: typeof expectedInstanceId === 'string' ? expectedInstanceId : '' },
+    callback,
+  );
+}
 
 function getProjectDbPath(name) {
   return path.join(PROJECTS_DIR, `${name}.mythpen.db`);
@@ -395,8 +477,54 @@ function closeProjectDb(filePath) {
   }
 }
 
-function getProjectDb(name) {
+function createProjectDb(name) {
   return openProjectDb(getProjectDbPath(name));
+}
+
+function getProjectDb(name) {
+  const filePath = getProjectDbPath(name);
+  // A freshly created sql.js database is cached immediately but reaches disk
+  // on its scheduled flush. That live connection is the intentional project
+  // instance and must remain usable during this short window.
+  if (projectConnections.has(filePath)) {
+    const projectDb = projectConnections.get(filePath);
+    const context = projectInstanceContext.getStore();
+    if (context?.name === name) validateProjectInstance(projectDb, name, context.expectedInstanceId);
+    return projectDb;
+  }
+  if (!fs.existsSync(filePath)) {
+    // Ordinary reads and writes must never create a database as a side effect.
+    // A delayed request after project deletion would otherwise resurrect a
+    // blank file (or later target a same-name replacement).
+    const error = new Error(`项目"${name}"不存在`);
+    error.code = 'PROJECT_NOT_FOUND';
+    error.status = 404;
+    error.recoverable = true;
+    throw error;
+  }
+  const projectDb = openProjectDb(filePath);
+  const context = projectInstanceContext.getStore();
+  if (context?.name === name) validateProjectInstance(projectDb, name, context.expectedInstanceId);
+  return projectDb;
+}
+
+function assertProjectInstance(name, expectedInstanceId) {
+  const projectDb = getProjectDb(name);
+  validateProjectInstance(projectDb, name, expectedInstanceId);
+  return projectDb;
+}
+
+// Capture the immutable incarnation at the start of a long-running request.
+// Headerless legacy clients still receive the same protection: subsequent DB
+// access runs under this captured token and cannot target a same-name project
+// created after the request began.
+function captureProjectInstance(name, expectedInstanceId = '') {
+  const projectDb = getProjectDb(name);
+  const actualInstanceId = readProjectInstanceId(projectDb);
+  if (!actualInstanceId || (expectedInstanceId && actualInstanceId !== expectedInstanceId)) {
+    throw projectInstanceMismatchError(name);
+  }
+  return actualInstanceId;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -442,6 +570,7 @@ const projectMigrations = [
         name        TEXT NOT NULL UNIQUE,
         age         TEXT DEFAULT '',
         gender      TEXT DEFAULT '',
+        role        TEXT NOT NULL DEFAULT 'minor' CHECK (role IN ('major','minor','extra')),
         appearance  TEXT DEFAULT '',
         personality TEXT DEFAULT '',
         background  TEXT DEFAULT '',
@@ -541,6 +670,7 @@ const projectMigrations = [
         title       TEXT NOT NULL,
         description TEXT DEFAULT '',
         importance  INTEGER DEFAULT 3,
+        sort_order  INTEGER NOT NULL DEFAULT 0,
         created_at  TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE TABLE IF NOT EXISTS clue_board (
@@ -596,6 +726,161 @@ const projectMigrations = [
       db.exec("CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)");
     } catch (e) {
       console.warn("[DB] Migration v1→v2 (index) skipped:", e.message)
+    }
+  },
+  // v2 → v3: persist each character's narrative role
+  (db) => {
+    let addedRoleColumn = false;
+    try {
+      db.exec("ALTER TABLE characters ADD COLUMN role TEXT NOT NULL DEFAULT 'minor' CHECK (role IN ('major','minor','extra'))");
+      addedRoleColumn = true;
+    } catch (e) {
+      // A manually-upgraded database may already have the column. Keep its data.
+      if (!/duplicate column name: role/i.test(String(e.message))) throw e;
+    }
+
+    if (!addedRoleColumn) return;
+
+    // Preserve the previous UI's visible grouping for existing projects:
+    // the first name was shown as protagonist, the next two as supporting,
+    // and all remaining characters as extras.
+    const characters = db.prepare('SELECT id FROM characters ORDER BY name').all();
+    const updateRole = db.prepare('UPDATE characters SET role = ? WHERE id = ?');
+    characters.forEach(({ id }, index) => {
+      const role = index === 0 ? 'major' : index < 3 ? 'minor' : 'extra';
+      updateRole.run(role, id);
+    });
+  },
+  // v3 → v4: persist the user-controlled timeline event order
+  (db) => {
+    let addedSortOrderColumn = false;
+    try {
+      db.exec('ALTER TABLE timeline_events ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+      addedSortOrderColumn = true;
+    } catch (e) {
+      // A manually-upgraded database may already have the column. Keep its order.
+      if (!/duplicate column name: sort_order/i.test(String(e.message))) throw e;
+    }
+
+    db.exec('CREATE INDEX IF NOT EXISTS idx_timeline_events_sort_order ON timeline_events(sort_order, id)');
+    if (!addedSortOrderColumn) return;
+
+    // Give existing projects a stable chronological baseline. Later migrations
+    // decide whether it remains automatic or has been manually overridden.
+    const events = db.prepare('SELECT id, year, title FROM timeline_events').all().sort(compareTimelineEvents);
+    const updateSortOrder = db.prepare('UPDATE timeline_events SET sort_order = ? WHERE id = ?');
+    db.transaction(() => {
+      events.forEach(({ id }, index) => updateSortOrder.run(index + 1, id));
+    })();
+  },
+  // v4 → v5: distinguish automatic date sorting from an author-set order
+  (db) => {
+    const existingMode = db.prepare("SELECT value FROM project_meta WHERE key = 'timeline_sort_mode'").get();
+    if (existingMode) return;
+
+    const currentOrder = db.prepare(
+      'SELECT id, year, title FROM timeline_events ORDER BY sort_order ASC, created_at ASC, id ASC',
+    ).all();
+    const automaticOrder = [...currentOrder].sort(compareTimelineEvents);
+    const mode = currentOrder.every((event, index) => event.id === automaticOrder[index]?.id) ? 'auto' : 'manual';
+    db.prepare("INSERT INTO project_meta (key, value) VALUES ('timeline_sort_mode', ?)").run(mode);
+  },
+  // v5 → v6: keep AI polish proposals separate from confirmed chapter content
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS chapter_revisions (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        chapter_id       INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+        base_content     TEXT NOT NULL,
+        proposed_content TEXT NOT NULL,
+        decisions_json   TEXT NOT NULL DEFAULT '{}',
+        status           TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'accepted', 'rejected', 'superseded')),
+        created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at      TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_chapter_revisions_active
+        ON chapter_revisions(chapter_id, status, id DESC);
+    `);
+  },
+  // v6 → v7: remember the chapter state that a pending polish temporarily replaced
+  (db) => {
+    try {
+      db.exec(`ALTER TABLE chapter_revisions ADD COLUMN previous_chapter_status TEXT
+        CHECK (previous_chapter_status IN ('pending', 'writing', 'review', 'accepted'))`);
+    } catch (error) {
+      if (!/duplicate column name: previous_chapter_status/i.test(String(error.message))) throw error;
+    }
+
+    const chapterColumns = new Set(
+      db.prepare('PRAGMA table_info(chapters)').all().map((column) => column.name),
+    );
+    const canReadChapterStatus = chapterColumns.has('status');
+    const pendingRevisions = db
+      .prepare("SELECT id, chapter_id, base_content FROM chapter_revisions WHERE status = 'pending' AND previous_chapter_status IS NULL")
+      .all();
+
+    db.transaction(() => {
+      for (const revision of pendingRevisions) {
+        const currentStatus = canReadChapterStatus
+          ? db.prepare('SELECT status FROM chapters WHERE id = ?').get(revision.chapter_id)?.status
+          : null;
+        // v6 did not retain the original value. Preserve a non-review status
+        // when one is available; otherwise use a conservative editable state.
+        const previousStatus = currentStatus && currentStatus !== 'review'
+          ? currentStatus
+          : String(revision.base_content || '').trim() ? 'writing' : 'pending';
+        db.prepare('UPDATE chapter_revisions SET previous_chapter_status = ? WHERE id = ?')
+          .run(previousStatus, revision.id);
+      }
+    })();
+  },
+  // v7 → v8: assign every chapter update a database-ordered revision.
+  // Client request/response arrival order is not a safe proxy for commit order:
+  // a delayed response from an older write can arrive after a newer window has
+  // already committed. The trigger keeps the revision correct for every writer
+  // (REST, AI tools, continuation, and revision resolution) without requiring
+  // each call site to remember to increment it.
+  (db) => {
+    const chapterColumns = new Set(
+      db.prepare('PRAGMA table_info(chapters)').all().map((column) => column.name),
+    );
+    // Some legacy/imported databases contain only a subset of project tables.
+    // Keep their migration path valid when there is no chapter data to version.
+    if (chapterColumns.size === 0) return;
+    if (!chapterColumns.has('data_version')) {
+      db.exec('ALTER TABLE chapters ADD COLUMN data_version INTEGER NOT NULL DEFAULT 0');
+    }
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS chapters_data_version_after_update
+      AFTER UPDATE ON chapters
+      FOR EACH ROW
+      WHEN NEW.data_version = OLD.data_version
+      BEGIN
+        UPDATE chapters SET data_version = OLD.data_version + 1 WHERE id = OLD.id;
+      END;
+    `);
+  },
+  // v8 → v9: assign an immutable project incarnation. A project name may be
+  // reused after deletion; clients and long-running AI requests use this token
+  // to prove that a mutation still targets the instance they loaded.
+  (db) => {
+    const existing = db.prepare("SELECT value FROM project_meta WHERE key = 'project_instance_id'").get();
+    if (!existing?.value) {
+      db.prepare("INSERT OR REPLACE INTO project_meta (key, value) VALUES ('project_instance_id', ?)")
+        .run(randomUUID());
+    }
+  },
+  // v9 → v10: legacy/imported chapters could contain SQL NULL despite the
+  // schema default. Revisions use an empty string as the canonical blank text,
+  // so normalize persisted data before optimistic compare-and-swap operations.
+  (db) => {
+    const chapterColumns = new Set(
+      db.prepare('PRAGMA table_info(chapters)').all().map((column) => column.name),
+    );
+    if (chapterColumns.has('content')) {
+      db.prepare("UPDATE chapters SET content = '' WHERE content IS NULL").run();
     }
   },
 ];
@@ -660,10 +945,25 @@ function projectTransaction(projectName, fn) {
 // Shared helpers
 // ═══════════════════════════════════════════════════════════════
 
+function updateProjectWordCount(projectDb, updatedAt = new Date().toISOString()) {
+  const total = projectDb.prepare('SELECT SUM(word_count) as total FROM chapters').get()?.total || 0;
+  projectDb
+    .prepare("INSERT INTO project_meta (key, value) VALUES ('word_count', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(String(total));
+  projectDb
+    .prepare("INSERT INTO project_meta (key, value) VALUES ('updated_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(updatedAt);
+  return total;
+}
+
 function recalculateWordCount(projectName) {
-  const total = projectGet(projectName, 'SELECT SUM(word_count) as total FROM chapters')?.total || 0;
-  projectExecute(projectName, "UPDATE project_meta SET value = ? WHERE key = 'word_count'", [String(total)]);
-  projectExecute(projectName, "UPDATE project_meta SET value = ? WHERE key = 'updated_at'", [new Date().toISOString()]);
+  const projectDb = getProjectDb(projectName);
+  return projectDb.transaction(() => updateProjectWordCount(projectDb))();
+}
+
+function flushAllDatabases() {
+  configDb?.flush();
+  for (const projectDb of projectConnections.values()) projectDb.flush();
 }
 
 function getCoverDir(projectName) {
@@ -686,10 +986,14 @@ const EXT_TO_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', w
 module.exports = {
   initDatabase,
   getConfigDb,
+  createProjectDb,
   getProjectDb,
   getProjectDbPath,
   openProjectDb,
   closeProjectDb,
+  assertProjectInstance,
+  captureProjectInstance,
+  runWithProjectInstance,
   dbQuery,
   dbGet,
   dbExecute,
@@ -698,6 +1002,8 @@ module.exports = {
   projectExecute,
   projectTransaction,
   recalculateWordCount,
+  updateProjectWordCount,
+  flushAllDatabases,
   getDataDir: () => DB_DIR,
   getExportDir: () => EXPORT_DIR,
   getCoverDir,

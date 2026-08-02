@@ -50,9 +50,21 @@ pnpm tauri dev      # Desktop development mode
 pnpm tauri build    # Build desktop installer (.dmg/.msi/.AppImage)
 ```
 
+### PowerShell (without a global `pnpm` command)
+
+From the project root, use Corepack bundled with Node.js to run the pinned pnpm version:
+
+```powershell
+corepack.cmd pnpm dev:all      # Start in browser (frontend + backend + seed data)
+```
+
 ## Storage CLI
 
 The desktop installation includes `mythpen-cli.exe` next to `mythpen.exe` and `mythpen-server.exe`. For commands, migration behavior, and safety guarantees, see [docs/storage-cli.md](./docs/storage-cli.md).
+
+## AI 调试日志
+
+当 OpenAI-compatible 或 Claude 接口请求失败、返回非 JSON，或工具调用参数无法解析时，Mythpen 会将诊断信息写入数据目录的 `logs/ai-debug.jsonl`。该日志为本地 JSON Lines 文件，单个文件达到 2 MiB 时自动轮转，并保留 3 个历史文件。日志不会记录请求正文或 API 密钥；工具参数解析失败时会记录截断后的原始参数、模型、工具名和完成原因，便于定位兼容接口或模型输出问题。
 
 ## Tech Stack
 

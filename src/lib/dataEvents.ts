@@ -5,22 +5,10 @@
 
 import { useChapterStore } from '@/stores/useChapterStore'
 import { useProjectStore } from '@/stores/useProjectStore'
+import { TOOL_ENTITY_MAP, type ToolEntityName } from './toolEntityMap.ts'
 
 /** Entity types that can be modified by AI tool calls. */
-export type EntityType =
-  | 'chapter'
-  | 'volume'
-  | 'character'
-  | 'world'
-  | 'science'
-  | 'foreshadow'
-  | 'relation'
-  | 'memory'
-  | 'timeline'
-  | 'stats'
-  | 'project'
-  | 'chat'
-  | 'all'
+export type EntityType = ToolEntityName
 
 export type DataChangeEvent = { entity: EntityType; ids?: (string | number)[]; source?: 'auto' | 'manual' }
 
@@ -83,15 +71,13 @@ export function refreshAllData(project?: string): Promise<void> {
   const proj = project || useProjectStore.getState().currentProject
 
   // Fire all reloads in parallel
-  const reloads: Promise<any>[] = []
+  const reloads: Promise<unknown>[] = []
 
   if (proj) {
+    // The volumes endpoint already returns the full current chapter content.
+    // Running loadChapterContent in parallel would invalidate this list
+    // generation when the detail request happens to finish first.
     reloads.push(useChapterStore.getState().loadChapters(proj))
-
-    const currentCh = useChapterStore.getState().currentChapter
-    if (currentCh) {
-      reloads.push(useChapterStore.getState().loadChapterContent(proj, currentCh.num))
-    }
   }
 
   reloads.push(useProjectStore.getState().loadProjects())
@@ -124,41 +110,22 @@ export function refreshAllData(project?: string): Promise<void> {
  * Read-only tools (list_*, get_*) return null since they don't modify data.
  */
 
-const TOOL_ENTITY_MAP: Record<string, EntityType | undefined> = {
-  // Chapters
-  create_chapter: 'chapter',
-  update_chapter: 'chapter',
-  delete_chapter: 'chapter',
-  // Characters
-  create_character: 'character',
-  update_character: 'character',
-  // World
-  create_world_entry: 'world',
-  update_world_entry: 'world',
-  // Foreshadows
-  create_foreshadow: 'foreshadow',
-  update_foreshadow: 'foreshadow',
-  // Relations
-  create_relation: 'relation',
-  update_relation: 'relation',
-  // Memories
-  create_memory: 'memory',
-  // Timeline
-  create_timeline_event: 'timeline',
-  update_timeline_event: 'timeline',
-}
-
 /** Given a list of tool call names, return the set of entity types that were modified. */
 export function getModifiedEntities(toolNames: string[]): EntityType[] {
   const entities = new Set<EntityType>()
   for (const name of toolNames) {
-    const entity = TOOL_ENTITY_MAP[name]
-    if (entity) entities.add(entity)
+    const targets = TOOL_ENTITY_MAP[name]
+    if (!targets) continue
+    for (const entity of typeof targets === 'string' ? [targets] : targets) {
+      entities.add(entity)
+    }
   }
   return [...entities]
 }
 
 /** Given a single tool call name, return the entity type if it modifies data, or null. */
 export function getEntityFromTool(toolName: string): EntityType | null {
-  return TOOL_ENTITY_MAP[toolName] ?? null
+  const targets = TOOL_ENTITY_MAP[toolName]
+  if (!targets) return null
+  return typeof targets === 'string' ? targets : (targets[0] ?? null)
 }

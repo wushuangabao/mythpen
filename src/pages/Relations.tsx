@@ -15,6 +15,7 @@ interface PositionedNode {
   x: number
   y: number
   chapterCount: number
+  role: 'major' | 'minor' | 'extra'
 }
 
 interface PositionedLink {
@@ -73,8 +74,7 @@ function computeCircleLayout(
   const nodes: PositionedNode[] = characters.map((c, i) => {
     const angle = (i / count) * 2 * Math.PI - Math.PI / 2 + hash(seed, i) * 0.15
     const r = 24 + ((c.chapterCount || 0) / maxCh) * 20
-    const ch = c.chapterCount || 0
-    const role = ch >= 3 ? 'major' : ch >= 1 ? 'minor' : 'extra'
+    const role = c.role === 'major' || c.role === 'extra' ? c.role : 'minor'
     return {
       id: c.id,
       name: c.name,
@@ -85,6 +85,7 @@ function computeCircleLayout(
       x: cx + rx * Math.cos(angle),
       y: cy + ry * Math.sin(angle),
       chapterCount: c.chapterCount || 0,
+      role,
     }
   })
 
@@ -107,9 +108,12 @@ function computeCircleLayout(
 }
 
 export function Relations() {
-  const { data: characters, loading: charsLoading } = useCharacters()
+  const { data: characters, loading: charsLoading, reload: reloadChars } = useCharacters()
   const { data: relations, loading: relsLoading, reload: reloadRels } = useRelations()
-  useDataRefresh('relation', reloadRels)
+  useDataRefresh(['relation', 'character'], () => {
+    reloadRels()
+    reloadChars()
+  })
   const { t } = useT()
   const project = useProjectName()
   const [layoutSeed, setLayoutSeed] = useState(0)
@@ -134,9 +138,8 @@ export function Relations() {
     try {
       const charList = chars
         .map((c: any) => {
-          const ch = c.chapterCount || 0
           const role =
-            ch >= 3 ? t('relations.roleMajor') : ch >= 1 ? t('relations.roleMinor') : t('relations.roleExtra')
+            c.role === 'major' ? t('pages.roleMajor') : c.role === 'extra' ? t('pages.roleExtra') : t('pages.roleMinor')
           return `${c.name}（${role}）`
         })
         .join('、')
@@ -332,7 +335,7 @@ export function Relations() {
             {nodes.map((node) => (
               <g key={node.id}>
                 {/* Glow for major characters */}
-                {node.color === ROLE_COLORS.major && (
+                {node.role === 'major' && (
                   <circle
                     cx={node.x}
                     cy={node.y}
@@ -348,8 +351,8 @@ export function Relations() {
                   cy={node.y}
                   r={node.radius}
                   fill={node.color}
-                  stroke={node.color === ROLE_COLORS.major ? 'var(--accent-gold)' : 'var(--hairline-light)'}
-                  strokeWidth={node.color === ROLE_COLORS.major ? 2.5 : 1.5}
+                  stroke={node.role === 'major' ? 'var(--accent-gold)' : 'var(--hairline-light)'}
+                  strokeWidth={node.role === 'major' ? 2.5 : 1.5}
                 />
                 <text
                   x={node.x}
@@ -389,6 +392,10 @@ export function Relations() {
             <div className="flex items-center gap-1.5 py-0.5">
               <span className="w-2 h-2 rounded-full shrink-0" style={{ background: ROLE_COLORS.minor }} />
               {t('pages.roleMinor')}
+            </div>
+            <div className="flex items-center gap-1.5 py-0.5">
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: ROLE_COLORS.extra }} />
+              {t('pages.roleExtra')}
             </div>
             <div className="flex items-center gap-1.5 py-0.5">
               <span className="w-3 h-[2px] shrink-0" style={{ background: EDGE_COLORS.pos }} />

@@ -15,7 +15,8 @@ ${context}
 
 - **每写一章必须产出完整正文**，不能只写大纲就交差。大纲是写作的准备，正文才是交付物
 - **写完必须输出总结**，逐章列出章名、字数、关键剧情一句。
-- **接手时用 get_chapter 读前一章结尾**，确保续写衔接
+- **接手时用 get_chapter(chapter_id=...) 读前一章结尾**，确保续写衔接
+- **遵守角色定位**：角色列表中的「主角／配角／客串」是作者确认的长期叙事定位。安排视角、戏份、冲突和关系时必须遵守；未经作者明确要求，不得擅自修改。
 
 ---
 
@@ -26,6 +27,8 @@ ${context}
 ### 第零步 · 判断写什么
 
 用 list_chapters 列出所有章节。
+
+list_chapters 返回的 chapter_id 是章节的稳定标识。之后调用 get_chapter、update_chapter 或 delete_chapter 时，**必须原样传回目标章节的 chapter_id**，不能只依赖可能跨卷重复的章节号。create_chapter 也会返回新章节的 chapter_id。
 
 **情况 A：存在 status 不是 accepted 的章节（pending/writing/review）**
 → 按编号从小到大依次完成。**必须逐一完成所有 pending 章节**，不能只写完一章就停。
@@ -44,7 +47,7 @@ ${context}
 
 ### 第一步 · 了解项目
 
-用 list_characters / list_foreshadows / list_world / get_chapter(前一章) 了解已有设定和前文。
+用 list_characters / list_foreshadows / list_world / get_chapter(chapter_id=前一章的稳定 ID) 了解已有设定和前文。阅读角色时要以其角色定位判断叙事重心，不能用章节出场次数代替定位。
 
 ---
 
@@ -138,8 +141,8 @@ ${context}
 
 【章节写作核心工具】
 - create_chapter(title, volume_id) — 占位创建，**只传 title 和 volume_id**
-- update_chapter(chapter_num, content/outline/status/cognitive_frame/emotional_anchor/world_texture/concrete_mystery/interpersonal_tension) — 写入正文、大纲、状态、5 个叙事维度
-- get_chapter(chapter_num) — 读取完整内容
+- update_chapter(chapter_id, content/outline/status/cognitive_frame/emotional_anchor/world_texture/concrete_mystery/interpersonal_tension) — 按稳定 ID 写入正文、大纲、状态、5 个叙事维度
+- get_chapter(chapter_id) — 按稳定 ID 读取完整内容
 - list_volumes — 查看卷结构
 - list_chapters — 查看章节概览
 

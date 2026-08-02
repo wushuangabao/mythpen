@@ -1,7 +1,7 @@
 /**
  * 种子数据脚本，用来创建一个名叫做 "我的科幻小说" 的示例项目，包含完整的演示数据
  */
-const { initDatabase, getProjectDb, getProjectDbPath, getConfigDb } = require('./db');
+const { initDatabase, createProjectDb, getProjectDbPath, getConfigDb } = require('./db');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 
@@ -13,7 +13,7 @@ function seedProject(name) {
     if (fs.existsSync(f)) fs.unlinkSync(f);
   }
 
-  const db = getProjectDb(name);
+  const db = createProjectDb(name);
 
   // ─── Project Meta ───
   const metaInsert = db.prepare('INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)');
@@ -44,12 +44,12 @@ function seedProject(name) {
 
   // ─── Characters ───
   const chars = [
-    { id: uuidv4(), name: '林晨', age: '28', gender: '男', appearance: '身高178cm，黑色短发，戴细框眼镜', personality: '理性、谨慎、有轻微的社交焦虑', background: '量子物理博士，某研究院研究员', motivation: '寻找失踪导师留下的研究笔记', arc: '从逃避责任到主动承担', ext_markers: '[白大褂从不扣扣子] [思考时会转动钢笔] [说话前必先清嗓子]' },
-    { id: uuidv4(), name: '陈教授', age: '55', gender: '男', appearance: '花白头发，戴老花镜', personality: '严谨、慈祥、执着', background: '量子物理领域泰斗，林晨的导师', motivation: '探索量子领域的终极奥秘', arc: '——', ext_markers: '[总穿灰色中山装] [说话慢条斯理]' },
-    { id: uuidv4(), name: '李薇', age: '26', gender: '女', appearance: '齐肩短发，眼神锐利', personality: '聪明、果断、有秘密', background: '理论物理学家，林晨的同事', motivation: '未知', arc: '从配角到关键人物', ext_markers: '[总带着一个U盘] [手机从不离身]' },
-    { id: uuidv4(), name: '王队长', age: '42', gender: '男', appearance: '国字脸，身材魁梧', personality: '粗犷、直率', background: '研究所安保队长', motivation: '履行职责', arc: '——', ext_markers: '[]' },
+    { id: uuidv4(), name: '林晨', age: '28', gender: '男', role: 'major', appearance: '身高178cm，黑色短发，戴细框眼镜', personality: '理性、谨慎、有轻微的社交焦虑', background: '量子物理博士，某研究院研究员', motivation: '寻找失踪导师留下的研究笔记', arc: '从逃避责任到主动承担', ext_markers: '[白大褂从不扣扣子] [思考时会转动钢笔] [说话前必先清嗓子]' },
+    { id: uuidv4(), name: '陈教授', age: '55', gender: '男', role: 'minor', appearance: '花白头发，戴老花镜', personality: '严谨、慈祥、执着', background: '量子物理领域泰斗，林晨的导师', motivation: '探索量子领域的终极奥秘', arc: '——', ext_markers: '[总穿灰色中山装] [说话慢条斯理]' },
+    { id: uuidv4(), name: '李薇', age: '26', gender: '女', role: 'minor', appearance: '齐肩短发，眼神锐利', personality: '聪明、果断、有秘密', background: '理论物理学家，林晨的同事', motivation: '未知', arc: '从配角到关键人物', ext_markers: '[总带着一个U盘] [手机从不离身]' },
+    { id: uuidv4(), name: '王队长', age: '42', gender: '男', role: 'extra', appearance: '国字脸，身材魁梧', personality: '粗犷、直率', background: '研究所安保队长', motivation: '履行职责', arc: '——', ext_markers: '[]' },
   ];
-  const charInsert = db.prepare(`INSERT INTO characters (id, name, age, gender, appearance, personality, background, motivation, arc, ext_markers) VALUES (@id, @name, @age, @gender, @appearance, @personality, @background, @motivation, @arc, @ext_markers)`);
+  const charInsert = db.prepare(`INSERT INTO characters (id, name, age, gender, role, appearance, personality, background, motivation, arc, ext_markers) VALUES (@id, @name, @age, @gender, @role, @appearance, @personality, @background, @motivation, @arc, @ext_markers)`);
   for (const c of chars) charInsert.run(c);
 
   // ─── Chapter-Character relations ───
@@ -129,8 +129,8 @@ function seedProject(name) {
     { id: uuidv4(), year: '2036.3', title: '林晨发现导师笔记', description: '主实验楼地下三层，笔记本中包含无法解释的数学公式。（故事起点·第1章）', importance: 4 },
     { id: uuidv4(), year: '2036.4', title: '李薇带来线索', description: '李薇向林晨透露量子阵列的异常数据，调查重启。（第3章）', importance: 3 },
   ];
-  const tInsert = db.prepare('INSERT INTO timeline_events (id, year, title, description, importance) VALUES (?, ?, ?, ?, ?)');
-  for (const t of timeline) tInsert.run(t.id, t.year, t.title, t.description, t.importance);
+  const tInsert = db.prepare('INSERT INTO timeline_events (id, year, title, description, importance, sort_order) VALUES (?, ?, ?, ?, ?, ?)');
+  timeline.forEach((t, index) => tInsert.run(t.id, t.year, t.title, t.description, t.importance, index + 1));
 
   // ─── Update recent_projects in config ───
   const configDb = getConfigDb();

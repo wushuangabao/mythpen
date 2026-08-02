@@ -10,6 +10,7 @@ function fallbackProject(row) {
     chapterCount: 0,
     lastOpened: row.last_opened,
     mode: 'medium-novel',
+    instanceId: '',
     status: '未知',
   };
 }
@@ -39,6 +40,7 @@ function readRecentProject(row, { fsApi = fs, openProjectDb }) {
       chapterCount,
       lastOpened: row.last_opened,
       mode: meta.mode || 'medium-novel',
+      instanceId: meta.project_instance_id || '',
       status: wordCount > 30000 ? '写作中' : wordCount > 5000 ? '进行中' : '刚起步',
     };
   } catch {

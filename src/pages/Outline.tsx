@@ -53,10 +53,15 @@ export function Outline() {
     if (!currentProject || !activeChapter) return
     setSaving(true)
     try {
-      await updateChapter(currentProject, activeChapter.num, {
-        outline: outlineText,
-        ...dimensions,
-      })
+      await updateChapter(
+        currentProject,
+        activeChapter.num,
+        {
+          outline: outlineText,
+          ...dimensions,
+        },
+        activeChapter.id,
+      )
       await loadChapters(currentProject)
     } catch (e) {
       console.error('Save failed:', e)
@@ -141,7 +146,7 @@ export function Outline() {
   const handleSaveTitle = async (title: string) => {
     if (!currentProject || !activeChapter) return
     try {
-      await updateChapter(currentProject, activeChapter.num, { title })
+      await updateChapter(currentProject, activeChapter.num, { title }, activeChapter.id)
       await loadChapters(currentProject)
     } catch (e) {
       console.error('Save title failed:', e)

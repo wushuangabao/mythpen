@@ -26,6 +26,8 @@ import { useT } from '@/hooks/useT'
 import { activateOnKeyDown } from '@/lib/a11y'
 import { projectsApi, statsApi } from '@/lib/api'
 import { refreshAllData } from '@/lib/dataEvents'
+import { initializeProjectCacheValue, projectInstanceCacheKey, setProjectCacheValue } from '@/lib/projectCache'
+import { createRequestCommitTracker } from '@/lib/requestCommitTracker'
 import { NEXT_STATUS } from '@/lib/status'
 import { useStats } from '@/lib/useProjectData'
 import { useChapterStore } from '@/stores/useChapterStore'
@@ -50,23 +52,42 @@ const ICON_MAP: Record<string, LucideIcon> = {
 }
 
 export function Sidebar() {
-  const { volumes, currentChapter, setCurrentChapter, loadChapterContent, createChapter } = useChapterStore()
+  const {
+    volumes,
+    currentChapter,
+    projectName: chapterProject,
+    setCurrentChapter,
+    loadChapterContent,
+    createChapter,
+  } = useChapterStore()
   const { activePage, setActivePage } = useSidebarStore()
   const currentProject = useProjectStore((s) => s.currentProject)
+  const currentProjectInstanceId = useProjectStore((s) => {
+    if (!s.currentProject) return null
+    return s.projects.find((project) => project.name === s.currentProject)?.instanceId || null
+  })
   const projectLoading = useProjectStore((s) => s.loading)
   const { data: stats, reload: reloadStats } = useStats()
   useDataRefresh('stats', reloadStats)
   const { t } = useT()
-  const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([])
+  const [sidebarItemsByProject, setSidebarItemsByProject] = useState(() => new Map<string, SidebarItem[]>())
   const [spinKey, setSpinKey] = useState(0)
   const [collapsedVols, setCollapsedVols] = useState<Set<number>>(new Set())
   const [editingTarget, setEditingTarget] = useState(false)
   const [targetInput, setTargetInput] = useState('')
   const targetInputRef = useRef<HTMLInputElement>(null)
+  const targetDraftProjectRef = useRef(currentProject)
+  const sidebarCacheKey = projectInstanceCacheKey(currentProject, currentProjectInstanceId)
+  const sidebarRequestsRef = useRef(createRequestCommitTracker(sidebarCacheKey || ''))
+  sidebarRequestsRef.current.activate(sidebarCacheKey || '')
+  const sidebarItems = sidebarCacheKey ? sidebarItemsByProject.get(sidebarCacheKey) || [] : []
+  const projectOwnsChapters = !!currentProject && chapterProject === currentProject
+  const displayedVolumes = projectOwnsChapters ? volumes : []
+  const displayedCurrentChapter = projectOwnsChapters ? currentChapter : null
 
   const handleSaveTargetWords = useCallback(async () => {
     const val = parseInt(targetInput, 10)
-    if (!Number.isNaN(val) && val >= 1000 && currentProject) {
+    if (!Number.isNaN(val) && val >= 1000 && currentProject && targetDraftProjectRef.current === currentProject) {
       try {
         await statsApi.updateTargetWords(currentProject, val)
         reloadStats()
@@ -97,6 +118,15 @@ export function Sidebar() {
     }
   }, [editingTarget])
 
+  useEffect(() => {
+    // A target draft belongs to the project in which editing started. Never
+    // carry it into a project whose stats arrive later.
+    if (targetDraftProjectRef.current === currentProject) return
+    targetDraftProjectRef.current = currentProject
+    setEditingTarget(false)
+    setTargetInput('')
+  }, [currentProject])
+
   const toggleVolume = (volId: number) => {
     setCollapsedVols((prev) => {
       const next = new Set(prev)
@@ -108,24 +138,46 @@ export function Sidebar() {
 
   // Load sidebar items filtered by project genre
   const loadSidebarItems = useCallback(async () => {
-    if (!currentProject) {
-      setSidebarItems([])
-      return
-    }
+    if (!currentProject || !sidebarCacheKey) return
+    const project = currentProject
+    const cacheKey = sidebarCacheKey
+    const request = sidebarRequestsRef.current.start(cacheKey)
+    if (!request) return
     try {
-      const items = await projectsApi.getSidebarItems(currentProject)
-      setSidebarItems(items)
+      const items = await projectsApi.getSidebarItems(project)
+      const currentState = useProjectStore.getState()
+      const activeInstanceId = currentState.projects.find((candidate) => candidate.name === project)?.instanceId || null
+      if (
+        currentState.currentProject === project &&
+        projectInstanceCacheKey(project, activeInstanceId) === cacheKey &&
+        sidebarRequestsRef.current.claimSuccess(request)
+      ) {
+        setSidebarItemsByProject((current) => {
+          return setProjectCacheValue(current, cacheKey, items)
+        })
+      }
     } catch {
-      setSidebarItems([])
+      const currentState = useProjectStore.getState()
+      const activeInstanceId = currentState.projects.find((candidate) => candidate.name === project)?.instanceId || null
+      if (
+        currentState.currentProject === project &&
+        projectInstanceCacheKey(project, activeInstanceId) === cacheKey &&
+        sidebarRequestsRef.current.isLatest(request)
+      ) {
+        // A transient refresh failure must not remove a menu that was already
+        // loaded successfully for this exact project instance. A same-name
+        // replacement gets a different key and therefore starts empty.
+        setSidebarItemsByProject((current) => {
+          return initializeProjectCacheValue(current, cacheKey, [])
+        })
+      }
     }
-  }, [currentProject])
+  }, [currentProject, sidebarCacheKey])
 
-  // Load sidebar items when project is ready; retry once loaded (race guard)
+  // Load a project-keyed menu once the project metadata is ready.
   useEffect(() => {
-    if (!projectLoading && currentProject && sidebarItems.length === 0) {
-      void loadSidebarItems()
-    }
-  }, [projectLoading, currentProject, sidebarItems.length, loadSidebarItems])
+    if (!projectLoading) void loadSidebarItems()
+  }, [projectLoading, loadSidebarItems])
 
   const handleNewChapter = async (volumeId: number) => {
     if (!currentProject) return
@@ -157,7 +209,7 @@ export function Sidebar() {
             </button>
           </div>
 
-          {volumes.map((vol) => (
+          {displayedVolumes.map((vol) => (
             <div key={vol.id}>
               {/* biome-ignore lint/a11y/useSemanticElements: this composite row contains a separate navigation action. */}
               <div
@@ -194,7 +246,7 @@ export function Sidebar() {
                   <div
                     key={ch.id}
                     className={`flex items-center gap-1.5 px-4 pl-5 py-1 text-[13px] cursor-pointer relative transition-colors
-                  ${currentChapter?.id === ch.id && activePage === 'page-writing' ? 'text-[var(--ink)] bg-[var(--canvas-elevated)]' : 'text-[var(--ink-secondary)]'}
+                  ${displayedCurrentChapter?.id === ch.id && activePage === 'page-writing' ? 'text-[var(--ink)] bg-[var(--canvas-elevated)]' : 'text-[var(--ink-secondary)]'}
                   hover:bg-[var(--canvas-card)]`}
                     role="button"
                     tabIndex={0}
@@ -205,7 +257,7 @@ export function Sidebar() {
                       if (currentProject) loadChapterContent(currentProject, ch.num, ch.volumeId).catch(() => {})
                     }}
                   >
-                    {currentChapter?.id === ch.id && activePage === 'page-writing' && (
+                    {displayedCurrentChapter?.id === ch.id && activePage === 'page-writing' && (
                       <span className="absolute left-0 top-0.5 bottom-0.5 w-[2px] bg-[var(--accent-gold)] rounded-r" />
                     )}
                     <FileText className="w-3.5 h-3.5 shrink-0" />
@@ -218,16 +270,18 @@ export function Sidebar() {
                       status={ch.status}
                       t={t}
                       onCycle={() => {
+                        if (!currentProject) return
+                        const project = currentProject
                         const next = NEXT_STATUS[ch.status] || 'writing'
                         useChapterStore
                           .getState()
-                          .updateChapter(currentProject!, ch.num, { status: next })
+                          .updateChapter(project, ch.num, { status: next }, ch.id)
                           .catch(() => {})
                         // Update local state immediately for UI responsiveness
                         ch.status = next
                         useChapterStore
                           .getState()
-                          .loadChapters(currentProject!)
+                          .loadChapters(project)
                           .catch(() => {})
                       }}
                     />
@@ -417,7 +471,7 @@ export function Sidebar() {
         <div className="flex justify-between py-[2px]">
           <span className="text-[var(--ink-mute)]">{t('sidebar.currentChapter')}</span>
           <span className="font-mono text-[var(--ink-tertiary)]">
-            {currentChapter?.wordCount?.toLocaleString() || '0'} {t('editor.words')}
+            {displayedCurrentChapter?.wordCount?.toLocaleString() || '0'} {t('editor.words')}
           </span>
         </div>
         <div className="flex justify-between py-[2px]">

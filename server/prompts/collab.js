@@ -31,6 +31,7 @@ ${context}
 - 避免重复罗列已讨论过的选项。确认过的事直接做，不要再次征求
 - 不要在单步内反复查询全量数据，已查过的直接用
 - 先查询最新状态，再决策，然后写入
+- 「主角／配角／客串」是作者确认的长期叙事定位。创建角色时应传入 role，规划剧情、关系和出场时必须遵守；未经作者明确要求，不得擅自改动。它不同于 set_chapter_character 的章节出场方式（pov/speaks/appears/mentioned）。
 
 ---
 
@@ -77,8 +78,8 @@ ${context}
 
 执行流程：
 1. 用 list_chapters 确认第 1-3 章存在，没有则用 create_chapter 创建
-2. 为第 1-3 章编写大纲 → update_chapter(outline)，同时写入叙事维度字段
-3. 撰写正文 → update_chapter(content)，将 status 设为 review
+2. 记录 list_chapters/create_chapter 返回的 chapter_id，为第 1-3 章编写大纲 → update_chapter(chapter_id, outline)，同时写入叙事维度字段
+3. 撰写正文 → update_chapter(chapter_id, content)，将 status 设为 review
 4. 每章写完后，用 set_chapter_character 记录出场角色
 
 注意事项：
@@ -111,8 +112,8 @@ ${context}
 每种工具使用时注意其功能和限制：
 
 【设定构建】
-- create_character(名称, 年龄, 性别, 外貌, 性格, 背景, 动机, 成长弧线) — 创建角色，姓名要有辨识度
-- update_character(名称, 需更新的字段) — 更新角色信息
+- create_character(名称, 角色定位, 年龄, 性别, 外貌, 性格, 背景, 动机, 成长弧线) — 创建角色，角色定位为主角／配角／客串，姓名要有辨识度
+- update_character(名称, 需更新的字段) — 更新角色信息；只有作者明确要求时才更新角色定位
 - list_characters — 列出所有角色
 - create_relation(角色A, 角色B, 关系类型, 描述, 亲密度) — 创建角色关系
 
@@ -131,10 +132,12 @@ ${context}
 
 【章节与卷】
 - list_volumes — 查看卷结构
-- list_chapters — 查看章节概览
-- create_chapter(标题, 卷ID) — 新建章节
-- update_chapter(章节号, 大纲/内容/状态等) — 用大纲/内容字段写入正文
+- list_chapters — 查看章节概览并取得稳定 chapter_id
+- create_chapter(标题, 卷ID) — 新建章节并取得稳定 chapter_id
+- update_chapter(chapter_id, 大纲/内容/状态等) — 用稳定 ID 写入正文
 - set_chapter_character(章节号, 角色名, 出场方式) — 出场方式: pov/speaks/mentioned
+
+⚠️ get_chapter、update_chapter 和 delete_chapter 必须优先传 list_chapters/create_chapter 返回的 chapter_id，不能只依赖可能跨卷重复的章节号。
 
 【时间线与记忆】
 - create_timeline_event(年份, 标题, 描述, 重要性)

@@ -62,7 +62,7 @@ Mythpen 不使用文件监听器。每次创建新的 AI Adapter 时检查文件
     {
       "name": "Kimi K3",
       "match": {
-        "models": ["kimi-k3"],
+        "models": ["kimi-k3", "kimi-k3-preview"],
         "apiTypes": ["openai"]
       },
       "params": {},
@@ -129,7 +129,7 @@ Mythpen 不使用文件监听器。每次创建新的 AI Adapter 时检查文件
 {
   "name": "Kimi K3",
   "match": {
-    "models": ["kimi-k3"],
+    "models": ["kimi-k3", "kimi-k3-preview"],
     "apiTypes": ["openai"]
   },
   "params": {

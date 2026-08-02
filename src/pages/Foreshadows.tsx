@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { CheckCircle2, Link2, Loader, Pin, Plus, RefreshCw, Target } from 'lucide-react'
+import { CheckCircle2, Link2, Loader, Pin, Plus, RefreshCw, Target, X } from 'lucide-react'
 import { useState } from 'react'
 import { SimpleCreateDialog } from '@/components/SimpleCreateDialog'
 import { useDataRefresh } from '@/hooks/useDataRefresh'
@@ -11,6 +11,15 @@ interface Column {
   key: string
   icon: LucideIcon
   label: string
+}
+
+interface ForeshadowItem {
+  id: string
+  title: string
+  description?: string
+  status: 'planted' | 'progressing' | 'resolved' | 'abandoned'
+  priority: 'low' | 'normal' | 'high'
+  expected_resolve_chapter?: number
 }
 
 const COLUMNS: Column[] = [
@@ -27,6 +36,7 @@ export function Foreshadows() {
   const project = useProjectName()
   const [showCreate, setShowCreate] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [selectedForeshadow, setSelectedForeshadow] = useState<ForeshadowItem | null>(null)
 
   const handleAIDesign = async () => {
     if (!project) return
@@ -46,7 +56,7 @@ export function Foreshadows() {
       const suggestions = extractAIJsonArray(text)
       if (suggestions) {
         await Promise.all(
-          suggestions.map((s: any) =>
+          suggestions.map((s) =>
             foreshadowsApi.create(project, {
               title: s.title,
               description: s.description || '',
@@ -66,8 +76,9 @@ export function Foreshadows() {
   if (loading)
     return <div className="flex-1 flex items-center justify-center text-[var(--ink-mute)]">{t('common.loading')}</div>
 
-  const list = foreshadows || []
-  const maxChapterNum = Math.max(0, ...(chapters || []).map((c: any) => c.num))
+  const list = (foreshadows || []) as unknown as ForeshadowItem[]
+  const maxChapterNum = Math.max(0, ...(chapters || []).map((c) => c.num))
+  const selectedExpectedResolveChapter = selectedForeshadow?.expected_resolve_chapter ?? 0
   const stats = [
     { label: t('foreshadow.statTotal'), value: String(list.length), color: 'var(--accent-gold)' },
     { label: t('foreshadow.planted'), value: String(list.filter((f) => f.status === 'planted').length) },
@@ -76,10 +87,10 @@ export function Foreshadows() {
     {
       label: t('foreshadow.overdue'),
       value: String(
-        list.filter(
-          (f: any) =>
-            f.status === 'planted' && f.expected_resolve_chapter > 0 && f.expected_resolve_chapter < maxChapterNum,
-        ).length,
+        list.filter((f) => {
+          const expectedResolveChapter = f.expected_resolve_chapter ?? 0
+          return f.status === 'planted' && expectedResolveChapter > 0 && expectedResolveChapter < maxChapterNum
+        }).length,
       ),
       color: 'var(--error)',
     },
@@ -157,6 +168,70 @@ export function Foreshadows() {
         />
       )}
 
+      {selectedForeshadow && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 p-4" role="presentation">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default border-none bg-transparent p-0"
+            aria-label={t('foreshadow.closeDetails')}
+            onClick={() => setSelectedForeshadow(null)}
+          />
+          <section
+            className="relative z-10 flex max-h-[min(560px,calc(100vh-2rem))] w-[560px] max-w-full flex-col overflow-hidden rounded-xl border border-[var(--hairline-light)] bg-[var(--canvas-card)] shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="foreshadow-detail-title"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[var(--hairline)] px-5 py-4">
+              <div className="min-w-0">
+                <div className="mb-1 text-[11px] font-medium tracking-[0.04em] text-[var(--ink-tertiary)] uppercase">
+                  {t('foreshadow.detailTitle')}
+                </div>
+                <h3
+                  id="foreshadow-detail-title"
+                  className="break-words font-display text-[20px] font-semibold text-[var(--ink)]"
+                >
+                  {selectedForeshadow.title}
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-secondary)] transition-colors hover:bg-[var(--canvas-mid)] hover:text-[var(--ink)]"
+                aria-label={t('foreshadow.closeDetails')}
+                onClick={() => setSelectedForeshadow(null)}
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto px-5 py-4 custom-scrollbar">
+              <div className="mb-2 text-[11px] font-medium tracking-[0.04em] text-[var(--ink-secondary)] uppercase">
+                {t('foreshadow.descriptionField')}
+              </div>
+              <p className="whitespace-pre-wrap break-words text-[14px] leading-6 text-[var(--ink-secondary)]">
+                {selectedForeshadow.description || t('foreshadow.noDescription')}
+              </p>
+
+              {selectedExpectedResolveChapter > 0 && (
+                <div className="mt-5 border-t border-[var(--hairline)] pt-4 text-[12px] text-[var(--ink-tertiary)]">
+                  {t('foreshadow.expectedResolve', { n: selectedExpectedResolveChapter })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end border-t border-[var(--hairline)] px-5 py-3">
+              <button
+                type="button"
+                className="h-8 rounded-lg border border-[var(--hairline-light)] bg-[var(--canvas-elevated)] px-4 text-[13px] text-[var(--ink)] transition-colors hover:bg-[var(--canvas-mid)]"
+                onClick={() => setSelectedForeshadow(null)}
+              >
+                {t('foreshadow.closeDetails')}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
       <div className="flex gap-3 px-6 py-4 shrink-0 bg-[var(--canvas-soft)] border-b border-[var(--hairline)]">
         {stats.map((s) => (
           <div
@@ -180,33 +255,41 @@ export function Foreshadows() {
                 <span className="flex items-center gap-1">
                   <ColIcon className="w-3.5 h-3.5" /> {t(col.label)}
                 </span>
-                <span>{list.filter((f: any) => f.status === col.key).length}</span>
+                <span>{list.filter((f) => f.status === col.key).length}</span>
               </div>
               <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
                 {list
-                  .filter((f: any) => f.status === col.key)
-                  .map((f: any) => (
-                    <div
-                      key={f.id}
-                      className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-[var(--radius-sm)] p-2.5 mb-1.5 cursor-pointer transition-colors hover:border-[var(--hairline-light)]"
-                    >
-                      <div className="text-[13px] text-[var(--ink)] flex items-center gap-1.5">
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full shrink-0 inline-block
-                        ${f.priority === 'high' ? 'bg-[var(--error)]' : f.priority === 'normal' ? 'bg-[var(--accent-gold)]' : 'bg-[var(--ink-mute)]'}`}
-                        />
-                        {f.title}
-                      </div>
-                      {f.description && (
-                        <div className="text-[12px] text-[var(--ink-tertiary)] mt-1 line-clamp-2">{f.description}</div>
-                      )}
-                      {f.expected_resolve_chapter > 0 && (
-                        <div className="text-[10px] text-[var(--ink-mute)] mt-1 font-mono">
-                          {t('foreshadow.expectedResolve', { n: f.expected_resolve_chapter })}
+                  .filter((f) => f.status === col.key)
+                  .map((f) => {
+                    const expectedResolveChapter = f.expected_resolve_chapter ?? 0
+                    return (
+                      <button
+                        type="button"
+                        key={f.id}
+                        className="mb-1.5 block w-full rounded-[var(--radius-sm)] border border-[var(--hairline)] bg-[var(--canvas-card)] p-2.5 text-left font-sans transition-colors hover:border-[var(--hairline-light)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent-gold)]"
+                        aria-label={t('foreshadow.viewDetails', { title: f.title })}
+                        onClick={() => setSelectedForeshadow(f)}
+                      >
+                        <div className="text-[13px] text-[var(--ink)] flex items-center gap-1.5">
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 inline-block
+                          ${f.priority === 'high' ? 'bg-[var(--error)]' : f.priority === 'normal' ? 'bg-[var(--accent-gold)]' : 'bg-[var(--ink-mute)]'}`}
+                          />
+                          {f.title}
                         </div>
-                      )}
-                    </div>
-                  ))}
+                        {f.description && (
+                          <div className="text-[12px] text-[var(--ink-tertiary)] mt-1 line-clamp-2">
+                            {f.description}
+                          </div>
+                        )}
+                        {expectedResolveChapter > 0 && (
+                          <div className="text-[10px] text-[var(--ink-mute)] mt-1 font-mono">
+                            {t('foreshadow.expectedResolve', { n: expectedResolveChapter })}
+                          </div>
+                        )}
+                      </button>
+                    )
+                  })}
               </div>
             </div>
           )

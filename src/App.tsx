@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { Fragment, useEffect } from 'react'
 import { AIPanel } from '@/components/AIPanel'
 import { BottomStatusbar } from '@/components/BottomStatusbar'
 import { NewProjectDialog } from '@/components/NewProjectDialog'
@@ -49,6 +49,10 @@ function App() {
   const showProjectList = useProjectStore((s) => s.showProjectList)
   const activePage = useSidebarStore((s) => s.activePage)
   const currentProject = useProjectStore((s) => s.currentProject)
+  const currentProjectInstanceId = useProjectStore((state) => {
+    if (!state.currentProject) return ''
+    return state.projects.find((project) => project.name === state.currentProject)?.instanceId || ''
+  })
   const loadProjects = useProjectStore((s) => s.loadProjects)
   const loadChapters = useChapterStore((s) => s.loadChapters)
   const loadSettings = useSettingsStore((s) => s.loadFromServer)
@@ -78,10 +82,10 @@ function App() {
 
   // Reload chapters when project changes
   useEffect(() => {
-    if (currentProject) {
+    if (currentProject && currentProjectInstanceId) {
       loadChapters(currentProject)
     }
-  }, [currentProject, loadChapters])
+  }, [currentProject, currentProjectInstanceId, loadChapters])
 
   // Restore right panel width from localStorage
   useEffect(() => {
@@ -96,7 +100,7 @@ function App() {
         {showProjectList ? (
           <ProjectList />
         ) : (
-          <>
+          <Fragment key={JSON.stringify([currentProject, currentProjectInstanceId])}>
             <Sidebar />
             <div className="flex-1 flex flex-col min-w-0 min-h-0">
               {/* App view with pages */}
@@ -116,7 +120,7 @@ function App() {
                 {!showProjectList && rightPanelVisible && <AIPanel />}
               </div>
             </div>
-          </>
+          </Fragment>
         )}
       </div>
       <BottomStatusbar />

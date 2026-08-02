@@ -1,11 +1,16 @@
 // ─── Tool schema definitions (OpenAI function-calling format) ───
+const CHARACTER_ROLES = new Set(['major', 'minor', 'extra']);
+const { normalizeCharacterName } = require('./character-validation');
+const { clampTimelineImportance } = require('./timeline-importance');
+const { orderTimelineEvents } = require('./timeline-order');
+
 const TOOLS = [
   // ═══ Chapters ═══
   {
     type: 'function',
     function: {
       name: 'list_chapters',
-      description: '列出小说的所有章节，返回章节编号、标题、状态、字数和摘要。用于了解整体结构和进度。',
+      description: '列出小说的所有章节，返回稳定 chapter_id、卷 ID、章节编号、标题、状态、字数和摘要。后续读写或删除章节时应传回 chapter_id。',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -13,11 +18,18 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'get_chapter',
-      description: '获取指定章节的完整正文内容和详细信息（含大纲、叙事维度等）。用于在续写前了解前文。',
+      description: '获取指定章节的完整正文内容和详细信息（含大纲、叙事维度等）。优先使用 list_chapters 返回的 chapter_id；也可同时传 volume_id 和 chapter_num。只传 chapter_num 时，若多个卷存在同号章节会返回歧义错误。',
       parameters: {
         type: 'object',
-        properties: { chapter_num: { type: 'number', description: '章节编号' } },
-        required: ['chapter_num'],
+        properties: {
+          chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
+          volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
+          chapter_num: { type: 'number', description: '章节编号；同号章节存在于多个卷时还必须提供 volume_id 或 chapter_id' },
+        },
+        anyOf: [
+          { required: ['chapter_id'] },
+          { required: ['chapter_num'] },
+        ],
       },
     },
   },
@@ -48,11 +60,13 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'update_chapter',
-      description: '更新章节内容。可以只更新部分字段，传入哪些就更新哪些。支持更新的字段：title、content、outline、status、summary、cognitive_frame、emotional_anchor、world_texture、concrete_mystery、interpersonal_tension。status 可选值：pending（待写）、writing（写作中）、review（审核中）、accepted（已定稿）。',
+      description: '更新章节内容。优先使用 list_chapters 或 create_chapter 返回的 chapter_id；也可同时传 volume_id 和 chapter_num。只传 chapter_num 时，若多个卷存在同号章节会拒绝更新。可以只更新部分内容字段。status 可选值：pending（待写）、writing（写作中）、review（审核中）、accepted（已定稿）。',
       parameters: {
         type: 'object',
         properties: {
-          chapter_num: { type: 'number', description: '章节编号' },
+          chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
+          volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
+          chapter_num: { type: 'number', description: '章节编号；同号章节存在于多个卷时还必须提供 volume_id 或 chapter_id' },
           title: { type: 'string', description: '标题（可选）' },
           content: { type: 'string', description: '正文内容（可选）' },
           outline: { type: 'string', description: '大纲（可选）' },
@@ -64,7 +78,10 @@ const TOOLS = [
           concrete_mystery: { type: 'string', description: '叙事维度 — 悬念设置：本章要埋下或推进的谜团（可选）' },
           interpersonal_tension: { type: 'string', description: '叙事维度 — 人际张力：角色间的冲突与张力（可选）' },
         },
-        required: ['chapter_num'],
+        anyOf: [
+          { required: ['chapter_id'] },
+          { required: ['chapter_num'] },
+        ],
       },
     },
   },
@@ -72,11 +89,18 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'delete_chapter',
-      description: '删除指定章节。此操作不可逆，请谨慎使用。',
+      description: '删除指定章节。优先使用 list_chapters 返回的 chapter_id；也可同时传 volume_id 和 chapter_num。只传 chapter_num 时，若多个卷存在同号章节会拒绝删除。此操作不可逆，请谨慎使用。',
       parameters: {
         type: 'object',
-        properties: { chapter_num: { type: 'number', description: '要删除的章节编号' } },
-        required: ['chapter_num'],
+        properties: {
+          chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
+          volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
+          chapter_num: { type: 'number', description: '章节编号；同号章节存在于多个卷时还必须提供 volume_id 或 chapter_id' },
+        },
+        anyOf: [
+          { required: ['chapter_id'] },
+          { required: ['chapter_num'] },
+        ],
       },
     },
   },
@@ -86,7 +110,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'list_characters',
-      description: '列出小说所有角色及其基本信息（姓名、年龄、性别、性格、背景等）。',
+      description: '列出小说所有角色及其基本信息（包括角色定位：major=主角、minor=配角、extra=客串）。角色定位是长期叙事定位，不是章节出场方式。',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -94,7 +118,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'get_character',
-      description: '获取指定角色的完整信息，包括外貌、性格、背景、动机、角色弧线等。',
+      description: '获取指定角色的完整信息，包括角色定位、外貌、性格、背景、动机、角色弧线等。',
       parameters: {
         type: 'object',
         properties: { name: { type: 'string', description: '角色姓名' } },
@@ -106,11 +130,12 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'create_character',
-      description: '创建一个新角色。',
+      description: '创建一个新角色。新增角色时应按其长期叙事定位传 role；这不是章节出场方式。',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string', description: '姓名' },
+          role: { type: 'string', enum: ['major', 'minor', 'extra'], description: '长期叙事定位：major=主角，minor=配角，extra=客串；默认 minor，不是章节出场方式' },
           age: { type: 'string', description: '年龄（可选）' },
           gender: { type: 'string', description: '性别（可选）' },
           appearance: { type: 'string', description: '外貌描述（可选）' },
@@ -128,11 +153,12 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'update_character',
-      description: '更新已有角色的信息。只传需要修改的字段。',
+      description: '更新已有角色的信息。只传需要修改的字段；role 是长期叙事定位，不是章节出场方式。',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string', description: '角色姓名' },
+          role: { type: 'string', enum: ['major', 'minor', 'extra'], description: '长期叙事定位：major=主角，minor=配角，extra=客串' },
           age: { type: 'string', description: '年龄' },
           gender: { type: 'string', description: '性别' },
           appearance: { type: 'string', description: '外貌' },
@@ -270,7 +296,9 @@ const TOOLS = [
         properties: {
           category: { type: 'string', enum: ['character', 'location', 'item', 'event', 'promise', 'other'], description: '类别' },
           content: { type: 'string', description: '记忆内容' },
-          source_chapter_num: { type: 'number', description: '来源章节编号（可选）' },
+          source_chapter_id: { type: 'number', description: '来源章节的稳定 ID（推荐，可选）' },
+          source_volume_id: { type: 'number', description: '来源卷 ID；与 source_chapter_num 联合定位章节（可选）' },
+          source_chapter_num: { type: 'number', description: '来源章节编号（兼容旧调用；同号章节存在于多个卷时还需提供 source_volume_id）' },
         },
         required: ['category', 'content'],
       },
@@ -282,7 +310,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'list_timeline',
-      description: '列出小说的所有时间线事件。',
+      description: '按当前年表排序策略列出所有时间线事件。自动排序时会按可识别日期排列；若作者手动调整过顺序，则返回顺序优先于时间字段，必须以返回顺序为准。',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -556,11 +584,13 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'list_chapter_characters',
-      description: '查询指定章节或指定角色的出场记录。可传 chapter_num 按章查询，或传 character_name 按角色查询。',
+      description: '查询指定章节或指定角色的出场记录。按章节查询时优先传 chapter_id，也可同时传 volume_id 和 chapter_num；只传 chapter_num 时若多个卷存在同号章节会返回歧义错误。',
       parameters: {
         type: 'object',
         properties: {
-          chapter_num: { type: 'number', description: '章节编号（可选，不传则按角色查）' },
+          chapter_id: { type: 'number', description: '稳定章节 ID（推荐，可选）' },
+          volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节（可选）' },
+          chapter_num: { type: 'number', description: '章节编号（兼容旧调用；同号章节存在于多个卷时还需提供 volume_id）' },
           character_name: { type: 'string', description: '角色姓名（可选，不传则按章节查）' },
         },
       },
@@ -570,15 +600,21 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'set_chapter_character',
-      description: '设置角色在指定章节中的出场角色（appears/speaks/pov/mentioned）。如果已存在则更新角色。',
+      description: '设置角色在指定章节中的出场角色（appears/speaks/pov/mentioned）。优先传 chapter_id，也可同时传 volume_id 和 chapter_num；只传 chapter_num 时若多个卷存在同号章节会拒绝写入。',
       parameters: {
         type: 'object',
         properties: {
-          chapter_num: { type: 'number', description: '章节编号' },
+          chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
+          volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
+          chapter_num: { type: 'number', description: '章节编号（兼容旧调用；同号章节存在于多个卷时还需提供 volume_id）' },
           character_name: { type: 'string', description: '角色姓名' },
           role: { type: 'string', enum: ['appears', 'speaks', 'pov', 'mentioned'], description: '出场方式' },
         },
-        required: ['chapter_num', 'character_name'],
+        required: ['character_name'],
+        anyOf: [
+          { required: ['chapter_id'] },
+          { required: ['chapter_num'] },
+        ],
       },
     },
   },
@@ -586,14 +622,20 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'remove_chapter_character',
-      description: '移除角色在指定章节中的出场记录。',
+      description: '移除角色在指定章节中的出场记录。优先传 chapter_id，也可同时传 volume_id 和 chapter_num；只传 chapter_num 时若多个卷存在同号章节会拒绝删除。',
       parameters: {
         type: 'object',
         properties: {
-          chapter_num: { type: 'number', description: '章节编号' },
+          chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
+          volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
+          chapter_num: { type: 'number', description: '章节编号（兼容旧调用；同号章节存在于多个卷时还需提供 volume_id）' },
           character_name: { type: 'string', description: '角色姓名' },
         },
-        required: ['chapter_num', 'character_name'],
+        required: ['character_name'],
+        anyOf: [
+          { required: ['chapter_id'] },
+          { required: ['chapter_num'] },
+        ],
       },
     },
   },
@@ -622,7 +664,9 @@ const TOOLS = [
           title: { type: 'string', description: '线索标题' },
           description: { type: 'string', description: '详细描述' },
           kind: { type: 'string', enum: ['clue', 'red-herring', 'deduction', 'question'], description: '条目类型' },
-          related_chapter_num: { type: 'number', description: '关联章节编号（可选）' },
+          related_chapter_id: { type: 'number', description: '关联章节的稳定 ID（推荐，可选）' },
+          related_volume_id: { type: 'number', description: '关联卷 ID；与 related_chapter_num 联合定位章节（可选）' },
+          related_chapter_num: { type: 'number', description: '关联章节编号（兼容旧调用；同号章节存在于多个卷时还需提供 related_volume_id）' },
         },
         required: ['title', 'kind'],
       },
@@ -707,16 +751,92 @@ function executeTool(projectName, toolName, args) {
     return { deleted: true, [idField]: id };
   }
 
+  function positiveInteger(value) {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function isProvided(value) {
+    return value !== undefined && value !== null && value !== '';
+  }
+
+  function hasChapterIdentity(identity = {}) {
+    return isProvided(identity.chapter_id)
+      || isProvided(identity.volume_id)
+      || isProvided(identity.chapter_num);
+  }
+
+  function prefixedChapterIdentity(values, prefix) {
+    return {
+      chapter_id: values[`${prefix}_chapter_id`],
+      volume_id: values[`${prefix}_volume_id`],
+      chapter_num: values[`${prefix}_chapter_num`],
+    };
+  }
+
+  function resolveChapter(identity = {}) {
+    const hasChapterId = isProvided(identity.chapter_id);
+    const hasVolumeId = isProvided(identity.volume_id);
+    const hasChapterNum = isProvided(identity.chapter_num);
+
+    if (hasChapterId) {
+      const chapterId = positiveInteger(identity.chapter_id);
+      if (!chapterId) return { error: '章节 ID 无效', code: 'INVALID_CHAPTER_IDENTITY' };
+      const chapter = pdb.prepare('SELECT * FROM chapters WHERE id = ?').get(chapterId);
+      if (!chapter) return { error: `章节 ID ${chapterId} 不存在`, code: 'CHAPTER_NOT_FOUND' };
+
+      if (hasChapterNum) {
+        const chapterNum = positiveInteger(identity.chapter_num);
+        if (!chapterNum) return { error: '章节编号无效', code: 'INVALID_CHAPTER_IDENTITY' };
+        if (chapter.num !== chapterNum) {
+          return { error: `章节 ID ${chapterId} 与章节编号 ${chapterNum} 不匹配`, code: 'CHAPTER_IDENTITY_MISMATCH' };
+        }
+      }
+      if (hasVolumeId) {
+        const volumeId = positiveInteger(identity.volume_id);
+        if (!volumeId) return { error: '卷 ID 无效', code: 'INVALID_CHAPTER_IDENTITY' };
+        if (chapter.volume_id !== volumeId) {
+          return { error: `章节 ID ${chapterId} 不属于卷 ${volumeId}`, code: 'CHAPTER_IDENTITY_MISMATCH' };
+        }
+      }
+      return { chapter };
+    }
+
+    if (!hasChapterNum) {
+      return { error: '必须提供 chapter_id 或 chapter_num', code: 'INVALID_CHAPTER_IDENTITY' };
+    }
+    const chapterNum = positiveInteger(identity.chapter_num);
+    if (!chapterNum) return { error: '章节编号无效', code: 'INVALID_CHAPTER_IDENTITY' };
+
+    if (hasVolumeId) {
+      const volumeId = positiveInteger(identity.volume_id);
+      if (!volumeId) return { error: '卷 ID 无效', code: 'INVALID_CHAPTER_IDENTITY' };
+      const chapter = pdb.prepare('SELECT * FROM chapters WHERE volume_id = ? AND num = ?').get(volumeId, chapterNum);
+      if (!chapter) return { error: `卷 ${volumeId} 中的章节 ${chapterNum} 不存在`, code: 'CHAPTER_NOT_FOUND' };
+      return { chapter };
+    }
+
+    const candidates = pdb.prepare('SELECT * FROM chapters WHERE num = ? ORDER BY volume_id, id').all(chapterNum);
+    if (candidates.length === 0) return { error: `章节 ${chapterNum} 不存在`, code: 'CHAPTER_NOT_FOUND' };
+    if (candidates.length > 1) {
+      return {
+        error: `多个卷中存在第 ${chapterNum} 章，请提供 chapter_id，或同时提供 volume_id 和 chapter_num`,
+        code: 'AMBIGUOUS_CHAPTER',
+      };
+    }
+    return { chapter: candidates[0] };
+  }
+
   switch (toolName) {
     // ── Chapters ──
     case 'list_chapters': {
-      const rows = pdb.prepare('SELECT num, title, status, word_count, outline, summary, volume_id, created_at, updated_at FROM chapters ORDER BY num').all();
+      const rows = pdb.prepare('SELECT id AS chapter_id, num, title, status, word_count, outline, summary, volume_id, created_at, updated_at FROM chapters ORDER BY volume_id, num').all();
       return rows;
     }
     case 'get_chapter': {
-      const row = pdb.prepare('SELECT * FROM chapters WHERE num = ?').get(args.chapter_num);
-      if (!row) return { error: `章节 ${args.chapter_num} 不存在` };
-      return row;
+      const resolved = resolveChapter(args);
+      if (resolved.error) return resolved;
+      return resolved.chapter;
     }
     case 'create_chapter': {
       const volId = args.volume_id || 1;
@@ -727,16 +847,23 @@ function executeTool(projectName, toolName, args) {
         const max = pdb.prepare('SELECT MAX(num) as mx FROM chapters WHERE volume_id = ?').get(volId);
         num = (max?.mx || 0) + 1;
       }
-      pdb.prepare(`INSERT INTO chapters (volume_id, num, title, outline, content, word_count, status, cognitive_frame, emotional_anchor, world_texture, concrete_mystery, interpersonal_tension, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-        .run(volId, num, args.title, args.outline || '', args.content || '',
-          args.content ? String(args.content).replace(/\s/g, '').length : 0,
-          args.cognitive_frame || '', args.emotional_anchor || '', args.world_texture || '',
-          args.concrete_mystery || '', args.interpersonal_tension || '');
-      return { created: true, chapter_num: num, title: args.title };
+      const created = pdb.transaction(() => {
+        pdb.prepare(`INSERT INTO chapters (volume_id, num, title, outline, content, word_count, status, cognitive_frame, emotional_anchor, world_texture, concrete_mystery, interpersonal_tension, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
+          .run(volId, num, args.title, args.outline || '', args.content || '',
+            args.content ? String(args.content).replace(/\s/g, '').length : 0,
+            args.cognitive_frame || '', args.emotional_anchor || '', args.world_texture || '',
+            args.concrete_mystery || '', args.interpersonal_tension || '');
+        db.updateProjectWordCount(pdb);
+        return pdb.prepare('SELECT id, volume_id, num FROM chapters WHERE volume_id = ? AND num = ?').get(volId, num);
+      })();
+      return { created: true, chapter_id: created.id, volume_id: created.volume_id, chapter_num: created.num, title: args.title };
     }
     case 'update_chapter': {
-      const { chapter_num, ...fields } = args;
+      const resolved = resolveChapter(args);
+      if (resolved.error) return resolved;
+      const chapter = resolved.chapter;
+      const { chapter_id: _chapterId, chapter_num: _chapterNum, volume_id: _volumeId, ...fields } = args;
       const allowed = ['title', 'content', 'outline', 'status', 'summary', 'cognitive_frame', 'emotional_anchor', 'world_texture', 'concrete_mystery', 'interpersonal_tension'];
       const updates = [];
       const params = [];
@@ -753,22 +880,34 @@ function executeTool(projectName, toolName, args) {
         params.push(wc);
       }
       updates.push("updated_at = datetime('now')");
-      params.push(chapter_num);
-      pdb.prepare(`UPDATE chapters SET ${updates.join(', ')} WHERE num = ?`).run(...params);
-      db.recalculateWordCount(projectName);
-      return { updated: true, chapter_num, changed_fields: Object.keys(fields).filter(k => allowed.includes(k)) };
+      params.push(chapter.id);
+      pdb.transaction(() => {
+        pdb.prepare(`UPDATE chapters SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+        db.updateProjectWordCount(pdb);
+      })();
+      return {
+        updated: true,
+        chapter_id: chapter.id,
+        volume_id: chapter.volume_id,
+        chapter_num: chapter.num,
+        changed_fields: Object.keys(fields).filter(k => allowed.includes(k)),
+      };
     }
     case 'delete_chapter': {
-      const row = pdb.prepare('SELECT id FROM chapters WHERE num = ?').get(args.chapter_num);
-      if (!row) return { error: `章节 ${args.chapter_num} 不存在` };
-      pdb.prepare('DELETE FROM chapters WHERE num = ?').run(args.chapter_num);
-      db.recalculateWordCount(projectName);
-      return { deleted: true, chapter_num: args.chapter_num };
+      const resolved = resolveChapter(args);
+      if (resolved.error) return resolved;
+      const chapter = resolved.chapter;
+      pdb.transaction(() => {
+        pdb.prepare('DELETE FROM chapter_revisions WHERE chapter_id = ?').run(chapter.id);
+        pdb.prepare('DELETE FROM chapters WHERE id = ?').run(chapter.id);
+        db.updateProjectWordCount(pdb);
+      })();
+      return { deleted: true, chapter_id: chapter.id, volume_id: chapter.volume_id, chapter_num: chapter.num };
     }
 
     // ── Characters ──
     case 'list_characters': {
-      return pdb.prepare('SELECT id, name, age, gender, personality, background, motivation, arc, notes FROM characters ORDER BY name').all();
+      return pdb.prepare('SELECT id, name, age, gender, role, personality, background, motivation, arc, notes FROM characters ORDER BY name').all();
     }
     case 'get_character': {
       const row = pdb.prepare('SELECT * FROM characters WHERE name = ?').get(args.name);
@@ -783,18 +922,25 @@ function executeTool(projectName, toolName, args) {
       return { ...row, appears_in: chapters };
     }
     case 'create_character': {
+      const name = normalizeCharacterName(args.name);
+      if (!name) return { error: '角色名不能为空' };
+      const role = args.role === undefined || args.role === '' ? 'minor' : args.role;
+      if (!CHARACTER_ROLES.has(role)) return { error: '角色定位必须是 major（主角）、minor（配角）或 extra（客串）' };
       const id = randomUUID();
-      pdb.prepare(`INSERT INTO characters (id, name, age, gender, appearance, personality, background, motivation, arc, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, args.name, args.age || '', args.gender || '', args.appearance || '', args.personality || '',
+      pdb.prepare(`INSERT INTO characters (id, name, age, gender, role, appearance, personality, background, motivation, arc, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, name, args.age || '', args.gender || '', role, args.appearance || '', args.personality || '',
           args.background || '', args.motivation || '', args.arc || '', args.notes || '');
-      return { created: true, id, name: args.name };
+      return { created: true, id, name, role };
     }
     case 'update_character': {
       const { name, ...fields } = args;
       const existing = pdb.prepare('SELECT id FROM characters WHERE name = ?').get(name);
       if (!existing) return { error: `角色 "${name}" 不存在` };
-      const allowed = ['age', 'gender', 'appearance', 'personality', 'background', 'motivation', 'arc', 'notes'];
+      if (fields.role !== undefined && !CHARACTER_ROLES.has(fields.role)) {
+        return { error: '角色定位必须是 major（主角）、minor（配角）或 extra（客串）' };
+      }
+      const allowed = ['role', 'age', 'gender', 'appearance', 'personality', 'background', 'motivation', 'arc', 'notes'];
       const updates = [];
       const params = [];
       for (const key of allowed) {
@@ -873,20 +1019,39 @@ function executeTool(projectName, toolName, args) {
       return pdb.prepare('SELECT * FROM memories ORDER BY created_at DESC').all();
     }
     case 'create_memory': {
+      const sourceIdentity = prefixedChapterIdentity(args, 'source');
+      let sourceChapter = null;
+      if (hasChapterIdentity(sourceIdentity)) {
+        const resolved = resolveChapter(sourceIdentity);
+        if (resolved.error) return resolved;
+        sourceChapter = resolved.chapter;
+      }
       const id = randomUUID();
       pdb.prepare('INSERT INTO memories (id, category, content, source_chapter_id) VALUES (?, ?, ?, ?)')
-        .run(id, args.category, args.content, args.source_chapter_num || null);
-      return { created: true, id, category: args.category };
+        .run(id, args.category, args.content, sourceChapter?.id ?? null);
+      return {
+        created: true,
+        id,
+        category: args.category,
+        source_chapter_id: sourceChapter?.id ?? null,
+        source_volume_id: sourceChapter?.volume_id ?? null,
+        source_chapter_num: sourceChapter?.num ?? null,
+      };
     }
 
     // ── Timeline ──
     case 'list_timeline': {
-      return pdb.prepare('SELECT * FROM timeline_events ORDER BY year').all();
+      const events = pdb.prepare('SELECT * FROM timeline_events ORDER BY sort_order ASC, created_at ASC, id ASC').all();
+      const mode = pdb.prepare("SELECT value FROM project_meta WHERE key = 'timeline_sort_mode'").get()?.value;
+      return orderTimelineEvents(events, mode === 'auto' ? 'auto' : 'manual');
     }
     case 'create_timeline_event': {
+      const importance = clampTimelineImportance(args.importance === undefined ? 3 : args.importance);
+      const maxSortOrder = pdb.prepare('SELECT COALESCE(MAX(sort_order), 0) AS max_sort_order FROM timeline_events').get();
+      const sortOrder = (maxSortOrder?.max_sort_order ?? 0) + 1;
       const id = randomUUID();
-      pdb.prepare('INSERT INTO timeline_events (id, year, title, description, importance) VALUES (?, ?, ?, ?, ?)')
-        .run(id, args.year, args.title, args.description, args.importance || 3);
+      pdb.prepare('INSERT INTO timeline_events (id, year, title, description, importance, sort_order) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, args.year, args.title, args.description, importance, sortOrder);
       return { created: true, id, year: args.year, title: args.title };
     }
 
@@ -908,7 +1073,7 @@ function executeTool(projectName, toolName, args) {
     case 'list_volumes': {
       const vols = pdb.prepare('SELECT * FROM volumes ORDER BY sort_order').all();
       for (const v of vols) {
-        v.chapters = pdb.prepare('SELECT num, title, status, word_count, outline, summary FROM chapters WHERE volume_id = ? ORDER BY num').all(v.id);
+        v.chapters = pdb.prepare('SELECT id AS chapter_id, num, title, status, word_count, outline, summary FROM chapters WHERE volume_id = ? ORDER BY num').all(v.id);
       }
       return vols;
     }
@@ -932,8 +1097,11 @@ function executeTool(projectName, toolName, args) {
     case 'delete_volume': {
       const vol = pdb.prepare('SELECT id FROM volumes WHERE id = ?').get(args.volume_id);
       if (!vol) return { error: `卷 ${args.volume_id} 不存在` };
-      pdb.prepare('DELETE FROM chapters WHERE volume_id = ?').run(args.volume_id);
-      pdb.prepare('DELETE FROM volumes WHERE id = ?').run(args.volume_id);
+      pdb.transaction(() => {
+        pdb.prepare('DELETE FROM chapters WHERE volume_id = ?').run(args.volume_id);
+        pdb.prepare('DELETE FROM volumes WHERE id = ?').run(args.volume_id);
+        db.updateProjectWordCount(pdb);
+      })();
       return { deleted: true, volume_id: args.volume_id };
     }
 
@@ -974,7 +1142,10 @@ function executeTool(projectName, toolName, args) {
 
     // ── Timeline update/delete ──
     case 'update_timeline_event': {
-      return updateById(args.id, 'timeline_events', args, ['year', 'title', 'description', 'importance'], false);
+      const fields = args.importance === undefined
+        ? args
+        : { ...args, importance: clampTimelineImportance(args.importance) };
+      return updateById(args.id, 'timeline_events', fields, ['year', 'title', 'description', 'importance'], false);
     }
     case 'delete_timeline_event': {
       return deleteById(args.id, 'timeline_events', 'id', '事件');
@@ -997,51 +1168,61 @@ function executeTool(projectName, toolName, args) {
 
     // ── Chapter Characters ──
     case 'list_chapter_characters': {
-      if (args.chapter_num) {
-        return pdb.prepare(`
-          SELECT cc.chapter_id, c.title as chapter_title, cc.character_id, ch.name as character_name, cc.role
-          FROM chapter_characters cc
-          JOIN chapters c ON c.id = cc.chapter_id
-          JOIN characters ch ON ch.id = cc.character_id
-          WHERE c.num = ?
-          ORDER BY ch.name`).all(args.chapter_num);
+      const filters = [];
+      const params = [];
+      if (hasChapterIdentity(args)) {
+        const resolved = resolveChapter(args);
+        if (resolved.error) return resolved;
+        filters.push('c.id = ?');
+        params.push(resolved.chapter.id);
       }
       if (args.character_name) {
-        return pdb.prepare(`
-          SELECT cc.chapter_id, c.num as chapter_num, c.title as chapter_title, cc.role
-          FROM chapter_characters cc
-          JOIN chapters c ON c.id = cc.chapter_id
-          JOIN characters ch ON ch.id = cc.character_id
-          WHERE ch.name = ?
-          ORDER BY c.num`).all(args.character_name);
+        filters.push('ch.name = ?');
+        params.push(args.character_name);
       }
-      // Return all
+      const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
       return pdb.prepare(`
-        SELECT cc.chapter_id, c.num as chapter_num, c.title as chapter_title,
-               ch.name as character_name, cc.role
+        SELECT cc.chapter_id, c.volume_id, c.num as chapter_num, c.title as chapter_title,
+               cc.character_id, ch.name as character_name, cc.role
         FROM chapter_characters cc
         JOIN chapters c ON c.id = cc.chapter_id
         JOIN characters ch ON ch.id = cc.character_id
-        ORDER BY c.num, ch.name`).all();
+        ${where}
+        ORDER BY c.volume_id, c.num, ch.name`).all(...params);
     }
     case 'set_chapter_character': {
-      const ch = pdb.prepare('SELECT id FROM chapters WHERE num = ?').get(args.chapter_num);
-      if (!ch) return { error: `章节 ${args.chapter_num} 不存在` };
+      const resolved = resolveChapter(args);
+      if (resolved.error) return resolved;
+      const chapter = resolved.chapter;
       const char = pdb.prepare('SELECT id FROM characters WHERE name = ?').get(args.character_name);
       if (!char) return { error: `角色 ${args.character_name} 不存在` };
       const role = args.role || 'appears';
       pdb.prepare('INSERT OR REPLACE INTO chapter_characters (chapter_id, character_id, role) VALUES (?, ?, ?)')
-        .run(ch.id, char.id, role);
-      return { set: true, chapter_num: args.chapter_num, character_name: args.character_name, role };
+        .run(chapter.id, char.id, role);
+      return {
+        set: true,
+        chapter_id: chapter.id,
+        volume_id: chapter.volume_id,
+        chapter_num: chapter.num,
+        character_name: args.character_name,
+        role,
+      };
     }
     case 'remove_chapter_character': {
-      const ch = pdb.prepare('SELECT id FROM chapters WHERE num = ?').get(args.chapter_num);
-      if (!ch) return { error: `章节 ${args.chapter_num} 不存在` };
+      const resolved = resolveChapter(args);
+      if (resolved.error) return resolved;
+      const chapter = resolved.chapter;
       const char = pdb.prepare('SELECT id FROM characters WHERE name = ?').get(args.character_name);
       if (!char) return { error: `角色 ${args.character_name} 不存在` };
-      const info = pdb.prepare('DELETE FROM chapter_characters WHERE chapter_id = ? AND character_id = ?').run(ch.id, char.id);
-      if (info.changes === 0) return { error: `角色 ${args.character_name} 在章节 ${args.chapter_num} 中没有出场记录` };
-      return { deleted: true, chapter_num: args.chapter_num, character_name: args.character_name };
+      const info = pdb.prepare('DELETE FROM chapter_characters WHERE chapter_id = ? AND character_id = ?').run(chapter.id, char.id);
+      if (info.changes === 0) return { error: `角色 ${args.character_name} 在章节 ${chapter.num} 中没有出场记录` };
+      return {
+        deleted: true,
+        chapter_id: chapter.id,
+        volume_id: chapter.volume_id,
+        chapter_num: chapter.num,
+        character_name: args.character_name,
+      };
     }
 
     // ── Clue Board ──
@@ -1052,15 +1233,25 @@ function executeTool(projectName, toolName, args) {
       return pdb.prepare(sql).all();
     }
     case 'create_clue': {
-      const id = randomUUID();
-      let relatedChapterId = null;
-      if (args.related_chapter_num) {
-        const ch = pdb.prepare('SELECT id FROM chapters WHERE num = ?').get(args.related_chapter_num);
-        if (ch) relatedChapterId = ch.id;
+      const relatedIdentity = prefixedChapterIdentity(args, 'related');
+      let relatedChapter = null;
+      if (hasChapterIdentity(relatedIdentity)) {
+        const resolved = resolveChapter(relatedIdentity);
+        if (resolved.error) return resolved;
+        relatedChapter = resolved.chapter;
       }
+      const id = randomUUID();
       pdb.prepare('INSERT INTO clue_board (id, title, description, kind, related_chapter_id, resolved, created_at) VALUES (?, ?, ?, ?, ?, 0, datetime(\'now\'))')
-        .run(id, args.title, args.description || '', args.kind, relatedChapterId);
-      return { created: true, id, title: args.title, kind: args.kind };
+        .run(id, args.title, args.description || '', args.kind, relatedChapter?.id ?? null);
+      return {
+        created: true,
+        id,
+        title: args.title,
+        kind: args.kind,
+        related_chapter_id: relatedChapter?.id ?? null,
+        related_volume_id: relatedChapter?.volume_id ?? null,
+        related_chapter_num: relatedChapter?.num ?? null,
+      };
     }
     case 'update_clue': {
       const existing = pdb.prepare('SELECT * FROM clue_board WHERE id = ?').get(args.id);

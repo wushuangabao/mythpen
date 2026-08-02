@@ -92,7 +92,7 @@ Mythpen 当前在 `server/ai-adapter.js` 中直接构造 OpenAI-compatible 与 A
     {
       "name": "Kimi K3",
       "match": {
-        "models": ["kimi-k3"],
+        "models": ["kimi-k3", "kimi-k3-preview"],
         "apiTypes": ["openai"]
       },
       "params": {},

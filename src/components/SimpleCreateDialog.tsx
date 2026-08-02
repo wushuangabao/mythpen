@@ -8,6 +8,10 @@ interface Field {
   options?: { value: string; label: string }[]
   required?: boolean
   placeholder?: string
+  defaultValue?: string
+  min?: number
+  max?: number
+  step?: number
 }
 
 interface Props {
@@ -15,10 +19,18 @@ interface Props {
   fields: Field[]
   onSubmit: (values: Record<string, string>) => Promise<void>
   onClose: () => void
+  submitLabel?: string
+  submittingLabel?: string
 }
 
-export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) {
-  const [values, setValues] = useState<Record<string, string>>({})
+export function SimpleCreateDialog({ title, fields, onSubmit, onClose, submitLabel, submittingLabel }: Props) {
+  const [values, setValues] = useState<Record<string, string>>(() => {
+    const defaults: Record<string, string> = {}
+    for (const field of fields) {
+      if (field.defaultValue !== undefined) defaults[field.key] = field.defaultValue
+    }
+    return defaults
+  })
   const [submitting, setSubmitting] = useState(false)
   const { t } = useT()
   const [error, setError] = useState('')
@@ -26,7 +38,7 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
   const update = (key: string, val: string) => setValues((v) => ({ ...v, [key]: val }))
 
   const handleSubmit = async () => {
-    // Check required
+    // Check required fields.
     for (const f of fields) {
       if (f.required && !values[f.key]?.trim()) {
         setError(t('common.requiredField', { label: f.label }))
@@ -38,8 +50,8 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
     try {
       await onSubmit(values)
       onClose()
-    } catch (e: any) {
-      setError(e.message || t('project.createFailed'))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('project.createFailed'))
       setSubmitting(false)
     }
   }
@@ -103,6 +115,9 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
                   className="w-full h-[34px] px-2.5 bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-[var(--radius-sm)] text-[var(--ink)] text-[13px] outline-none focus:border-[var(--accent-gold)]"
                   placeholder={f.placeholder}
                   value={values[f.key] || ''}
+                  min={f.type === 'number' ? f.min : undefined}
+                  max={f.type === 'number' ? f.max : undefined}
+                  step={f.type === 'number' ? f.step : undefined}
                   onChange={(e) => update(f.key, e.target.value)}
                 />
               )}
@@ -124,7 +139,7 @@ export function SimpleCreateDialog({ title, fields, onSubmit, onClose }: Props) 
             onClick={handleSubmit}
             disabled={submitting}
           >
-            {submitting ? t('common.creating') : t('common.create')}
+            {submitting ? (submittingLabel ?? t('common.creating')) : (submitLabel ?? t('common.create'))}
           </button>
         </div>
       </div>

@@ -10,6 +10,7 @@ export interface ProjectInfo {
   chapterCount: number
   lastOpened: string
   status: string
+  instanceId?: string
 }
 
 export interface ProjectMeta {
@@ -31,6 +32,7 @@ export interface Chapter {
   id: number
   volumeId: number
   num: number
+  dataVersion: number
   title: string
   outline: string
   content: string
@@ -55,6 +57,16 @@ export interface Volume {
 }
 
 // ─── Characters ───
+export type CharacterRole = 'major' | 'minor' | 'extra'
+
+export interface CharacterChapterAppearance {
+  chapter_id: number
+  volume_id: number | null
+  num: number
+  title: string
+  role: 'appears' | 'speaks' | 'pov' | 'mentioned'
+}
+
 export interface Character {
   id: string
   name: string
@@ -69,7 +81,8 @@ export interface Character {
   avatar: string
   notes: string
   chapterCount?: number
-  role?: 'major' | 'minor' | 'extra'
+  appearances?: CharacterChapterAppearance[]
+  role: CharacterRole
 }
 
 // ─── World ───
@@ -153,6 +166,7 @@ export interface TimelineEvent {
   title: string
   description: string
   importance: number
+  sort_order: number
 }
 
 // ─── Workflow ───

@@ -2,6 +2,9 @@
 // Dev: /api is proxied by Vite to localhost:3001
 // Tauri production: sidecar server runs on 127.0.0.1:3001
 
+import { getProjectInstanceHeaders, PROJECT_INSTANCE_HEADER } from './projectInstanceRegistry.ts'
+import { runProjectRequest, suspendProjectRequests } from './projectRequestGate.ts'
+
 // In Tauri v2, __TAURI_INTERNALS__ is injected by the runtime automatically.
 // No npm package needed for this detection.
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -11,35 +14,92 @@ const API_BASE = isTauri ? 'http://127.0.0.1:3001/api' : '/api'
 // when a project name is empty. Skip the protocol colon so http:// stays.
 export const apiUrl = (path: string) => `${API_BASE}${path}`.replace(/([^:]\/)\/+/g, '$1')
 
-async function request(path: string, options: any = {}) {
+export class ApiError extends Error {
+  readonly status: number
+  readonly code?: string
+  readonly recoverable: boolean
+
+  constructor(message: string, status: number, code?: string, recoverable = false) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.recoverable = recoverable
+  }
+}
+
+async function ensureResponseOk(res: Response): Promise<void> {
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: { message: res.statusText } }))
+    const detail = err.error ?? err
+    throw new ApiError(
+      (typeof detail === 'string' ? detail : detail?.message) || `HTTP ${res.status}`,
+      res.status,
+      typeof detail?.code === 'string' ? detail.code : undefined,
+      detail?.recoverable === true,
+    )
+  }
+}
+
+async function parseJsonResponse(res: Response) {
+  await ensureResponseOk(res)
+  return res.json()
+}
+
+async function performRequest(path: string, options: any = {}) {
   const url = apiUrl(path)
   const config: any = {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers },
   }
   if (config.body && typeof config.body === 'object') {
     config.body = JSON.stringify(config.body)
   }
-  const res = await fetch(url, config)
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: { message: res.statusText } }))
-    throw new Error(err.error?.message || err.message || `HTTP ${res.status}`)
-  }
-  return res.json()
+  return parseJsonResponse(await fetch(url, config))
 }
+
+function request(path: string, options: any = {}) {
+  return performRequest(path, options)
+}
+
+/** Project scope is explicit; project names may equal global route names. */
+function projectRequest(project: string, path: string, options: any = {}) {
+  const projectOptions = {
+    ...options,
+    headers: { ...options.headers, ...getProjectInstanceHeaders(project) },
+  }
+  return runProjectRequest(project, () => performRequest(path, projectOptions))
+}
+
+/** Only project deletion bypasses its own suspension after in-flight work drains. */
+function projectDeleteRequest(project: string, expectedInstanceId: string) {
+  if (!expectedInstanceId) return Promise.reject(new Error('Project instance is not loaded'))
+  return performRequest(`/projects/by-name/${encodeURIComponent(project)}`, {
+    method: 'DELETE',
+    // The caller captures this token before suspending/draining requests. Never
+    // consult the mutable registry here: the same name may already be a new DB.
+    headers: { [PROJECT_INSTANCE_HEADER]: expectedInstanceId },
+  })
+}
+
+export const suspendProjectApiRequests = suspendProjectRequests
 
 // ─── Projects ───
 
 export const projectsApi = {
   list: () => request('/projects'),
-  get: (name: string) => request(`/projects/${encodeURIComponent(name)}`),
-  create: (data: any) => request('/projects', { method: 'POST', body: data }),
-  delete: (name: string) => request(`/projects/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-  getPhase: (name: string) => request(`/${encodeURIComponent(name)}/workflow/phase`),
+  get: (name: string) => projectRequest(name, `/projects/by-name/${encodeURIComponent(name)}`),
+  create: (data: any) => {
+    const project = typeof data?.name === 'string' && data.name ? data.name : null
+    const options = { method: 'POST', body: data }
+    return project ? projectRequest(project, '/projects', options) : request('/projects', options)
+  },
+  delete: (name: string, expectedInstanceId: string) => projectDeleteRequest(name, expectedInstanceId),
+  getPhase: (name: string) => projectRequest(name, `/${encodeURIComponent(name)}/workflow/phase`),
   setPhase: (name: string, phase: string) =>
-    request(`/${encodeURIComponent(name)}/workflow/phase`, { method: 'PUT', body: { phase } }),
+    projectRequest(name, `/${encodeURIComponent(name)}/workflow/phase`, { method: 'PUT', body: { phase } }),
   getSidebarItems: async (name: string) => {
-    const items: any[] = await request(`/${encodeURIComponent(name)}/sidebar-items`)
+    const items: any[] = await projectRequest(name, `/${encodeURIComponent(name)}/sidebar-items`)
     return items.map((item: any) => ({
       id: item.id,
       labelKey: item.label_key,
@@ -52,51 +112,147 @@ export const projectsApi = {
     }))
   },
   uploadCover: (name: string, data: string, mime: string) =>
-    request(`/${encodeURIComponent(name)}/cover`, { method: 'POST', body: { data, mime } }),
-  deleteCover: (name: string) => request(`/${encodeURIComponent(name)}/cover`, { method: 'DELETE' }),
+    projectRequest(name, `/${encodeURIComponent(name)}/cover`, { method: 'POST', body: { data, mime } }),
+  deleteCover: (name: string) => projectRequest(name, `/${encodeURIComponent(name)}/cover`, { method: 'DELETE' }),
   getCoverUrl: (name: string) => apiUrl(`/${encodeURIComponent(name)}/cover`),
 }
 
 // ─── Chapters ───
 
 export const chaptersApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/chapters`),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/chapters`),
   get: (project: string, num: number, volumeId?: number) =>
-    request(`/${encodeURIComponent(project)}/chapters/${num}${volumeId ? `?volume_id=${volumeId}` : ''}`),
-  update: (project: string, num: number, data: any) =>
-    request(`/${encodeURIComponent(project)}/chapters/${num}`, { method: 'PUT', body: data }),
+    projectRequest(
+      project,
+      `/${encodeURIComponent(project)}/chapters/${num}${volumeId ? `?volume_id=${volumeId}` : ''}`,
+    ),
+  update: (project: string, num: number, data: any, chapterId?: number, expectedDataVersion?: number) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/chapters/${num}`, {
+      method: 'PUT',
+      body: {
+        ...data,
+        ...(chapterId === undefined ? {} : { chapter_id: chapterId }),
+        ...(expectedDataVersion === undefined ? {} : { expected_data_version: expectedDataVersion }),
+      },
+    }),
   create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/chapters`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/chapters`, { method: 'POST', body: data }),
+}
+
+export type RevisionDecision = 'accepted' | 'rejected'
+
+export interface ChapterRevision {
+  id: number
+  chapterId: number
+  baseContent: string
+  proposedContent: string
+  decisions: Record<string, RevisionDecision>
+  status: 'pending' | 'accepted' | 'rejected' | 'superseded'
+  previousChapterStatus?: string | null
+  createdAt: string
+  updatedAt: string
+  resolvedAt: string | null
+}
+
+export interface ChapterRevisionResponse {
+  revision: ChapterRevision | null
+  rebased?: boolean
+  chapterDataVersion?: number
+}
+
+export interface ChapterRevisionApplyResponse {
+  success?: boolean
+  chapterId?: number
+  content?: string
+  wordCount?: number
+  status?: string
+  dataVersion?: number
+  revision?: ChapterRevision
+  rebased?: boolean
+  conflicted?: boolean
+}
+
+export interface ContinuationDoneResponse {
+  success: true
+  content: string
+  chapterId: number
+  chapterContent: string
+  wordCount: number
+  dataVersion?: number
+}
+
+export const chapterRevisionsApi = {
+  getActive: (project: string, chapterId: number) =>
+    projectRequest(
+      project,
+      `/${encodeURIComponent(project)}/chapters/${chapterId}/revisions/active`,
+    ) as Promise<ChapterRevisionResponse>,
+  updateDecisions: (
+    project: string,
+    revisionId: number,
+    decisions: Record<string, RevisionDecision>,
+    expectedBaseContent: string,
+  ) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}`, {
+      method: 'PATCH',
+      body: { decisions, expectedBaseContent },
+    }) as Promise<ChapterRevisionResponse>,
+  acceptAll: (project: string, revisionId: number, expectedBaseContent: string) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/accept-all`, {
+      method: 'POST',
+      body: { expectedBaseContent },
+    }) as Promise<ChapterRevisionApplyResponse>,
+  rejectAll: (project: string, revisionId: number, expectedBaseContent: string) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/reject-all`, {
+      method: 'POST',
+      body: { expectedBaseContent },
+    }) as Promise<ChapterRevisionApplyResponse>,
+  finalize: (
+    project: string,
+    revisionId: number,
+    content: string,
+    expectedBaseContent: string,
+    expectedDecisions: Record<string, RevisionDecision>,
+  ) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/finalize`, {
+      method: 'POST',
+      body: { content, expectedBaseContent, expectedDecisions },
+    }) as Promise<ChapterRevisionApplyResponse>,
 }
 
 // ─── Volumes ───
 
 export const volumesApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/volumes`),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/volumes`),
 }
 
 // ─── Characters ───
 
 export const charactersApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/characters`),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/characters`),
   create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/characters`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/characters`, { method: 'POST', body: data }),
+  update: (project: string, id: string, data: any) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/characters/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: data,
+    }),
 }
 
 // ─── World ───
 
 export const worldApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/world`),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/world`),
   create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/world`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/world`, { method: 'POST', body: data }),
 }
 
 // ─── Science ───
 
 export const scienceApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/science`),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/science`),
   create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/science`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/science`, { method: 'POST', body: data }),
 }
 
 // ─── Foreshadows ───
@@ -104,45 +260,76 @@ export const scienceApi = {
 export const foreshadowsApi = {
   list: (project: string, status?: string) => {
     const qs = status ? `?status=${encodeURIComponent(status)}` : ''
-    return request(`/${encodeURIComponent(project)}/foreshadows${qs}`)
+    return projectRequest(project, `/${encodeURIComponent(project)}/foreshadows${qs}`)
   },
   create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/foreshadows`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/foreshadows`, { method: 'POST', body: data }),
 }
 
 // ─── Relations ───
 
 export const relationsApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/relations`),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/relations`),
   create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/relations`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/relations`, { method: 'POST', body: data }),
 }
 
 // ─── Memories ───
 
 export const memoriesApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/memories`),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/memories`),
   create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/memories`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/memories`, { method: 'POST', body: data }),
   search: (project: string, query: string) =>
-    request(`/${encodeURIComponent(project)}/memories/search`, { method: 'POST', body: { query } }),
+    projectRequest(project, `/${encodeURIComponent(project)}/memories/search`, {
+      method: 'POST',
+      body: { query },
+    }),
 }
 
 // ─── Timeline ───
 
+type TimelineEventInput = {
+  year: string
+  title: string
+  description?: string
+  importance?: number
+}
+
 export const timelineApi = {
-  list: (project: string) => request(`/${encodeURIComponent(project)}/timeline`),
-  create: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/timeline`, { method: 'POST', body: data }),
+  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/timeline`),
+  getOrderMode: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/timeline/order-mode`),
+  create: (project: string, data: TimelineEventInput) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/timeline`, { method: 'POST', body: data }),
+  update: (project: string, id: string, data: Partial<TimelineEventInput>) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/timeline/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: data,
+    }),
+  reorder: (project: string, ids: string[]) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/timeline/order`, { method: 'PUT', body: { ids } }),
+  restoreAutoOrder: (project: string) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/timeline/order-mode`, {
+      method: 'PUT',
+      body: { mode: 'auto' },
+    }),
+  delete: (project: string, id: string) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/timeline/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 }
 
 // ─── Stats ───
 
 export const statsApi = {
-  get: (project: string) => request(`/${encodeURIComponent(project)}/stats`),
+  get: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/stats`),
   updateTargetWords: (project: string, targetWords: number) =>
-    request(`/${encodeURIComponent(project)}/target-words`, { method: 'PUT', body: { targetWords } }),
-  resetTargetWords: (project: string) => request(`/${encodeURIComponent(project)}/target-words`, { method: 'DELETE' }),
+    projectRequest(project, `/${encodeURIComponent(project)}/target-words`, {
+      method: 'PUT',
+      body: { targetWords },
+    }),
+  resetTargetWords: (project: string) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/target-words`, { method: 'DELETE' }),
 }
 
 // ─── Settings ───
@@ -156,14 +343,20 @@ export const settingsApi = {
 
 function aiRequest(path: string, options: any = {}) {
   const url = apiUrl(path)
+  const project = typeof options.body?.project === 'string' ? options.body.project : null
   const config: any = {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+      ...(project ? getProjectInstanceHeaders(project) : {}),
+    },
   }
   if (config.body && typeof config.body === 'object') {
     config.body = JSON.stringify(config.body)
   }
-  return fetch(url, config)
+  const perform = async () => parseJsonResponse(await fetch(url, config))
+  return project ? runProjectRequest(project, perform) : perform()
 }
 
 // Shared SSE stream reader — handles buffering, line splitting, event dispatch
@@ -175,33 +368,65 @@ async function readSSEStream(response: Response, handlers: Record<string, (paylo
   const decoder = new TextDecoder()
   let buffer = ''
   let currentEvent = ''
+  let dataLines: string[] = []
+
+  const dispatch = () => {
+    if (dataLines.length === 0) {
+      currentEvent = ''
+      return
+    }
+
+    const event = currentEvent
+    const payload = dataLines.join('\n')
+    currentEvent = ''
+    dataLines = []
+    if (payload === '[DONE]') return
+
+    const handler = handlers[event]
+    if (!handler) return
+
+    let data: any
+    try {
+      data = JSON.parse(payload)
+    } catch {
+      throw new Error(`Invalid ${event || 'message'} SSE payload`)
+    }
+    handler(data)
+  }
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (line === '') {
+      dispatch()
+      return
+    }
+    if (line.startsWith(':')) return
+
+    const separator = line.indexOf(':')
+    if (separator < 0) return
+    const field = line.slice(0, separator)
+    let value = line.slice(separator + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+
+    if (field === 'event') currentEvent = value
+    if (field === 'data') dataLines.push(value)
+  }
+
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
     const lines = buffer.split('\n')
     buffer = lines.pop() || ''
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim()
-        continue
-      }
-      if (!line.startsWith('data: ')) continue
-      const payload = line.slice(6).trim()
-      if (payload === '[DONE]') continue
-      try {
-        const handler = handlers[currentEvent]
-        if (handler) handler(JSON.parse(payload))
-      } catch {
-        /* ignore parse errors */
-      }
-    }
+    for (const line of lines) processLine(line)
   }
+  buffer += decoder.decode()
+  if (buffer) processLine(buffer)
+  dispatch()
 }
 
 export const aiApi = {
-  chat: (messages: any[], project: string) =>
-    aiRequest('/ai/chat', { method: 'POST', body: { messages, project } }).then((r) => r.json()),
+  chat: (messages: any[], project: string) => aiRequest('/ai/chat', { method: 'POST', body: { messages, project } }),
 
   chatStream: (
     messages: any[],
@@ -214,46 +439,57 @@ export const aiApi = {
     onToolResult?: (tr: any) => void,
   ) => {
     const controller = new AbortController()
-    fetch(`${API_BASE}/ai/chat/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, project, mode }),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
+    runProjectRequest(project, () =>
+      fetch(`${API_BASE}/ai/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
+        body: JSON.stringify({ messages, project, mode }),
+        signal: controller.signal,
+      }).then(async (response) => {
+        await ensureResponseOk(response)
         let gotError = false
+        let finished = false
+        const handleStreamError = (data: any) => {
+          if (gotError) return
+          gotError = true
+          onError(data)
+        }
         await readSSEStream(response, {
           content_chunk: (data) => onChunk(data.text || ''),
           tool_call: (data) => onToolCall?.(data),
           tool_result: (data) => onToolResult?.(data),
-          error: (data) => {
-            gotError = true
-            onError(data)
+          error: handleStreamError,
+          task_error: handleStreamError,
+          task_end: () => {
+            finished = true
           },
         })
-        if (!gotError) onEnd()
-      })
-      .catch((e) => onError(e))
+        if (gotError) return
+        if (finished) onEnd()
+        else onError(new Error('AI stream ended before completion'))
+      }),
+    ).catch((e) => onError(e))
     return controller
   },
 
   continueWriting: (
-    chapterNum: number,
+    chapterId: number,
     context: string,
     project: string,
     onChunk: (t: string) => void,
-    onEnd: (data?: any) => void,
+    onEnd: (data?: ContinuationDoneResponse) => void,
     onError: (e: any) => void,
   ) => {
     const controller = new AbortController()
     let finished = false
-    fetch(`${API_BASE}/ai/continue`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chapterNum, context, project }),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
+    runProjectRequest(project, () =>
+      fetch(`${API_BASE}/ai/continue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
+        body: JSON.stringify({ chapterId, context, project }),
+        signal: controller.signal,
+      }).then(async (response) => {
+        await ensureResponseOk(response)
         let _gotError = false
         await readSSEStream(response, {
           content_chunk: (data) => onChunk(data.text || ''),
@@ -267,9 +503,45 @@ export const aiApi = {
             onError(data)
           },
         })
-        if (!finished) onEnd()
-      })
-      .catch((e) => onError(e))
+        if (!finished && !_gotError) onError(new Error('AI stream ended before completion'))
+      }),
+    ).catch((e) => onError(e))
+    return controller
+  },
+
+  polishChapter: (
+    chapterId: number,
+    project: string,
+    onChunk: (t: string) => void,
+    onEnd: (data?: { revision?: ChapterRevision; unchanged?: boolean; rebased?: boolean }) => void,
+    onError: (e: any) => void,
+  ) => {
+    const controller = new AbortController()
+    let finished = false
+    runProjectRequest(project, () =>
+      fetch(`${API_BASE}/ai/polish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
+        body: JSON.stringify({ chapterId, project }),
+        signal: controller.signal,
+      }).then(async (response) => {
+        await ensureResponseOk(response)
+        let gotError = false
+        await readSSEStream(response, {
+          content_chunk: (data) => onChunk(data.text || ''),
+          done: (data) => {
+            finished = true
+            onEnd(data)
+          },
+          error: (data) => {
+            gotError = true
+            finished = true
+            onError(data)
+          },
+        })
+        if (!finished && !gotError) onError(new Error('AI stream ended before completion'))
+      }),
+    ).catch((e) => onError(e))
     return controller
   },
 }
@@ -277,19 +549,22 @@ export const aiApi = {
 // ─── Chat sessions ───
 
 export const chatApi = {
-  listSessions: (project: string) => request(`/${encodeURIComponent(project)}/chat/sessions`),
+  listSessions: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/chat/sessions`),
   createSession: (project: string, title?: string) =>
-    request(`/${encodeURIComponent(project)}/chat/sessions`, { method: 'POST', body: { title } }),
+    projectRequest(project, `/${encodeURIComponent(project)}/chat/sessions`, { method: 'POST', body: { title } }),
   deleteSession: (project: string, sessionId: string) =>
-    request(`/${encodeURIComponent(project)}/chat/sessions/${sessionId}`, { method: 'DELETE' }),
+    projectRequest(project, `/${encodeURIComponent(project)}/chat/sessions/${sessionId}`, { method: 'DELETE' }),
   updateSession: (project: string, sessionId: string, title: string) =>
-    request(`/${encodeURIComponent(project)}/chat/sessions/${sessionId}`, { method: 'PUT', body: { title } }),
+    projectRequest(project, `/${encodeURIComponent(project)}/chat/sessions/${sessionId}`, {
+      method: 'PUT',
+      body: { title },
+    }),
   list: (project: string, sessionId?: string) => {
     const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
-    return request(`/${encodeURIComponent(project)}/chat/messages${qs}`)
+    return projectRequest(project, `/${encodeURIComponent(project)}/chat/messages${qs}`)
   },
   save: (project: string, data: any) =>
-    request(`/${encodeURIComponent(project)}/chat/messages`, { method: 'POST', body: data }),
+    projectRequest(project, `/${encodeURIComponent(project)}/chat/messages`, { method: 'POST', body: data }),
 }
 
 // ─── AI Response JSON extraction utilities ───

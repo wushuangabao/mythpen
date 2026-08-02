@@ -25,35 +25,61 @@ import {
   volumesApi,
   worldApi,
 } from './api'
+import { createProjectDataFetcher, projectDataDependencyKey } from './projectDataScope'
+import { createRequestCommitTracker } from './requestCommitTracker'
 
 // ─── Generic fetch hook ───
 function useApiData<T>(
-  fetcher: () => Promise<T>,
+  fetcher: (() => Promise<T>) | null,
   dependencyKey: string,
 ): { data: T | null; loading: boolean; error: string | null; reload: () => void } {
-  const [data, setData] = useState<T | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [dataState, setDataState] = useState<{ key: string; value: T } | null>(null)
+  const [requestState, setRequestState] = useState<{ key: string; loading: boolean; error: string | null }>(() => ({
+    key: dependencyKey,
+    loading: fetcher !== null,
+    error: null,
+  }))
 
   const fetcherRef = useRef(fetcher)
   const activeDependencyKeyRef = useRef(dependencyKey)
+  const requestTrackerRef = useRef(createRequestCommitTracker(dependencyKey))
   fetcherRef.current = fetcher
+  // Invalidate the previous project's response as soon as this render observes
+  // a new key, without waiting for the effect that starts the replacement load.
+  activeDependencyKeyRef.current = dependencyKey
+  requestTrackerRef.current.activate(dependencyKey)
 
   const load = useCallback(async (requestDependencyKey: string) => {
-    activeDependencyKeyRef.current = requestDependencyKey
-    setLoading(true)
-    setError(null)
+    // A callback captured by an older render must not restart that old key with
+    // the current fetcher or disturb the current loading state.
+    if (activeDependencyKeyRef.current !== requestDependencyKey) return
+    const activeFetcher = fetcherRef.current
+    if (!activeFetcher) return
+    const ticket = requestTrackerRef.current.start(requestDependencyKey)
+    if (!ticket) return
+    setRequestState({ key: requestDependencyKey, loading: true, error: null })
     try {
-      const result = await fetcherRef.current()
-      if (activeDependencyKeyRef.current === requestDependencyKey) setData(result)
+      const result = await activeFetcher()
+      if (requestTrackerRef.current.claimSuccess(ticket)) {
+        setDataState({ key: requestDependencyKey, value: result })
+        setRequestState((current) => (current.key === requestDependencyKey ? { ...current, error: null } : current))
+      }
     } catch (e) {
-      if (activeDependencyKeyRef.current === requestDependencyKey) setError((e as Error).message)
+      if (requestTrackerRef.current.isLatest(ticket)) {
+        setRequestState({ key: requestDependencyKey, loading: false, error: (e as Error).message })
+      }
     } finally {
-      if (activeDependencyKeyRef.current === requestDependencyKey) setLoading(false)
+      if (requestTrackerRef.current.isLatest(ticket)) {
+        setRequestState((current) => (current.key === requestDependencyKey ? { ...current, loading: false } : current))
+      }
     }
   }, [])
 
   useEffect(() => {
+    if (!fetcherRef.current) {
+      setRequestState({ key: dependencyKey, loading: false, error: null })
+      return
+    }
     void load(dependencyKey)
   }, [dependencyKey, load])
 
@@ -61,35 +87,50 @@ function useApiData<T>(
     void load(dependencyKey)
   }, [dependencyKey, load])
 
-  return { data, loading, error, reload }
+  return {
+    data: dataState?.key === dependencyKey ? dataState.value : null,
+    loading: fetcher ? (requestState.key === dependencyKey ? requestState.loading : true) : false,
+    error: fetcher && requestState.key === dependencyKey ? requestState.error : null,
+    reload,
+  }
 }
 
 // ─── Project-specific hooks ───
 export function useProjectName(): string {
-  return useProjectStore((s) => s.currentProject || '我的科幻小说')
+  // An empty value is an inactive scope, not a real fallback project name.
+  // Project data hooks below translate it to a null fetcher and issue no API
+  // request until the store owns an actual project again.
+  return useProjectStore((s) => s.currentProject || '')
+}
+
+export function useProjectInstanceId(): string {
+  return useProjectStore((state) => {
+    if (!state.currentProject) return ''
+    return state.projects.find((project) => project.name === state.currentProject)?.instanceId || ''
+  })
+}
+
+function useProjectScope(): { project: string; instanceId: string; dependencyKey: string } {
+  const project = useProjectName()
+  const instanceId = useProjectInstanceId()
+  return { project, instanceId, dependencyKey: projectDataDependencyKey(project, instanceId) }
 }
 
 export function useChapters(): { chapters: Chapter[]; loading: boolean } {
-  const project = useProjectName()
-  const [chapters, setChapters] = useState<Chapter[]>([])
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    if (!project) return
-    setLoading(true)
-    chaptersApi
-      .list(project)
-      .then(setChapters)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, [project])
-
-  return { chapters, loading }
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  const { data, loading } = useApiData<Chapter[]>(
+    createProjectDataFetcher(project, (activeProject) => chaptersApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
+  return { chapters: data ?? [], loading }
 }
 
 export function useVolumes(): { data: Volume[] | null; loading: boolean; error: string | null; reload: () => void } {
-  const project = useProjectName()
-  return useApiData<Volume[]>(() => volumesApi.list(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<Volume[]>(
+    createProjectDataFetcher(project, (activeProject) => volumesApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useCharacters(): {
@@ -98,8 +139,11 @@ export function useCharacters(): {
   error: string | null
   reload: () => void
 } {
-  const project = useProjectName()
-  return useApiData<Character[]>(() => charactersApi.list(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<Character[]>(
+    createProjectDataFetcher(project, (activeProject) => charactersApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useWorldEntries(): {
@@ -108,8 +152,11 @@ export function useWorldEntries(): {
   error: string | null
   reload: () => void
 } {
-  const project = useProjectName()
-  return useApiData<WorldEntry[]>(() => worldApi.list(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<WorldEntry[]>(
+    createProjectDataFetcher(project, (activeProject) => worldApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useScienceEntries(): {
@@ -118,8 +165,11 @@ export function useScienceEntries(): {
   error: string | null
   reload: () => void
 } {
-  const project = useProjectName()
-  return useApiData<ScienceEntry[]>(() => scienceApi.list(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<ScienceEntry[]>(
+    createProjectDataFetcher(project, (activeProject) => scienceApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useForeshadows(status?: string): {
@@ -128,8 +178,11 @@ export function useForeshadows(status?: string): {
   error: string | null
   reload: () => void
 } {
-  const project = useProjectName()
-  return useApiData<Foreshadow[]>(() => foreshadowsApi.list(project, status), JSON.stringify([project, status]))
+  const { project, instanceId } = useProjectScope()
+  return useApiData<Foreshadow[]>(
+    createProjectDataFetcher(project, (activeProject) => foreshadowsApi.list(activeProject, status), instanceId),
+    projectDataDependencyKey(project, instanceId, status),
+  )
 }
 
 export function useRelations(): {
@@ -138,13 +191,19 @@ export function useRelations(): {
   error: string | null
   reload: () => void
 } {
-  const project = useProjectName()
-  return useApiData<CharacterRelation[]>(() => relationsApi.list(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<CharacterRelation[]>(
+    createProjectDataFetcher(project, (activeProject) => relationsApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useMemories(): { data: Memory[] | null; loading: boolean; error: string | null; reload: () => void } {
-  const project = useProjectName()
-  return useApiData<Memory[]>(() => memoriesApi.list(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<Memory[]>(
+    createProjectDataFetcher(project, (activeProject) => memoriesApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useTimelineEvents(): {
@@ -153,13 +212,19 @@ export function useTimelineEvents(): {
   error: string | null
   reload: () => void
 } {
-  const project = useProjectName()
-  return useApiData<TimelineEvent[]>(() => timelineApi.list(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<TimelineEvent[]>(
+    createProjectDataFetcher(project, (activeProject) => timelineApi.list(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useStats(): { data: ProjectStats | null; loading: boolean; error: string | null; reload: () => void } {
-  const project = useProjectName()
-  return useApiData<ProjectStats>(() => statsApi.get(project), project)
+  const { project, instanceId, dependencyKey } = useProjectScope()
+  return useApiData<ProjectStats>(
+    createProjectDataFetcher(project, (activeProject) => statsApi.get(activeProject), instanceId),
+    dependencyKey,
+  )
 }
 
 export function useSettings() {
@@ -168,6 +233,9 @@ export function useSettings() {
 
 // ─── Chapter content ───
 export function useChapterContent(num: number) {
-  const project = useProjectName()
-  return useApiData(() => chaptersApi.get(project, num), JSON.stringify([project, num]))
+  const { project, instanceId } = useProjectScope()
+  return useApiData(
+    createProjectDataFetcher(project, (activeProject) => chaptersApi.get(activeProject, num), instanceId),
+    projectDataDependencyKey(project, instanceId, num),
+  )
 }

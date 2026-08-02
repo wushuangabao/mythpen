@@ -63,6 +63,7 @@ test('Opus 5 and Kimi K3 omit temperature after every merge layer', () => {
     { model: 'vendor/CLAUDE-OPUS-5 ', apiType: 'openai' },
     { model: 'claude-opus-5', apiType: 'claude' },
     { model: 'moonshot/kimi-k3', apiType: 'openai' },
+    { model: 'moonshot/kimi-k3-preview', apiType: 'openai' },
   ]) {
     assert.deepEqual(resolveRequestBody(config, {
       baseBody: {},

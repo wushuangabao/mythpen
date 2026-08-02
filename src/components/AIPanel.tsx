@@ -1,16 +1,33 @@
 import { Lightbulb, Loader, MessageSquare, Plus, SendHorizonal, ShieldCheck, Sparkles, X } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { MarkdownContent } from '@/components/MarkdownContent'
 import { ToastContainer } from '@/components/ToastContainer'
 import { useT } from '@/hooks/useT'
 import { useToast } from '@/hooks/useToast'
 import { aiApi, chatApi } from '@/lib/api'
 import { getModifiedEntities, notifyDataChanged } from '@/lib/dataEvents'
-import { useProjectName } from '@/lib/useProjectData'
-import { useAgentStore } from '@/stores/useAgentStore'
+import { enqueueEditorSave } from '@/lib/editorSaveQueue'
+import {
+  discardRecoverableProjectDraft,
+  formatRecoverableProjectDraft,
+  getProjectDraftRecoverySnapshot,
+  isMatchingProjectDraftTarget,
+  type RecoverableProjectDraft,
+  subscribeProjectDraftRecovery,
+} from '@/lib/projectDraftRecovery'
+import { getProjectInstanceId } from '@/lib/projectInstanceRegistry'
+import { stageTitleSave } from '@/lib/titleSaveQueue'
+import { useProjectInstanceId, useProjectName } from '@/lib/useProjectData'
+import { clearAgentTaskAbort, registerAgentTaskAbort, useAgentStore } from '@/stores/useAgentStore'
 import { useChapterStore } from '@/stores/useChapterStore'
 import { useProjectStore } from '@/stores/useProjectStore'
 import { useUIStore } from '@/stores/useUIStore'
+
+function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const abortError = error as { name?: string; code?: string }
+  return abortError.name === 'AbortError' || abortError.code === 'ABORT_ERR'
+}
 
 export function AIPanel() {
   const {
@@ -19,8 +36,9 @@ export function AIPanel() {
     loading,
     sessions,
     currentSessionId,
+    activateProject,
     setTask,
-    addMessage,
+    addMessageToSession,
     loadSessions,
     createSession,
     switchSession,
@@ -29,8 +47,8 @@ export function AIPanel() {
     cancelTask,
   } = useAgentStore()
   const currentChapter = useChapterStore((s) => s.currentChapter)
-  const loadChapterContent = useChapterStore((s) => s.loadChapterContent)
   const project = useProjectName()
+  const projectInstanceId = useProjectInstanceId()
   const [input, setInput] = useState('')
   const [streamText, setStreamText] = useState('')
   const [taskName, setTaskName] = useState('')
@@ -41,6 +59,10 @@ export function AIPanel() {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
   const streamRef = useRef('')
   const runningRef = useRef(false)
+  const requestGenerationRef = useRef(0)
+  const activeProjectRef = useRef<string | null>(null)
+  const activeProjectInstanceRef = useRef<string | null>(null)
+  const activeSessionRef = useRef<string | null>(null)
   const msgIdCounter = useRef(0)
   const sessionsLoadedRef = useRef(false)
   const resizingRef = useRef(false)
@@ -51,6 +73,12 @@ export function AIPanel() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const { toasts, show: showToast } = useToast()
   const { t } = useT()
+  const draftRecoverySnapshot = useSyncExternalStore(
+    subscribeProjectDraftRecovery,
+    getProjectDraftRecoverySnapshot,
+    getProjectDraftRecoverySnapshot,
+  )
+  const recoverableDrafts = draftRecoverySnapshot.entries.filter((draft) => draft.project === project)
   const scrollState = `${messages.map((message) => message.id).join(':')}|${streamText.length}|${toolCalls
     .map((toolCall) => `${toolCall.id}:${toolCall.status}`)
     .join(':')}`
@@ -101,10 +129,12 @@ export function AIPanel() {
 
   // Generate AI title for a new session based on first exchange
   const generateAITitle = useCallback(
-    async (userMsg: string, aiResponse?: string) => {
-      if (!project || !currentSessionId) return
+    async (sessionId: string, userMsg: string, aiResponse?: string) => {
+      if (!project) return
+      const titleInstanceId = getProjectInstanceId(project)
+      if (!titleInstanceId) return
       // Only generate if current title is still a timestamp placeholder
-      const currentSession = sessions.find((s: any) => s.id === currentSessionId)
+      const currentSession = sessions.find((session) => session.id === sessionId)
       if (!currentSession) return
       const isPlaceholder =
         currentSession.title?.startsWith('对话 ') ||
@@ -116,28 +146,30 @@ export function AIPanel() {
         const context = aiResponse ? `用户: ${userMsg}\nAI: ${aiResponse}` : `用户: ${userMsg}`
         const prompt = t('ai.titleGenPrompt', { context })
         const res = await aiApi.chat([{ role: 'user', content: prompt }], project)
+        if (getProjectInstanceId(project) !== titleInstanceId) return
         const title = (res.choices?.[0]?.message?.content || '').trim().replace(/["""「」]/g, '')
         if (title && title.length <= 20) {
-          await updateSessionTitle(project, currentSessionId, title)
+          await updateSessionTitle(project, sessionId, title)
         }
       } catch {
         // Silently fail — timestamp title stays as fallback
       }
     },
-    [project, currentSessionId, sessions, updateSessionTitle, t],
+    [project, sessions, updateSessionTitle, t],
   )
 
   // Unique message ID generator
   const nextMsgId = () => `${Date.now()}-${++msgIdCounter.current}`
 
-  // Helper: save message scoped to current session
-  const saveMsg = (data: { role: 'user' | 'ai' | 'system'; content: string }) => {
-    if (!currentSessionId) {
-      console.warn('[AIPanel] No session to save message to')
-      return Promise.resolve()
-    }
+  // Persist to the immutable request session, never whichever session happens
+  // to be selected when an asynchronous callback eventually runs.
+  const saveMsg = (
+    targetProject: string,
+    sessionId: string,
+    data: { role: 'user' | 'ai' | 'system'; content: string },
+  ) => {
     return chatApi
-      .save(project!, { ...data, session_id: currentSessionId })
+      .save(targetProject, { ...data, session_id: sessionId })
       .catch((e) => console.warn('[AIPanel] Failed to save message:', e))
   }
 
@@ -152,16 +184,18 @@ export function AIPanel() {
 
   // Load sessions and messages when project changes, auto-create session if none exists
   useEffect(() => {
-    if (!project) return
+    if (!project || !projectInstanceId) return
     sessionsLoadedRef.current = false
-    // Reset stale session from previous project before loading
-    useAgentStore.setState({ currentSessionId: null, messages: [] })
+    // Establish ownership before any async store method starts. Every commit
+    // below is then scoped to this immutable project instance.
+    activateProject(project, projectInstanceId)
     loadSessions(project).then(() => {
       // Guard: ignore stale completions — captured project must match the current real project
       const currentProject = useProjectStore.getState().currentProject
-      if (project !== currentProject) return
+      if (project !== currentProject || getProjectInstanceId(project) !== projectInstanceId) return
       sessionsLoadedRef.current = true
       const state = useAgentStore.getState()
+      if (state.project !== project || state.projectInstanceId !== projectInstanceId) return
       if (state.sessions.length === 0) {
         // No sessions exist — create one
         const now = new Date()
@@ -172,7 +206,7 @@ export function AIPanel() {
         useAgentStore.getState().loadMessages(project)
       }
     })
-  }, [project, loadSessions, t, createSession])
+  }, [project, projectInstanceId, activateProject, loadSessions, t, createSession])
 
   // Tool type detection for colored indicators
   const getToolType = (name: string): 'read' | 'create' | 'update' | 'delete' => {
@@ -200,33 +234,120 @@ export function AIPanel() {
       .join(', ')
   }
 
-  const done = () => {
+  const refreshToolMutations = useCallback((calls: Array<{ name: string }>, targetProject: string | null) => {
+    const entities = getModifiedEntities(calls.map((toolCall) => toolCall.name))
+    for (const entity of entities) notifyDataChanged(entity)
+
+    const reloads: Promise<unknown>[] = []
+    if (targetProject && entities.some((entity) => entity === 'chapter' || entity === 'volume' || entity === 'all')) {
+      // No chapter data-event subscriber exists. Reload the full list so a
+      // deleted current chapter is also removed instead of preserving a stale
+      // detail after a 404.
+      const chapterStore = useChapterStore.getState()
+      chapterStore.invalidateChapterStructure(targetProject)
+      reloads.push(chapterStore.loadChapters(targetProject))
+    }
+    if (entities.some((entity) => entity === 'project' || entity === 'all')) {
+      reloads.push(useProjectStore.getState().loadProjects())
+    }
+    return Promise.allSettled(reloads)
+  }, [])
+
+  const done = useCallback(() => {
+    clearAgentTaskAbort(activeProjectRef.current || undefined, activeProjectInstanceRef.current || undefined)
     runningRef.current = false
+    abortRef.current = null
+    activeProjectRef.current = null
+    activeProjectInstanceRef.current = null
+    activeSessionRef.current = null
     setStreamText('')
     setTaskName('')
     streamRef.current = ''
     setToolCalls([])
     toolCallsRef.current = []
-  }
+  }, [])
 
   const stopTask = () => {
+    const issuedToolCalls = [...toolCallsRef.current]
+    const targetProject = activeProjectRef.current || project
+    const targetInstanceId = activeProjectInstanceRef.current
+    requestGenerationRef.current += 1
     if (abortRef.current) {
       abortRef.current?.abort()
       abortRef.current = null
     }
+    if (targetProject && targetInstanceId && getProjectInstanceId(targetProject) === targetInstanceId) {
+      void refreshToolMutations(issuedToolCalls, targetProject)
+    }
     cancelTask()
-    runningRef.current = false
-    setStreamText('')
-    setTaskName('')
-    setToolCalls([])
-    toolCallsRef.current = []
+    done()
   }
+
+  useEffect(() => {
+    const requestProject = activeProjectRef.current
+    const requestInstanceId = activeProjectInstanceRef.current
+    const requestSessionId = activeSessionRef.current
+    if (
+      !runningRef.current ||
+      !requestProject ||
+      (requestProject === project && requestInstanceId === projectInstanceId && requestSessionId === currentSessionId)
+    )
+      return
+
+    const issuedToolCalls = [...toolCallsRef.current]
+    requestGenerationRef.current += 1
+    abortRef.current?.abort()
+    abortRef.current = null
+    if (requestInstanceId && getProjectInstanceId(requestProject) === requestInstanceId) {
+      void refreshToolMutations(issuedToolCalls, requestProject)
+    }
+    cancelTask()
+    done()
+  }, [project, projectInstanceId, currentSessionId, cancelTask, done, refreshToolMutations])
+
+  useEffect(
+    () => () => {
+      const requestProject = activeProjectRef.current
+      const requestInstanceId = activeProjectInstanceRef.current
+      if (!runningRef.current || !requestProject) return
+
+      const issuedToolCalls = [...toolCallsRef.current]
+      requestGenerationRef.current += 1
+      abortRef.current?.abort()
+      abortRef.current = null
+      if (requestInstanceId && getProjectInstanceId(requestProject) === requestInstanceId) {
+        void refreshToolMutations(issuedToolCalls, requestProject)
+      }
+      cancelTask()
+      runningRef.current = false
+      activeProjectRef.current = null
+      activeProjectInstanceRef.current = null
+      activeSessionRef.current = null
+      streamRef.current = ''
+      toolCallsRef.current = []
+    },
+    [cancelTask, refreshToolMutations],
+  )
 
   const handleSend = () => {
     if (!project || runningRef.current || !input.trim()) return
-    if (loading) return // wait for messages to finish loading
-    if (!currentSessionId) return // wait for session to be created
+    const requestInstanceId = getProjectInstanceId(project)
+    if (!requestInstanceId) return
+    const agentState = useAgentStore.getState()
+    if (loading || agentState.loading) return // wait for messages to finish loading
+    const requestSessionId = agentState.currentSessionId
+    if (!requestSessionId) return // wait for session to be created
+    if (agentState.project !== project || agentState.projectInstanceId !== requestInstanceId) return
     runningRef.current = true
+    activeProjectRef.current = project
+    activeProjectInstanceRef.current = requestInstanceId
+    activeSessionRef.current = requestSessionId
+    const requestGeneration = ++requestGenerationRef.current
+    const isCurrentRequest = () =>
+      requestGeneration === requestGenerationRef.current &&
+      useProjectStore.getState().currentProject === project &&
+      getProjectInstanceId(project) === requestInstanceId &&
+      useAgentStore.getState().currentSessionId === requestSessionId
     const userMsg = input.trim()
     const isChat = mode === 'collab'
     setTaskName(isChat ? t('ai.taskCollab') : t('ai.taskContinue'))
@@ -235,8 +356,8 @@ export function AIPanel() {
     setGenTokens(0)
     streamRef.current = ''
 
-    addMessage({ id: nextMsgId(), role: 'user', content: userMsg })
-    saveMsg({ role: 'user', content: userMsg }).catch(() => {})
+    addMessageToSession(requestSessionId, { id: nextMsgId(), role: 'user', content: userMsg })
+    saveMsg(project, requestSessionId, { role: 'user', content: userMsg }).catch(() => {})
     setInput('')
     // Force DOM clear — React 19 batch 处理后 onInput 事件可能恢复旧值
     const el = document.getElementById('ai-chat-input') as HTMLTextAreaElement | null
@@ -254,65 +375,66 @@ export function AIPanel() {
       ? t('ai.collabPrompt', { project, num: ch?.num ?? 0, title: ch?.title ?? '', userMsg })
       : t('ai.writingPrompt', { project, num: ch?.num ?? 0, title: ch?.title ?? '', userMsg })
 
-    abortRef.current = aiApi.chatStream(
+    const controller = aiApi.chatStream(
       [...chatHistory, { role: 'user', content: context }],
       project,
       // onChunk
       (text: string) => {
+        if (!isCurrentRequest()) return
         streamRef.current += text
         setStreamText(streamRef.current)
         setGenTokens((prev) => prev + 1)
       },
       // onComplete
       async () => {
+        if (!isCurrentRequest()) return
         setTask({ status: 'completed' })
         const fullText = streamRef.current
         const defaultMsg = isChat ? t('ai.dialogComplete') : t('ai.execComplete')
+        const completedToolCalls = [...toolCallsRef.current]
         const aiMsg = {
           role: 'ai' as const,
           content: fullText || defaultMsg,
-          toolCalls: toolCallsRef.current.length > 0 ? toolCallsRef.current : undefined,
+          toolCalls: completedToolCalls.length > 0 ? completedToolCalls : undefined,
         }
-        addMessage({ id: nextMsgId(), ...aiMsg })
-        saveMsg(aiMsg).catch(() => {})
-        const hadToolCalls = toolCallsRef.current.length > 0
+        addMessageToSession(requestSessionId, { id: nextMsgId(), ...aiMsg })
+        saveMsg(project, requestSessionId, aiMsg).catch(() => {})
+        const refreshPromise = refreshToolMutations(completedToolCalls, project)
+        requestGenerationRef.current += 1
         done()
         if (fullText) {
           showToast(t('ai.responseComplete'), 'success')
         }
-        generateAITitle(userMsg, fullText || undefined)
-        if (hadToolCalls) {
-          const toolNames = toolCallsRef.current.map((tc: any) => tc.name)
-          const entities = getModifiedEntities(toolNames)
-          for (const entity of entities) {
-            notifyDataChanged(entity)
-          }
-          if (isChat) {
-            // Collab mode: reload all data for immediate responsiveness
-            useChapterStore.getState().loadChapters(project!)
-            useProjectStore.getState().loadProjects()
-          } else if (ch?.num) {
-            // Writing mode: reload chapter content that was written
-            await loadChapterContent(project, ch.num, ch.volumeId)
-          }
-        }
+        generateAITitle(requestSessionId, userMsg, fullText || undefined)
+        await refreshPromise
       },
       // onError
       (err: any) => {
+        if (!isCurrentRequest() || !runningRef.current) return
+        const issuedToolCalls = [...toolCallsRef.current]
+        void refreshToolMutations(issuedToolCalls, project)
+        requestGenerationRef.current += 1
+        if (isAbortError(err)) {
+          cancelTask()
+          done()
+          return
+        }
         setTask({ status: 'error' })
         if (!isChat) showToast(t('ai.chatError'), 'error')
         const errMsg = { role: 'ai' as const, content: t('ai.errorPrefix', { msg: err.error || err }) }
-        addMessage({ id: nextMsgId(), ...errMsg })
-        saveMsg(errMsg).catch(() => {})
+        addMessageToSession(requestSessionId, { id: nextMsgId(), ...errMsg })
+        saveMsg(project, requestSessionId, errMsg).catch(() => {})
         done()
       },
       mode,
       (tc: any) => {
+        if (!isCurrentRequest()) return
         const updated = [...toolCallsRef.current, { ...tc, status: 'running' }]
         toolCallsRef.current = updated
         setToolCalls(updated)
       },
       (tr: any) => {
+        if (!isCurrentRequest()) return
         const updated = toolCallsRef.current.map((tc) =>
           tc.id === tr.id ? { ...tc, result: tr.result, status: 'done' } : tc,
         )
@@ -320,6 +442,56 @@ export function AIPanel() {
         setToolCalls(updated)
       },
     )
+    abortRef.current = controller
+    registerAgentTaskAbort(project, requestInstanceId, () => {
+      requestGenerationRef.current += 1
+      controller.abort()
+    })
+  }
+
+  const copyRecoverableDraft = async (draft: RecoverableProjectDraft) => {
+    try {
+      await navigator.clipboard.writeText(formatRecoverableProjectDraft(draft))
+      showToast(t('ai.projectDraftCopied'), 'success')
+    } catch {
+      showToast(t('ai.projectDraftCopyFailed'), 'error')
+    }
+  }
+
+  const findRecoveryTarget = (draft: RecoverableProjectDraft) =>
+    useChapterStore
+      .getState()
+      .volumes.flatMap((volume) => volume.chapters)
+      .find((chapter) => isMatchingProjectDraftTarget(draft, chapter))
+
+  const restoreRecoverableDraft = (draft: RecoverableProjectDraft) => {
+    if (!project || !projectInstanceId || getProjectInstanceId(project) !== projectInstanceId) return
+    const targetChapter = findRecoveryTarget(draft)
+    if (!targetChapter) {
+      showToast(t('ai.projectDraftChapterMissing'), 'error')
+      return
+    }
+    if (
+      !window.confirm(
+        t('ai.projectDraftRestoreConfirm', { chapter: targetChapter.num, title: targetChapter.title || '' }),
+      )
+    )
+      return
+
+    // This is deliberately the only replay path. It stages an unsaved overlay
+    // for the current instance; it does not issue a network write by itself.
+    if (draft.content !== undefined) {
+      enqueueEditorSave(project, draft.chapterId, draft.chapterNum, draft.content, targetChapter.dataVersion)
+    }
+    if (draft.title !== undefined) {
+      stageTitleSave(project, draft.chapterId, draft.chapterNum, draft.title)
+    }
+    showToast(t('ai.projectDraftRestored'), 'success')
+  }
+
+  const discardRecoverableDraft = (draft: RecoverableProjectDraft) => {
+    if (!window.confirm(t('ai.projectDraftDiscardConfirm'))) return
+    discardRecoverableProjectDraft(draft.recoveryId)
   }
 
   return (
@@ -389,9 +561,12 @@ export function AIPanel() {
             name="ai-session-select"
             className="flex-1 h-[28px] px-2 bg-[var(--canvas-elevated)] border border-[var(--hairline)] rounded-[var(--radius-sm)] text-[var(--ink)] text-[12px] outline-none cursor-pointer focus:border-[var(--accent-gold)]"
             value={currentSessionId || ''}
-            onChange={(e) => e.target.value && switchSession(project, e.target.value)}
+            disabled={isRunning}
+            onChange={(e) => {
+              if (!isRunning && e.target.value) void switchSession(project, e.target.value)
+            }}
           >
-            {sessions.map((s: any) => (
+            {sessions.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.title}
               </option>
@@ -400,7 +575,9 @@ export function AIPanel() {
           <button
             type="button"
             className="w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-tertiary)] cursor-pointer hover:text-[var(--ink)] hover:bg-[var(--canvas-mid)] transition-colors shrink-0"
+            disabled={isRunning}
             onClick={() => {
+              if (isRunning) return
               const now = new Date()
               const ts = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`
               void createSession(project, t('ai.newSessionTemplate', { ts }))
@@ -413,6 +590,7 @@ export function AIPanel() {
             <button
               type="button"
               className="w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] border border-[var(--hairline)] bg-[var(--canvas-elevated)] text-[var(--ink-tertiary)] cursor-pointer hover:text-[var(--error)] hover:bg-[var(--error-soft)] hover:border-[var(--error)] transition-colors shrink-0"
+              disabled={isRunning}
               onClick={() => setConfirmDelete(true)}
               title={t('ai.deleteSession')}
             >
@@ -453,6 +631,69 @@ export function AIPanel() {
               >
                 <X className="w-3 h-3" />
               </button>
+            </div>
+          </div>
+        )}
+
+        {recoverableDrafts.length > 0 && (
+          <div className="mx-4 mb-2.5 p-3 bg-[var(--warning-soft)] border border-[var(--warning)] rounded-lg">
+            <div className="text-[12px] font-medium text-[var(--ink)]">{t('ai.projectDraftRecoveryTitle')}</div>
+            <div className="mt-1 text-[11px] leading-relaxed text-[var(--ink-secondary)]">
+              {t('ai.projectDraftRecoveryDescription')}
+            </div>
+            {draftRecoverySnapshot.persistenceError && (
+              <div className="mt-2 text-[11px] font-medium text-[var(--error)]">
+                {t('ai.projectDraftPersistenceFailed')}
+              </div>
+            )}
+            <div className="mt-2 space-y-2">
+              {recoverableDrafts.map((draft) => {
+                const targetChapter = findRecoveryTarget(draft)
+                return (
+                  <div
+                    key={draft.recoveryId}
+                    className="rounded-md border border-[var(--hairline)] bg-[var(--canvas-card)] p-2"
+                  >
+                    <div className="text-[11px] text-[var(--ink)]">
+                      {t('ai.projectDraftChapter', { chapter: draft.chapterNum, id: draft.chapterId })}
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-[var(--ink-mute)]">
+                      {new Date(draft.retiredAt).toLocaleString()} · {draft.sourceInstanceId.slice(0, 8)}
+                    </div>
+                    <details className="mt-2 text-[10px] text-[var(--ink-secondary)]">
+                      <summary className="cursor-pointer">{t('ai.projectDraftViewContent')}</summary>
+                      <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--canvas-elevated)] p-2 select-text">
+                        {formatRecoverableProjectDraft(draft)}
+                      </pre>
+                    </details>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        className="btn-secondary h-[26px] px-2 text-[11px]"
+                        onClick={() => void copyRecoverableDraft(draft)}
+                      >
+                        {t('ai.projectDraftCopy')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary h-[26px] px-2 text-[11px] disabled:opacity-40"
+                        disabled={!targetChapter}
+                        title={!targetChapter ? t('ai.projectDraftChapterMissing') : t('ai.projectDraftRestoreHint')}
+                        onClick={() => restoreRecoverableDraft(draft)}
+                      >
+                        {t('ai.projectDraftRestore')}
+                      </button>
+                      <button
+                        type="button"
+                        className="h-[26px] px-2 text-[11px] border border-[var(--hairline)] rounded bg-transparent text-[var(--error)]"
+                        onClick={() => discardRecoverableDraft(draft)}
+                      >
+                        {t('ai.projectDraftDiscard')}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}
@@ -657,8 +898,9 @@ export function AIPanel() {
               <button
                 type="button"
                 className="h-[32px] px-4 rounded-lg bg-[var(--error)] text-white text-[13px] font-medium cursor-pointer border-none hover:brightness-110"
+                disabled={isRunning}
                 onClick={() => {
-                  if (!currentSessionId) return
+                  if (isRunning || !currentSessionId) return
                   void deleteSession(project, currentSessionId)
                   setConfirmDelete(false)
                 }}

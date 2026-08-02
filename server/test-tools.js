@@ -87,13 +87,15 @@ async function run() {
   assert('Create chapter with explicit chapter_num', ch2.status === 201 && ch2.body.num === 42, `expected num=42 got ${JSON.stringify(ch2.body)}`);
 
   // Character
-  const char = await api('POST', `/${e(PROJECT)}/characters`, { name: '测试角色', age: '20', gender: '男', personality: '测试性格', background: '测试背景' });
-  assert('Create character', char.status === 201, JSON.stringify(char.body));
+  const char = await api('POST', `/${e(PROJECT)}/characters`, { name: '测试角色', role: 'major', age: '20', gender: '男', personality: '测试性格', background: '测试背景' });
+  assert('Create character', char.status === 201 && char.body.role === 'major', JSON.stringify(char.body));
   createdIds.characterId = char.body.id;
 
   // ── Error: character without name ──
   const noNameChar = await api('POST', `/${e(PROJECT)}/characters`, { age: '20', gender: '男' });
   assert('Reject character without name', noNameChar.status === 400, `expected 400 got ${noNameChar.status}`);
+  const invalidRoleChar = await api('POST', `/${e(PROJECT)}/characters`, { name: '非法角色定位', role: 'lead' });
+  assert('Reject invalid character role', invalidRoleChar.status === 400, `expected 400 got ${invalidRoleChar.status}`);
 
   // World entry
   const world = await api('POST', `/${e(PROJECT)}/world`, { category: 'location', name: '测试地点', description: '测试描述', tags: 'test' });
@@ -216,10 +218,13 @@ async function run() {
   assert('Volume title updated', updatedVol && updatedVol.title === '修改后卷名', `title: ${JSON.stringify(updatedVol)}`);
 
   // ── Update character ──
-  const upChar = await api('PUT', `/${e(PROJECT)}/characters/${createdIds.characterId}`, { name: '修改后角色' });
+  const upChar = await api('PUT', `/${e(PROJECT)}/characters/${createdIds.characterId}`, { name: '修改后角色', role: 'extra' });
   assert('Update character returns 200', upChar.status === 200);
   const charAfter = await api('GET', `/${e(PROJECT)}/characters/${createdIds.characterId}`);
   assert('Character name updated', charAfter.body.name === '修改后角色', `name: ${charAfter.body.name}`);
+  assert('Character role updated', charAfter.body.role === 'extra', `role: ${charAfter.body.role}`);
+  const invalidRoleUpdate = await api('PUT', `/${e(PROJECT)}/characters/${createdIds.characterId}`, { role: 'lead' });
+  assert('Reject invalid character role update', invalidRoleUpdate.status === 400, `expected 400 got ${invalidRoleUpdate.status}`);
 
   // ── Update world ──
   const upWorld = await api('PUT', `/${e(PROJECT)}/world/${createdIds.worldId}`, { description: '修改后描述' });
@@ -329,14 +334,19 @@ async function run() {
   // ── create_character ──
   r = executeTool(PROJECT, 'create_character', {
     name: '工具测试角色', age: '25', gender: '女', appearance: '测试外貌',
-    personality: '测试性格', background: '测试背景', motivation: '测试动机', arc: '测试弧光',
+    role: 'extra', personality: '测试性格', background: '测试背景', motivation: '测试动机', arc: '测试弧光',
   });
-  assert('executeTool create_character', r.created === true && r.name === '工具测试角色', JSON.stringify(r));
+  assert('executeTool create_character', r.created === true && r.name === '工具测试角色' && r.role === 'extra', JSON.stringify(r));
   dbg.charId = r.id;
 
   // ── list_characters ──
   r = executeTool(PROJECT, 'list_characters', {});
-  assert('executeTool list_characters', Array.isArray(r) && r.length > 0);
+  assert('executeTool list_characters', Array.isArray(r) && r.some(c => c.name === '工具测试角色' && c.role === 'extra'));
+
+  r = executeTool(PROJECT, 'update_character', { name: '工具测试角色', role: 'minor' });
+  assert('executeTool update_character role', r.updated === true, JSON.stringify(r));
+  r = executeTool(PROJECT, 'get_character', { name: '工具测试角色' });
+  assert('executeTool get_character role', r.role === 'minor', JSON.stringify(r));
 
   // ── create_world_entry ──
   r = executeTool(PROJECT, 'create_world_entry', {

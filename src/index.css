@@ -172,6 +172,40 @@ body {
   border-radius: 0;
 }
 
+/* ─── AI revision review (Word-style tracked changes) ─── */
+.revision-change {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  white-space: inherit;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: box-shadow 120ms ease, background 120ms ease;
+}
+.revision-change:hover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-gold) 58%, transparent);
+}
+.revision-change-selected {
+  box-shadow: 0 0 0 2px var(--accent-gold), 0 0 0 4px var(--accent-gold-soft-bg);
+}
+.revision-deletion {
+  background: color-mix(in srgb, var(--error) 22%, transparent);
+  color: color-mix(in srgb, var(--error) 82%, var(--ink));
+  text-decoration-color: var(--error);
+  text-decoration-thickness: 1.5px;
+}
+.revision-insertion {
+  background: color-mix(in srgb, var(--success) 20%, transparent);
+  color: color-mix(in srgb, var(--success) 82%, var(--ink));
+  text-decoration-color: var(--success);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
 /* ─── Custom scrollbar ─── */
 .custom-scrollbar::-webkit-scrollbar,
 textarea::-webkit-scrollbar,

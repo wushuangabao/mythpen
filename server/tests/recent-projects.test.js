@@ -38,6 +38,7 @@ test('falls back without opening a missing stale recent-project database', () =>
     chapterCount: 0,
     lastOpened: row.last_opened,
     mode: 'medium-novel',
+    instanceId: '',
     status: '未知',
   });
 });
@@ -78,6 +79,7 @@ test('opens an existing legacy database once and maps metadata, chapters, and ge
       all: () => [
         { key: 'word_count', value: '42000' },
         { key: 'mode', value: 'long-novel' },
+        { key: 'project_instance_id', value: 'instance-123' },
       ],
     },
     'SELECT COUNT(*) as c FROM chapters': { get: () => ({ c: 18 }) },
@@ -105,6 +107,7 @@ test('opens an existing legacy database once and maps metadata, chapters, and ge
     chapterCount: 18,
     lastOpened: row.last_opened,
     mode: 'long-novel',
+    instanceId: 'instance-123',
     status: '写作中',
   });
 });
