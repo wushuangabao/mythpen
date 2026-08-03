@@ -34,6 +34,10 @@
     "currentChapter": "当前章",
     "wordUnit": "字",
     "switchToStatus": "切换为 {status}",
+    "deleteChapter": "删除章节",
+    "deleteChapterConfirmation": "确定要删除第 {num} 章「{title}」吗？此操作不可撤销。",
+    "deleteChapterFailed": "删除章节失败，请稍后重试。",
+    "deletingChapter": "正在删除...",
     "volumeTitle": "第{order}卷 · {title}",
     "chapterTitle": "第{num}章 {title}"
   },

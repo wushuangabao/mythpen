@@ -7,6 +7,7 @@ export interface EditorSaveEntry {
   content: string
   baseDataVersion: number
   version: number
+  tombstoneGeneration: number
 }
 
 export interface EditorSaveQueueSnapshot {
@@ -21,6 +22,7 @@ const visibleDrafts = new Map<string, EditorSaveEntry>()
 const saveQueues = new Map<string, Promise<void>>()
 const failedSaves = new Map<string, string>()
 const confirmedDataVersions = new Map<string, number>()
+const tombstoneGenerations = new Map<string, number>()
 const projectEpochs = new Map<string, number>()
 const listeners = new Set<() => void>()
 let nextSaveVersion = 0
@@ -89,6 +91,9 @@ function clearProjectEditorSaves(project: string): void {
   for (const saveKey of [...confirmedDataVersions.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) confirmedDataVersions.delete(saveKey)
   }
+  for (const saveKey of [...tombstoneGenerations.keys()]) {
+    if (saveKeyBelongsToProject(saveKey, project)) tombstoneGenerations.delete(saveKey)
+  }
   for (const saveKey of [...saveQueues.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) saveQueues.delete(saveKey)
   }
@@ -122,6 +127,20 @@ export function retireStaleProjectEditorSaves(project: string, sourceInstanceId:
   return isolated
 }
 
+/**
+ * Discard one chapter's local editor draft after the chapter was permanently
+ * deleted. A late failure from an already-started request must not restore it.
+ */
+export function discardEditorSave(project: string, chapterId: number): void {
+  const saveKey = editorSaveKey(project, chapterId)
+  tombstoneGenerations.set(saveKey, (tombstoneGenerations.get(saveKey) ?? 0) + 1)
+  pendingSaves.delete(saveKey)
+  visibleDrafts.delete(saveKey)
+  failedSaves.delete(saveKey)
+  confirmedDataVersions.delete(saveKey)
+  publishSnapshot()
+}
+
 export function enqueueEditorSave(
   project: string,
   chapterId: number,
@@ -141,6 +160,7 @@ export function enqueueEditorSave(
     // may contain another window's accepted revision.
     baseDataVersion: existingDraft?.baseDataVersion ?? baseDataVersion,
     version: ++nextSaveVersion,
+    tombstoneGeneration: tombstoneGenerations.get(saveKey) ?? 0,
   }
   pendingSaves.set(saveKey, entry)
   visibleDrafts.set(saveKey, entry)
@@ -166,6 +186,7 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
     .catch(() => {})
     .then(() => {
       if (projectEpoch(project) !== requestEpoch) return
+      if ((tombstoneGenerations.get(saveKey) ?? 0) !== pending.tombstoneGeneration) return
       // A newer snapshot may already have left pendingSaves and be waiting in
       // this serialized promise chain. Advance it immediately before its write,
       // using only a version confirmed by an earlier local CAS success.
@@ -178,6 +199,7 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
     .then(
       (persistedDataVersion) => {
         if (projectEpoch(project) !== requestEpoch) return
+        if ((tombstoneGenerations.get(saveKey) ?? 0) !== pending.tombstoneGeneration) return
         if (
           Number.isSafeInteger(persistedDataVersion) &&
           (persistedDataVersion as number) >= 0 &&
@@ -192,6 +214,7 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
       },
       (error) => {
         if (projectEpoch(project) !== requestEpoch) return
+        if ((tombstoneGenerations.get(saveKey) ?? 0) !== pending.tombstoneGeneration) throw error
         const newerPending = pendingSaves.get(saveKey)
         const visible = visibleDrafts.get(saveKey)
         if (!newerPending && visible?.version === pending.version) {

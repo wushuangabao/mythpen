@@ -84,6 +84,29 @@ function projectDeleteRequest(project: string, expectedInstanceId: string) {
   })
 }
 
+/**
+ * Chapter deletion is bound to the instance visible when its confirmation was
+ * opened. Do not route this through projectRequest: that helper resolves the
+ * header from the mutable registry when the request starts.
+ */
+function chapterDeleteRequest(
+  project: string,
+  num: number,
+  chapterId: number,
+  volumeId: number,
+  expectedInstanceId: string,
+) {
+  if (typeof expectedInstanceId !== 'string' || !expectedInstanceId.trim()) {
+    return Promise.reject(new Error('Project instance is not loaded'))
+  }
+  return runProjectRequest(project, () =>
+    performRequest(`/${encodeURIComponent(project)}/chapters/${num}?chapter_id=${chapterId}&volume_id=${volumeId}`, {
+      method: 'DELETE',
+      headers: { [PROJECT_INSTANCE_HEADER]: expectedInstanceId },
+    }),
+  )
+}
+
 export const suspendProjectApiRequests = suspendProjectRequests
 
 // ─── Projects ───
@@ -139,6 +162,8 @@ export const chaptersApi = {
     }),
   create: (project: string, data: any) =>
     projectRequest(project, `/${encodeURIComponent(project)}/chapters`, { method: 'POST', body: data }),
+  delete: (project: string, num: number, chapterId: number, volumeId: number, expectedInstanceId: string) =>
+    chapterDeleteRequest(project, num, chapterId, volumeId, expectedInstanceId),
 }
 
 export type RevisionDecision = 'accepted' | 'rejected'

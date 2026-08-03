@@ -2,7 +2,10 @@ import { create } from 'zustand'
 import { t } from '@/i18n'
 import { chaptersApi, volumesApi } from '@/lib/api'
 import { createChapterDataJournal, shouldApplyChapterDataVersion } from '@/lib/chapterDataJournal'
+import { getChapterDeletionFallbackId } from '@/lib/chapterDeletionFallback'
+import { discardEditorSave } from '@/lib/editorSaveQueue'
 import { createRequestCommitTracker } from '@/lib/requestCommitTracker'
+import { discardTitleSave } from '@/lib/titleSaveQueue'
 import { useProjectStore } from '@/stores/useProjectStore'
 
 interface Chapter {
@@ -75,6 +78,11 @@ interface ChapterState {
     expectedDataVersion?: number,
   ) => Promise<number | undefined>
   createChapter: (project: string, title?: string, outline?: string, volumeId?: number) => Promise<any>
+  deleteChapter: (
+    project: string,
+    chapter: Pick<Chapter, 'id' | 'volumeId' | 'num'>,
+    expectedInstanceId: string,
+  ) => Promise<number | null | undefined>
 }
 
 const EMPTY_VOLUMES: Volume[] = []
@@ -518,6 +526,60 @@ export const useChapterStore = create<ChapterState>((set, get) => ({
       return created
     } catch (err) {
       console.error('Failed to create chapter:', err)
+      throw err
+    }
+  },
+
+  deleteChapter: async (project, chapter, expectedInstanceId) => {
+    const projectState = useProjectStore.getState()
+    const currentInstanceId = projectState.projects.find((candidate) => candidate.name === project)?.instanceId || ''
+    if (
+      typeof expectedInstanceId !== 'string' ||
+      !expectedInstanceId.trim() ||
+      projectState.currentProject !== project ||
+      currentInstanceId !== expectedInstanceId
+    ) {
+      throw new Error('Project instance changed before chapter deletion')
+    }
+    const projectEpochAtStart = getChapterProjectEpoch(project)
+    let committedFallbackChapterId: number | null | undefined
+
+    try {
+      await chaptersApi.delete(project, chapter.num, chapter.id, chapter.volumeId, expectedInstanceId)
+      if (getChapterProjectEpoch(project) !== projectEpochAtStart) return
+
+      // The API has committed the deletion. Drop any local drafts only now, so
+      // a failed DELETE still leaves the user's unsaved text recoverable.
+      discardEditorSave(project, chapter.id)
+      discardTitleSave(project, chapter.id)
+      markChapterStructureChanged(project)
+      nextChapterContentRequestSequence(project)
+      if (useProjectStore.getState().currentProject !== project || get().projectName !== project) return
+      set((state) => {
+        if (state.projectName !== project || useProjectStore.getState().currentProject !== project) return state
+        const orderedChapters = state.volumes.flatMap((volume) => volume.chapters)
+        const deletedIndex = orderedChapters.findIndex((candidate) => candidate.id === chapter.id)
+        if (deletedIndex < 0) return state
+        const fallbackChapterId = getChapterDeletionFallbackId(orderedChapters, chapter.id)
+        committedFallbackChapterId = fallbackChapterId
+        const fallbackChapter =
+          fallbackChapterId === null
+            ? null
+            : orderedChapters.find((candidate) => candidate.id === fallbackChapterId) || null
+        const currentWasDeleted = state.currentChapter?.id === chapter.id
+        return {
+          volumes: state.volumes.map((volume) => ({
+            ...volume,
+            chapters: volume.chapters.filter((candidate) => candidate.id !== chapter.id),
+          })),
+          currentChapter: currentWasDeleted ? fallbackChapter : state.currentChapter,
+          loading: false,
+        }
+      })
+      await get().loadChapters(project)
+      return committedFallbackChapterId
+    } catch (err) {
+      console.error('Failed to delete chapter:', err)
       throw err
     }
   },

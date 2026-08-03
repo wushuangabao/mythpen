@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   type EditorSaveEntry,
+  discardEditorSave,
   discardProjectEditorSaves,
   editorSaveKey,
   enqueueEditorSave,
@@ -281,4 +282,29 @@ test('a deleted instance callback cannot overwrite a same-name replacement draft
   assert.equal(replacementWrites, 1)
   assert.equal(getEditorSaveDraft(project, chapterId), null)
   assert.equal(getEditorSaveQueueSnapshot().errors[editorSaveKey(project, chapterId)], undefined)
+})
+
+test('a deleted chapter rejects a late failed write without restoring its draft', async () => {
+  const project = 'deleted-chapter-late-failure'
+  const chapterId = 909
+  const lateWrite = createDeferred()
+  let writes = 0
+
+  enqueueEditorSave(project, chapterId, 9, 'deleted chapter draft', 5)
+  const save = flushEditorSave(project, chapterId, () => {
+    writes++
+    return lateWrite.promise
+  })
+  await waitFor(() => writes === 1)
+
+  discardEditorSave(project, chapterId)
+  lateWrite.reject(new Error('late write failed'))
+
+  try {
+    await assert.rejects(save, /late write failed/)
+    assert.equal(getEditorSaveDraft(project, chapterId), null)
+    assert.equal(getEditorSaveQueueSnapshot().errors[editorSaveKey(project, chapterId)], undefined)
+  } finally {
+    discardProjectEditorSaves(project)
+  }
 })

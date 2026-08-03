@@ -33,6 +33,10 @@
     "currentChapter": "Current Ch.",
     "wordUnit": "words",
     "switchToStatus": "Switch to {status}",
+    "deleteChapter": "Delete chapter",
+    "deleteChapterConfirmation": "Delete Chapter {num}, “{title}”? This action cannot be undone.",
+    "deleteChapterFailed": "Could not delete the chapter. Please try again.",
+    "deletingChapter": "Deleting...",
     "volumeTitle": "Volume {order} · {title}",
     "chapterTitle": "Ch. {num} {title}",
     "about": "About"

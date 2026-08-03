@@ -18,14 +18,17 @@ import {
   RefreshCw,
   ScrollText,
   ShieldCheck,
+  Trash2,
   Users,
+  X,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useDataRefresh } from '@/hooks/useDataRefresh'
 import { useT } from '@/hooks/useT'
 import { activateOnKeyDown } from '@/lib/a11y'
 import { projectsApi, statsApi } from '@/lib/api'
-import { refreshAllData } from '@/lib/dataEvents'
+import { notifyDataChanged, refreshAllData } from '@/lib/dataEvents'
 import { initializeProjectCacheValue, projectInstanceCacheKey, setProjectCacheValue } from '@/lib/projectCache'
 import { createRequestCommitTracker } from '@/lib/requestCommitTracker'
 import { NEXT_STATUS } from '@/lib/status'
@@ -34,6 +37,22 @@ import { useChapterStore } from '@/stores/useChapterStore'
 import { useProjectStore } from '@/stores/useProjectStore'
 import { useSidebarStore } from '@/stores/useSidebarStore'
 import type { SidebarItem } from '@/types'
+
+type ChapterDeleteTarget = {
+  id: number
+  volumeId: number
+  num: number
+  title: string
+  project: string
+  projectInstanceId: string
+}
+
+function isActiveChapterDeleteTarget(target: ChapterDeleteTarget): boolean {
+  const state = useProjectStore.getState()
+  if (state.currentProject !== target.project) return false
+  const currentInstanceId = state.projects.find((project) => project.name === target.project)?.instanceId || ''
+  return !!target.projectInstanceId && currentInstanceId === target.projectInstanceId
+}
 
 // Map icon string names from backend to Lucide components
 const ICON_MAP: Record<string, LucideIcon> = {
@@ -59,6 +78,7 @@ export function Sidebar() {
     setCurrentChapter,
     loadChapterContent,
     createChapter,
+    deleteChapter,
   } = useChapterStore()
   const { activePage, setActivePage } = useSidebarStore()
   const currentProject = useProjectStore((s) => s.currentProject)
@@ -75,8 +95,18 @@ export function Sidebar() {
   const [collapsedVols, setCollapsedVols] = useState<Set<number>>(new Set())
   const [editingTarget, setEditingTarget] = useState(false)
   const [targetInput, setTargetInput] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<ChapterDeleteTarget | null>(null)
+  const [deletingChapter, setDeletingChapter] = useState(false)
+  const [deleteChapterError, setDeleteChapterError] = useState<string | null>(null)
   const targetInputRef = useRef<HTMLInputElement>(null)
   const targetDraftProjectRef = useRef(currentProject)
+  const deleteDialogRef = useRef<HTMLDivElement | null>(null)
+  const deleteDialogCancelRef = useRef<HTMLButtonElement | null>(null)
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const sidebarRef = useRef<HTMLElement | null>(null)
+  const chapterRowRefs = useRef(new Map<number, HTMLDivElement>())
+  const newChapterButtonRefs = useRef(new Map<number, HTMLButtonElement>())
+  const deleteOperationRef = useRef(0)
   const sidebarCacheKey = projectInstanceCacheKey(currentProject, currentProjectInstanceId)
   const sidebarRequestsRef = useRef(createRequestCommitTracker(sidebarCacheKey || ''))
   sidebarRequestsRef.current.activate(sidebarCacheKey || '')
@@ -84,6 +114,14 @@ export function Sidebar() {
   const projectOwnsChapters = !!currentProject && chapterProject === currentProject
   const displayedVolumes = projectOwnsChapters ? volumes : []
   const displayedCurrentChapter = projectOwnsChapters ? currentChapter : null
+
+  const beginDeleteOperation = () => {
+    deleteOperationRef.current += 1
+    return deleteOperationRef.current
+  }
+
+  const isCurrentDeleteOperation = (target: ChapterDeleteTarget, operationId: number) =>
+    deleteOperationRef.current === operationId && isActiveChapterDeleteTarget(target)
 
   const handleSaveTargetWords = useCallback(async () => {
     const val = parseInt(targetInput, 10)
@@ -126,6 +164,46 @@ export function Sidebar() {
     setEditingTarget(false)
     setTargetInput('')
   }, [currentProject])
+
+  useEffect(() => {
+    if (
+      !deleteTarget ||
+      (deleteTarget.project === currentProject && deleteTarget.projectInstanceId === currentProjectInstanceId)
+    )
+      return
+    deleteOperationRef.current += 1
+    setDeletingChapter(false)
+    setDeleteTarget(null)
+    setDeleteChapterError(null)
+  }, [currentProject, currentProjectInstanceId, deleteTarget])
+
+  useEffect(() => {
+    return () => {
+      deleteOperationRef.current += 1
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!deleteTarget || typeof document === 'undefined') return
+    const root = document.getElementById('root')
+    if (!root) return
+    const previousInert = root.getAttribute('inert')
+    const previousAriaHidden = root.getAttribute('aria-hidden')
+    root.setAttribute('inert', '')
+    root.setAttribute('aria-hidden', 'true')
+    return () => {
+      if (previousInert === null) root.removeAttribute('inert')
+      else root.setAttribute('inert', previousInert)
+      if (previousAriaHidden === null) root.removeAttribute('aria-hidden')
+      else root.setAttribute('aria-hidden', previousAriaHidden)
+    }
+  }, [deleteTarget])
+
+  useEffect(() => {
+    if (!deleteTarget) return
+    if (deletingChapter) deleteDialogRef.current?.focus()
+    else deleteDialogCancelRef.current?.focus()
+  }, [deleteTarget, deletingChapter])
 
   const toggleVolume = (volId: number) => {
     setCollapsedVols((prev) => {
@@ -185,13 +263,119 @@ export function Sidebar() {
     setActivePage('page-writing')
   }
 
+  const restoreDeleteTriggerFocus = (target: ChapterDeleteTarget, operationId: number) => {
+    requestAnimationFrame(() => {
+      if (!isCurrentDeleteOperation(target, operationId)) return
+      if (deleteTriggerRef.current?.isConnected) {
+        deleteTriggerRef.current.focus()
+        return
+      }
+      sidebarRef.current?.focus()
+    })
+  }
+
+  const restoreFocusAfterDeletedChapter = (
+    fallbackChapterId: number | null | undefined,
+    target: ChapterDeleteTarget,
+    operationId: number,
+  ) => {
+    requestAnimationFrame(() => {
+      if (!isCurrentDeleteOperation(target, operationId)) return
+      if (fallbackChapterId !== null && fallbackChapterId !== undefined) {
+        const fallbackChapterRow = chapterRowRefs.current.get(fallbackChapterId)
+        if (fallbackChapterRow?.isConnected) {
+          fallbackChapterRow.focus()
+          return
+        }
+      }
+      const newChapterButton = newChapterButtonRefs.current.get(target.volumeId)
+      if (newChapterButton?.isConnected) {
+        newChapterButton.focus()
+        return
+      }
+      sidebarRef.current?.focus()
+    })
+  }
+
+  const closeDeleteDialog = () => {
+    if (deletingChapter || !deleteTarget) return
+    const target = deleteTarget
+    const operationId = beginDeleteOperation()
+    setDeleteTarget(null)
+    setDeleteChapterError(null)
+    restoreDeleteTriggerFocus(target, operationId)
+  }
+
+  const handleDeleteDialogKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeDeleteDialog()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusable = Array.from(
+      deleteDialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) || [],
+    )
+    if (focusable.length === 0) {
+      event.preventDefault()
+      deleteDialogRef.current?.focus()
+      return
+    }
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+
+  const handleDeleteChapter = async () => {
+    if (!deleteTarget || !isActiveChapterDeleteTarget(deleteTarget)) {
+      beginDeleteOperation()
+      setDeletingChapter(false)
+      setDeleteTarget(null)
+      setDeleteChapterError(null)
+      return
+    }
+    const target = deleteTarget
+    const operationId = beginDeleteOperation()
+    setDeletingChapter(true)
+    setDeleteChapterError(null)
+    try {
+      const fallbackChapterId = await deleteChapter(target.project, target, target.projectInstanceId)
+      if (!isCurrentDeleteOperation(target, operationId)) return
+      notifyDataChanged('chapter', [target.id])
+      notifyDataChanged('character')
+      notifyDataChanged('memory')
+      notifyDataChanged('stats')
+      if (!isCurrentDeleteOperation(target, operationId)) return
+      setDeleteTarget(null)
+      restoreFocusAfterDeletedChapter(fallbackChapterId, target, operationId)
+    } catch (error) {
+      if (isCurrentDeleteOperation(target, operationId)) {
+        setDeleteChapterError(error instanceof Error ? error.message : t('sidebar.deleteChapterFailed'))
+      }
+    } finally {
+      if (isCurrentDeleteOperation(target, operationId)) setDeletingChapter(false)
+    }
+  }
+
   const handleRefresh = () => {
     setSpinKey((k) => k + 1)
     refreshAllData(currentProject || undefined).catch(() => {})
   }
 
   return (
-    <aside className="w-[var(--sidebar-w)] bg-[var(--canvas-soft)] border-r border-[var(--hairline)] shrink-0 flex flex-col">
+    <aside
+      ref={sidebarRef}
+      tabIndex={-1}
+      className="w-[var(--sidebar-w)] bg-[var(--canvas-soft)] border-r border-[var(--hairline)] shrink-0 flex flex-col"
+    >
       {/* Scrollable top section */}
       <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0">
         {/* Outline Section */}
@@ -245,7 +429,11 @@ export function Sidebar() {
                   /* biome-ignore lint/a11y/useSemanticElements: the chapter row contains a separate status-cycling action. */
                   <div
                     key={ch.id}
-                    className={`flex items-center gap-1.5 px-4 pl-5 py-1 text-[13px] cursor-pointer relative transition-colors
+                    ref={(element) => {
+                      if (element) chapterRowRefs.current.set(ch.id, element)
+                      else chapterRowRefs.current.delete(ch.id)
+                    }}
+                    className={`group flex items-center gap-1.5 px-4 pl-5 py-1 text-[13px] cursor-pointer relative transition-colors
                   ${displayedCurrentChapter?.id === ch.id && activePage === 'page-writing' ? 'text-[var(--ink)] bg-[var(--canvas-elevated)]' : 'text-[var(--ink-secondary)]'}
                   hover:bg-[var(--canvas-card)]`}
                     role="button"
@@ -285,10 +473,40 @@ export function Sidebar() {
                           .catch(() => {})
                       }}
                     />
+                    <button
+                      type="button"
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--ink-mute)] transition-colors hover:bg-[var(--error-soft)] hover:text-[var(--error)] disabled:cursor-not-allowed disabled:opacity-40"
+                      title={t('sidebar.deleteChapter')}
+                      aria-label={t('sidebar.deleteChapter')}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        if (!currentProject || !currentProjectInstanceId) return
+                        deleteTriggerRef.current = event.currentTarget
+                        beginDeleteOperation()
+                        setDeletingChapter(false)
+                        setDeleteChapterError(null)
+                        setDeleteTarget({
+                          id: ch.id,
+                          volumeId: ch.volumeId,
+                          num: ch.num,
+                          title: ch.title,
+                          project: currentProject,
+                          projectInstanceId: currentProjectInstanceId,
+                        })
+                      }}
+                      onKeyDown={(event) => event.stopPropagation()}
+                      disabled={!currentProjectInstanceId}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 ))}
               {/* Per-volume new chapter button */}
               <button
+                ref={(element) => {
+                  if (element) newChapterButtonRefs.current.set(vol.id, element)
+                  else newChapterButtonRefs.current.delete(vol.id)
+                }}
                 type="button"
                 className="flex w-full items-center gap-1.5 border-none bg-transparent px-4 py-1 pl-5 text-[13px] text-[var(--accent-gold)] cursor-pointer transition-colors hover:bg-[var(--canvas-card)]"
                 onClick={() => handleNewChapter(vol.id)}
@@ -349,6 +567,66 @@ export function Sidebar() {
         </div>
       </div>
       {/* end scrollable top */}
+
+      {deleteTarget &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center" role="presentation">
+            <div aria-hidden="true" className="absolute inset-0 bg-black/40" onClick={closeDeleteDialog} />
+            <div
+              ref={deleteDialogRef}
+              className="relative z-10 w-[400px] rounded-xl border border-[var(--hairline)] bg-[var(--canvas-card)] p-6 shadow-xl"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="delete-chapter-dialog-title"
+              tabIndex={-1}
+              onKeyDown={handleDeleteDialogKeyDown}
+            >
+              <div className="mb-4 flex items-center justify-between">
+                <h2 id="delete-chapter-dialog-title" className="font-display text-lg font-semibold text-[var(--ink)]">
+                  {t('sidebar.deleteChapter')}
+                </h2>
+                <button
+                  type="button"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-tertiary)] hover:bg-[var(--canvas-mid)]"
+                  onClick={closeDeleteDialog}
+                  disabled={deletingChapter}
+                  aria-label={t('common.cancel')}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <p className="mb-2 text-[14px] leading-relaxed text-[var(--ink-secondary)]">
+                {t('sidebar.deleteChapterConfirmation', { num: deleteTarget.num, title: deleteTarget.title })}
+              </p>
+              {deleteChapterError && (
+                <p className="mb-4 text-[13px] text-[var(--error)]" role="alert">
+                  {deleteChapterError}
+                </p>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  ref={deleteDialogCancelRef}
+                  type="button"
+                  className="btn-secondary h-[34px] px-4"
+                  onClick={closeDeleteDialog}
+                  disabled={deletingChapter}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary h-[34px] px-4 !border-red-600 !bg-red-600 hover:!bg-red-700"
+                  onClick={handleDeleteChapter}
+                  disabled={deletingChapter}
+                >
+                  {deletingChapter ? t('sidebar.deletingChapter') : t('project.confirmDelete')}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
 
       {/* Writing Stats — fixed at bottom, compact */}
       <div className="py-2 px-4 border-t border-[var(--hairline)] bg-[var(--canvas-soft)] shrink-0 text-[12px]">
