@@ -91,7 +91,14 @@ export interface WorldEntry {
   category: string
   name: string
   description: string
-  tags: string
+  tags: string[]
+}
+
+export interface WorldEntryInput {
+  category: string
+  name: string
+  description?: string
+  tags?: readonly string[]
 }
 
 // ─── Science ───

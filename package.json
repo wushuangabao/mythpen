@@ -23,6 +23,7 @@
     "build": "vite build",
     "tsc": "tsc",
     "typecheck": "tsc --project tsconfig.app.json --noEmit",
+    "test:client": "node --test --test-concurrency=1 tests/*.test.ts",
     "test:server": "node --test server/tests/*.test.js",
     "tauri": "tauri",
     "lint": "biome check --write src/",

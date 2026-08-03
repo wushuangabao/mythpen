@@ -637,7 +637,18 @@
     "descriptionPlaceholder": "详细描述...",
     "category": "分类",
     "name": "名称",
-    "description": "描述"
+    "description": "描述",
+    "tags": "标签",
+    "tagsPlaceholder": "以逗号分隔标签",
+    "editEntry": "编辑条目",
+    "saveChanges": "保存修改",
+    "deleteEntry": "删除条目",
+    "editAction": "编辑「{title}」",
+    "deleteAction": "删除「{title}」",
+    "deleteConfirmation": "确定要删除「{title}」吗？此操作不可撤销。",
+    "deleteFailed": "删除条目失败",
+    "refreshFailed": "世界观数据刷新失败，当前内容可能不是最新版本。",
+    "retryRefresh": "重试刷新"
   },
   "about": {
     "version": "版本号",

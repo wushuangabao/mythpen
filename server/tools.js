@@ -3,6 +3,12 @@ const CHARACTER_ROLES = new Set(['major', 'minor', 'extra']);
 const { normalizeCharacterName } = require('./character-validation');
 const { clampTimelineImportance } = require('./timeline-importance');
 const { orderTimelineEvents } = require('./timeline-order');
+const { parseWorldTags, serializeWorldTags } = require('./world-tags');
+const {
+  WORLD_ENTRY_CATEGORIES,
+  isValidWorldEntryCategory,
+  worldEntryCategoryError,
+} = require('./world-entry-categories');
 
 const TOOLS = [
   // ═══ Chapters ═══
@@ -190,10 +196,16 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          category: { type: 'string', enum: ['location', 'organization', 'concept', 'event'], description: '类别：location(地点)、organization(组织)、concept(概念)、event(事件)' },
+          category: { type: 'string', enum: WORLD_ENTRY_CATEGORIES, description: '类别：location(地点)、organization(组织)、concept(概念)、event(事件)、technology(技术)' },
           name: { type: 'string', description: '条目名称' },
           description: { type: 'string', description: '详细描述' },
-          tags: { type: 'string', description: '标签，逗号分隔（可选）' },
+          tags: {
+            anyOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'string' },
+            ],
+            description: '标签（可选；推荐使用字符串数组，兼容旧版逗号分隔字符串）',
+          },
         },
         required: ['category', 'name', 'description'],
       },
@@ -433,10 +445,16 @@ const TOOLS = [
         type: 'object',
         properties: {
           id: { type: 'string', description: '条目ID' },
-          category: { type: 'string', description: '类别（可选）' },
+          category: { type: 'string', enum: WORLD_ENTRY_CATEGORIES, description: '类别（可选）' },
           name: { type: 'string', description: '条目名称（可选）' },
           description: { type: 'string', description: '详细描述（可选）' },
-          tags: { type: 'string', description: '标签（可选）' },
+          tags: {
+            anyOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'string' },
+            ],
+            description: '标签（可选；推荐使用字符串数组，兼容旧版逗号分隔字符串）',
+          },
         },
         required: ['id'],
       },
@@ -955,12 +973,15 @@ function executeTool(projectName, toolName, args) {
 
     // ── World ──
     case 'list_world': {
-      return pdb.prepare('SELECT id, category, name, description, tags FROM world_entries ORDER BY category, name').all();
+      return pdb.prepare('SELECT id, category, name, description, tags FROM world_entries ORDER BY category, name')
+        .all()
+        .map((entry) => ({ ...entry, tags: parseWorldTags(entry.tags) }));
     }
     case 'create_world_entry': {
+      if (!isValidWorldEntryCategory(args.category)) return { error: worldEntryCategoryError() };
       const id = randomUUID();
       pdb.prepare('INSERT INTO world_entries (id, category, name, description, tags) VALUES (?, ?, ?, ?, ?)')
-        .run(id, args.category, args.name, args.description, args.tags || '');
+        .run(id, args.category, args.name, args.description, serializeWorldTags(args.tags));
       return { created: true, id, category: args.category, name: args.name };
     }
 
@@ -1118,7 +1139,11 @@ function executeTool(projectName, toolName, args) {
 
     // ── World update/delete ──
     case 'update_world_entry': {
-      return updateById(args.id, 'world_entries', args, ['category', 'name', 'description', 'tags'], true);
+      if (args.category !== undefined && !isValidWorldEntryCategory(args.category)) {
+        return { error: worldEntryCategoryError() };
+      }
+      const fields = args.tags === undefined ? args : { ...args, tags: serializeWorldTags(args.tags) };
+      return updateById(args.id, 'world_entries', fields, ['category', 'name', 'description', 'tags'], true);
     }
     case 'delete_world_entry': {
       return deleteById(args.id, 'world_entries', 'id', '条目');

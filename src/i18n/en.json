@@ -637,7 +637,18 @@
     "descriptionPlaceholder": "Detailed description...",
     "category": "Category",
     "name": "Name",
-    "description": "Description"
+    "description": "Description",
+    "tags": "Tags",
+    "tagsPlaceholder": "Separate tags with commas",
+    "editEntry": "Edit entry",
+    "saveChanges": "Save changes",
+    "deleteEntry": "Delete entry",
+    "editAction": "Edit \"{title}\"",
+    "deleteAction": "Delete \"{title}\"",
+    "deleteConfirmation": "Delete \"{title}\"? This action cannot be undone.",
+    "deleteFailed": "Failed to delete entry",
+    "refreshFailed": "World data failed to refresh. The displayed content may be out of date.",
+    "retryRefresh": "Retry refresh"
   },
   "about": {
     "version": "Version",

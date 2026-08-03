@@ -9,6 +9,8 @@ const { readRecentProject } = require('../recent-projects');
 const { normalizeCharacterName } = require('../character-validation');
 const { clampTimelineImportance } = require('../timeline-importance');
 const { orderTimelineEvents, validateTimelineEventOrder } = require('../timeline-order');
+const { serializeWorldTags } = require('../world-tags');
+const { isValidWorldEntryCategory, worldEntryCategoryError } = require('../world-entry-categories');
 const {
   applyRevision,
   createPendingRevision,
@@ -902,16 +904,28 @@ router.get('/:project/world', (req, res) => {
 
 router.post('/:project/world', (req, res) => {
   const { category, name, description = '', tags = '[]' } = req.body || {};
+  if (!isValidWorldEntryCategory(category)) {
+    return res.status(400).json({
+      error: { code: 'INVALID_PARAMS', message: worldEntryCategoryError(), recoverable: true },
+    });
+  }
   const id = randomUUID();
   db.projectExecute(project(req.params.project),
     'INSERT INTO world_entries (id, category, name, description, tags) VALUES (?, ?, ?, ?, ?)',
-    [id, category, name, description, tags]
+    [id, category, name, description, serializeWorldTags(tags)]
   );
   res.status(201).json({ id, name });
 });
 
 router.put('/:project/world/:id', (req, res) => {
-  const changes = updateRecord(project(req.params.project), 'world_entries', req.params.id, req.body, ['category', 'name', 'description', 'tags'], true);
+  const data = { ...(req.body || {}) };
+  if (data.category !== undefined && !isValidWorldEntryCategory(data.category)) {
+    return res.status(400).json({
+      error: { code: 'INVALID_PARAMS', message: worldEntryCategoryError(), recoverable: true },
+    });
+  }
+  if (data.tags !== undefined) data.tags = serializeWorldTags(data.tags);
+  const changes = updateRecord(project(req.params.project), 'world_entries', req.params.id, data, ['category', 'name', 'description', 'tags'], true);
   if (changes === null) return res.status(400).json({ error: { message: '没有要更新的字段' } });
   if (changes === 0) return res.status(404).json({ error: { message: '条目不存在' } });
   res.json({ success: true });

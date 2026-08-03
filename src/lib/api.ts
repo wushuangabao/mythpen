@@ -2,8 +2,10 @@
 // Dev: /api is proxied by Vite to localhost:3001
 // Tauri production: sidecar server runs on 127.0.0.1:3001
 
+import type { WorldEntry, WorldEntryInput } from '../types'
 import { getProjectInstanceHeaders, PROJECT_INSTANCE_HEADER } from './projectInstanceRegistry.ts'
 import { runProjectRequest, suspendProjectRequests } from './projectRequestGate.ts'
+import { parseWorldTags } from './worldTags.ts'
 
 // In Tauri v2, __TAURI_INTERNALS__ is injected by the runtime automatically.
 // No npm package needed for this detection.
@@ -242,9 +244,22 @@ export const charactersApi = {
 // ─── World ───
 
 export const worldApi = {
-  list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/world`),
-  create: (project: string, data: any) =>
+  list: async (project: string): Promise<WorldEntry[]> => {
+    const entries: Array<Omit<WorldEntry, 'tags'> & { tags: unknown }> = await projectRequest(
+      project,
+      `/${encodeURIComponent(project)}/world`,
+    )
+    return entries.map((entry) => ({ ...entry, tags: parseWorldTags(entry.tags) }))
+  },
+  create: (project: string, data: WorldEntryInput) =>
     projectRequest(project, `/${encodeURIComponent(project)}/world`, { method: 'POST', body: data }),
+  update: (project: string, id: string, data: Partial<WorldEntryInput>) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/world/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: data,
+    }),
+  delete: (project: string, id: string) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/world/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
 // ─── Science ───
