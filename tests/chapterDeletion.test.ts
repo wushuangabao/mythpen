@@ -487,6 +487,23 @@ test('a delete that succeeds after navigation clears old drafts without touching
 
   try {
     const deletion = useChapterStore.getState().deleteChapter(deletedProject, target, deletedInstanceId)
+    useProjectStore.setState((state) => ({
+      projects: [
+        ...state.projects,
+        {
+          id: activeProject,
+          name: activeProject,
+          iconName: 'BookOpen',
+          genres: [],
+          wordCount: 0,
+          chapterCount: 1,
+          lastOpened: '',
+          status: '刚起步',
+          instanceId: 'chapter-delete-active-project-instance',
+          openState: 'ready',
+        },
+      ],
+    }))
     useProjectStore.getState().setCurrentProject(activeProject)
     useChapterStore.setState({
       projectName: activeProject,

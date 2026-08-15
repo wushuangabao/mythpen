@@ -1,33 +1,35 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
+const { createHash } = require('node:crypto');
 const path = require('node:path');
 const test = require('node:test');
+const { openControlStore } = require('../control-store');
+const { canonicalDatabasePath } = require('../sqljs-atomic-store');
+const { FAULT_POINTS, withFaults } = require('../testing/fault-injection');
+const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
+
+function projectControlStore(database, projectName) {
+  const filePath = database.getProjectDbPath(projectName);
+  const dbKey = createHash('sha256').update(canonicalDatabasePath(filePath)).digest('hex');
+  return openControlStore(path.join(database.getDataDir(), 'control', 'sqlite', dbKey));
+}
 
 test('AI chapter tools require an unambiguous stable chapter identity', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-chapter-tools-identity-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const { executeTool, TOOLS } = require('../tools');
   const project = 'chapter-tools-identity';
 
-  t.after(async () => {
-    db.closeProjectDb(db.getProjectDbPath(project));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
-  });
-
   await db.initDatabase();
   const projectDb = db.createProjectDb(project);
   projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume One')").run();
   projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (2, 2, 'Volume Two')").run();
-  projectDb.prepare("INSERT INTO chapters (volume_id, num, title, content) VALUES (1, 1, 'First volume', 'First')").run();
-  projectDb.prepare("INSERT INTO chapters (volume_id, num, title, content) VALUES (2, 1, 'Second volume', 'Second')").run();
-  projectDb.prepare("INSERT INTO chapters (volume_id, num, title, content) VALUES (1, 2, 'Unique legacy number', 'Unique')").run();
+  withRawManuscriptSetup(() => {
+    projectDb.prepare("INSERT INTO chapters (volume_id, num, title, content) VALUES (1, 1, 'First volume', 'First')").run();
+    projectDb.prepare("INSERT INTO chapters (volume_id, num, title, content) VALUES (2, 1, 'Second volume', 'Second')").run();
+    projectDb.prepare("INSERT INTO chapters (volume_id, num, title, content) VALUES (1, 2, 'Unique legacy number', 'Unique')").run();
+  });
   projectDb.prepare("INSERT INTO characters (id, name, role) VALUES ('character-1', 'Character', 'major')").run();
 
   const first = projectDb.prepare('SELECT * FROM chapters WHERE volume_id = 1 AND num = 1').get();
@@ -227,13 +229,71 @@ test('AI chapter tools require an unambiguous stable chapter identity', async (t
   });
   assert.equal(tupleUpdate.updated, true);
   assert.equal(tupleUpdate.chapter_id, first.id);
+  assert.deepEqual(tupleUpdate.changed_fields, ['content']);
   assert.equal(projectDb.prepare('SELECT content FROM chapters WHERE id = ?').get(first.id).content, 'Updated first volume');
   assert.equal(projectDb.prepare('SELECT content FROM chapters WHERE id = ?').get(second.id).content, 'Second');
 
+  const toolControlStore = projectControlStore(db, project);
+  const eventsBeforeCombined = toolControlStore.read();
+  const preparedBeforeCombined = eventsBeforeCombined
+    .filter((event) => event.type === 'sqlite.publish.prepared').length;
+  const sourcesBeforeCombined = eventsBeforeCombined
+    .filter((event) => event.type === 'manuscript.body_mutation.attempt').length;
+  const combinedUpdate = executeTool(project, 'update_chapter', {
+    chapter_id: second.id,
+    content: 'Updated second body',
+    title: 'Updated second body title',
+    outline: 'Updated second outline',
+  });
+  assert.deepEqual(combinedUpdate, {
+    updated: true,
+    chapter_id: second.id,
+    volume_id: 2,
+    chapter_num: 1,
+    changed_fields: ['content', 'title', 'outline'],
+  });
+  assert.deepEqual(
+    projectDb.prepare('SELECT title, outline, content, word_count FROM chapters WHERE id = ?').get(second.id),
+    {
+      title: 'Updated second body title',
+      outline: 'Updated second outline',
+      content: 'Updated second body',
+      word_count: 'Updatedsecondbody'.length,
+    },
+  );
+  const eventsAfterCombined = toolControlStore.read();
+  assert.equal(
+    eventsAfterCombined.filter((event) => event.type === 'sqlite.publish.prepared').length,
+    preparedBeforeCombined + 1,
+  );
+  assert.equal(
+    eventsAfterCombined.filter((event) => event.type === 'manuscript.body_mutation.attempt').length,
+    sourcesBeforeCombined + 1,
+  );
+  const combinedSourceEvent = eventsAfterCombined
+    .filter((event) => event.type === 'manuscript.body_mutation.attempt')
+    .at(-1);
+  assert.equal(combinedSourceEvent.payload.source, 'ai_tool');
+  assert.equal(eventsAfterCombined[eventsAfterCombined.indexOf(combinedSourceEvent) + 1].type, 'sqlite.publish.prepared');
+
+  const sourcesBeforeMetadataOnly = eventsAfterCombined
+    .filter((event) => event.type === 'manuscript.body_mutation.attempt').length;
   const idUpdate = executeTool(project, 'update_chapter', { chapter_id: second.id, title: 'Updated second volume' });
-  assert.equal(idUpdate.updated, true);
-  assert.equal(idUpdate.chapter_id, second.id);
-  assert.equal(projectDb.prepare('SELECT title FROM chapters WHERE id = ?').get(second.id).title, 'Updated second volume');
+  assert.deepEqual(idUpdate, {
+    updated: true,
+    chapter_id: second.id,
+    volume_id: 2,
+    chapter_num: 1,
+    changed_fields: ['title'],
+  });
+  assert.deepEqual(
+    projectDb.prepare('SELECT title, content FROM chapters WHERE id = ?').get(second.id),
+    { title: 'Updated second volume', content: 'Updated second body' },
+  );
+  assert.equal(
+    toolControlStore.read().filter((event) => event.type === 'manuscript.body_mutation.attempt').length,
+    sourcesBeforeMetadataOnly,
+  );
 
   const insertRevision = projectDb.prepare(
     'INSERT INTO chapter_revisions (chapter_id, base_content, proposed_content) VALUES (?, ?, ?)',
@@ -253,11 +313,32 @@ test('AI chapter tools require an unambiguous stable chapter identity', async (t
   assert.ok(projectDb.prepare('SELECT id FROM chapters WHERE id = ?').get(second.id));
   assert.ok(projectDb.prepare('SELECT id FROM chapter_revisions WHERE chapter_id = ?').get(second.id));
 
-  const created = executeTool(project, 'create_chapter', { volume_id: 1, chapter_num: 1, title: 'Replacement' });
-  assert.equal(created.created, true);
-  assert.equal(created.volume_id, 1);
-  assert.equal(created.chapter_num, 1);
+  const created = executeTool(project, 'create_chapter', {
+    volume_id: 1,
+    chapter_num: 1,
+    title: 'Replacement',
+    outline: 'Replacement outline',
+    content: 'Replacement body',
+    cognitive_frame: 'Replacement frame',
+  });
+  assert.deepEqual(created, {
+    created: true,
+    chapter_id: created.chapter_id,
+    volume_id: 1,
+    chapter_num: 1,
+    title: 'Replacement',
+  });
   assert.ok(created.chapter_id);
+  assert.deepEqual(
+    projectDb.prepare('SELECT title, outline, content, word_count, cognitive_frame FROM chapters WHERE id = ?').get(created.chapter_id),
+    {
+      title: 'Replacement',
+      outline: 'Replacement outline',
+      content: 'Replacement body',
+      word_count: 'Replacementbody'.length,
+      cognitive_frame: 'Replacement frame',
+    },
+  );
   insertRevision.run(created.chapter_id, 'replacement base', 'replacement proposal');
 
   const idDelete = executeTool(project, 'delete_chapter', { chapter_id: created.chapter_id });
@@ -266,4 +347,58 @@ test('AI chapter tools require an unambiguous stable chapter identity', async (t
   assert.equal(projectDb.prepare('SELECT id FROM chapters WHERE id = ?').get(created.chapter_id), null);
   assert.equal(projectDb.prepare('SELECT id FROM chapter_revisions WHERE chapter_id = ?').get(created.chapter_id), null);
   assert.ok(projectDb.prepare('SELECT id FROM chapters WHERE id = ?').get(second.id));
+});
+
+test('cold AI body tool uses one lease and a persistence failure cannot be downgraded before usage', async (t) => {
+  withIsolatedDataDir(t);
+  const db = require('../db');
+  const { executeTool } = require('../tools');
+  const {
+    createChapter,
+    isManuscriptPersistenceError,
+  } = require('../manuscript-service');
+  const { projectWriteDiagnostics } = require('../testing/database-internals');
+  const project = 'chapter-tool-persistence-failure';
+  await db.initDatabase();
+  const projectDb = db.createProjectDb(project);
+  projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
+  const chapter = createChapter({
+    projectName: project,
+    source: 'ai_tool',
+    fields: { volume_id: 1, chapter_num: 1, title: 'Before title', content: 'Before body' },
+  }).chapter;
+  const filePath = db.getProjectDbPath(project);
+  db.closeProjectDb(filePath);
+  const leasesBefore = projectWriteDiagnostics().leaseAcquisitionCount(filePath);
+  let persistenceError;
+  try {
+    await withFaults({
+      [FAULT_POINTS.ATOMIC_STORE_PUBLISH_BEFORE_CANDIDATE_WRITE]: { throw: 'EIO' },
+    }, async () => executeTool(project, 'update_chapter', {
+      chapter_id: chapter.id,
+      title: 'Failed title',
+      content: 'Failed body',
+    }));
+  } catch (error) {
+    persistenceError = error;
+  }
+  const marked = typeof isManuscriptPersistenceError === 'function'
+    && isManuscriptPersistenceError(persistenceError);
+  assert.equal(persistenceError?.code, 'EIO');
+  assert.equal(marked, true);
+  assert.equal(projectWriteDiagnostics().leaseAcquisitionCount(filePath), leasesBefore + 1);
+
+  if (!marked) {
+    db.projectExecute(
+      project,
+      'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
+      ['stream_chat', 5, 3, 'model'],
+    );
+  }
+  const reopened = db.getProjectDb(project);
+  assert.deepEqual(
+    reopened.prepare('SELECT title, content FROM chapters WHERE id = ?').get(chapter.id),
+    { title: 'Before title', content: 'Before body' },
+  );
+  assert.equal(reopened.prepare('SELECT COUNT(*) AS count FROM token_usage').get().count, 0);
 });

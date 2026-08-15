@@ -1,33 +1,31 @@
-// API client for Mythpen backend
-// Dev: /api is proxied by Vite to localhost:3001
-// Tauri production: sidecar server runs on 127.0.0.1:3001
+// API client for Mythpen backend. All local transport goes through backendFetch.
 
-import type { WorldEntry, WorldEntryInput } from '../types'
+import type { ProjectDiagnostics, RecoveryAction, WorldEntry, WorldEntryInput } from '../types'
+import { backendFetch } from './backendRuntime.ts'
 import { getProjectInstanceHeaders, PROJECT_INSTANCE_HEADER } from './projectInstanceRegistry.ts'
 import { runProjectRequest, suspendProjectRequests } from './projectRequestGate.ts'
 import { parseWorldTags } from './worldTags.ts'
-
-// In Tauri v2, __TAURI_INTERNALS__ is injected by the runtime automatically.
-// No npm package needed for this detection.
-const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-const API_BASE = isTauri ? 'http://127.0.0.1:3001/api' : '/api'
-
-// Normalize double slashes (e.g. /api//stats → /api/stats) that happen
-// when a project name is empty. Skip the protocol colon so http:// stays.
-export const apiUrl = (path: string) => `${API_BASE}${path}`.replace(/([^:]\/)\/+/g, '$1')
 
 export class ApiError extends Error {
   readonly status: number
   readonly code?: string
   readonly recoverable: boolean
+  readonly details?: Readonly<Record<string, unknown>>
 
-  constructor(message: string, status: number, code?: string, recoverable = false) {
+  constructor(message: string, status: number, code?: string, recoverable = false, details?: Record<string, unknown>) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.recoverable = recoverable
+    this.details = details ? { ...details } : undefined
   }
+}
+
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 async function ensureResponseOk(res: Response): Promise<void> {
@@ -39,6 +37,7 @@ async function ensureResponseOk(res: Response): Promise<void> {
       res.status,
       typeof detail?.code === 'string' ? detail.code : undefined,
       detail?.recoverable === true,
+      isPlainJsonObject(detail?.details) ? detail.details : undefined,
     )
   }
 }
@@ -49,7 +48,6 @@ async function parseJsonResponse(res: Response) {
 }
 
 async function performRequest(path: string, options: any = {}) {
-  const url = apiUrl(path)
   const config: any = {
     ...options,
     headers: { 'Content-Type': 'application/json', ...options.headers },
@@ -57,7 +55,7 @@ async function performRequest(path: string, options: any = {}) {
   if (config.body && typeof config.body === 'object') {
     config.body = JSON.stringify(config.body)
   }
-  return parseJsonResponse(await fetch(url, config))
+  return parseJsonResponse(await backendFetch(path, config))
 }
 
 function request(path: string, options: any = {}) {
@@ -71,6 +69,11 @@ function projectRequest(project: string, path: string, options: any = {}) {
     headers: { ...options.headers, ...getProjectInstanceHeaders(project) },
   }
   return runProjectRequest(project, () => performRequest(path, projectOptions))
+}
+
+/** Registered-project diagnostics are name-scoped but deliberately carry no instance header. */
+function projectDiagnosticsRequest(project: string, path: string, options: any = {}) {
+  return runProjectRequest(project, () => performRequest(path, options))
 }
 
 /** Only project deletion bypasses its own suspension after in-flight work drains. */
@@ -120,6 +123,21 @@ export const projectsApi = {
     return project ? projectRequest(project, '/projects', options) : request('/projects', options)
   },
   delete: (name: string, expectedInstanceId: string) => projectDeleteRequest(name, expectedInstanceId),
+  getDiagnostics: (name: string) =>
+    projectDiagnosticsRequest(
+      name,
+      `/projects/by-name/${encodeURIComponent(name)}/diagnostics`,
+    ) as Promise<ProjectDiagnostics>,
+  recoverDiagnostics: (name: string, action: RecoveryAction, snapshot: string) =>
+    projectDiagnosticsRequest(name, `/projects/by-name/${encodeURIComponent(name)}/diagnostics/recover`, {
+      method: 'POST',
+      body: { action, snapshot },
+    }) as Promise<ProjectDiagnostics>,
+  exportDiagnostics: (name: string) =>
+    projectDiagnosticsRequest(name, `/projects/by-name/${encodeURIComponent(name)}/diagnostics/export`, {
+      method: 'POST',
+      body: {},
+    }) as Promise<{ filename: string }>,
   getPhase: (name: string) => projectRequest(name, `/${encodeURIComponent(name)}/workflow/phase`),
   setPhase: (name: string, phase: string) =>
     projectRequest(name, `/${encodeURIComponent(name)}/workflow/phase`, { method: 'PUT', body: { phase } }),
@@ -139,7 +157,6 @@ export const projectsApi = {
   uploadCover: (name: string, data: string, mime: string) =>
     projectRequest(name, `/${encodeURIComponent(name)}/cover`, { method: 'POST', body: { data, mime } }),
   deleteCover: (name: string) => projectRequest(name, `/${encodeURIComponent(name)}/cover`, { method: 'DELETE' }),
-  getCoverUrl: (name: string) => apiUrl(`/${encodeURIComponent(name)}/cover`),
 }
 
 // ─── Chapters ───
@@ -382,7 +399,6 @@ export const settingsApi = {
 // ─── Chat / AI (always uses HTTP) ───
 
 function aiRequest(path: string, options: any = {}) {
-  const url = apiUrl(path)
   const project = typeof options.body?.project === 'string' ? options.body.project : null
   const config: any = {
     ...options,
@@ -395,7 +411,7 @@ function aiRequest(path: string, options: any = {}) {
   if (config.body && typeof config.body === 'object') {
     config.body = JSON.stringify(config.body)
   }
-  const perform = async () => parseJsonResponse(await fetch(url, config))
+  const perform = async () => parseJsonResponse(await backendFetch(path, config))
   return project ? runProjectRequest(project, perform) : perform()
 }
 
@@ -480,7 +496,7 @@ export const aiApi = {
   ) => {
     const controller = new AbortController()
     runProjectRequest(project, () =>
-      fetch(`${API_BASE}/ai/chat/stream`, {
+      backendFetch('/ai/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
         body: JSON.stringify({ messages, project, mode }),
@@ -523,7 +539,7 @@ export const aiApi = {
     const controller = new AbortController()
     let finished = false
     runProjectRequest(project, () =>
-      fetch(`${API_BASE}/ai/continue`, {
+      backendFetch('/ai/continue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
         body: JSON.stringify({ chapterId, context, project }),
@@ -559,7 +575,7 @@ export const aiApi = {
     const controller = new AbortController()
     let finished = false
     runProjectRequest(project, () =>
-      fetch(`${API_BASE}/ai/polish`, {
+      backendFetch('/ai/polish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
         body: JSON.stringify({ chapterId, project }),
@@ -631,8 +647,4 @@ function tryParseJSON(s: string): any | null {
 
 export function getAIResponseText(res: any): string {
   return res?.choices?.[0]?.message?.content?.trim() || ''
-}
-
-export function getCoverUrl(name: string): string {
-  return `${API_BASE}/${encodeURIComponent(name)}/cover`
 }

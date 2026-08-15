@@ -1,8 +1,6 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const test = require('node:test');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -24,9 +22,7 @@ test('world REST API validates categories and preserves the complete CRUD contra
   assert.deepEqual(parseWorldTags('priority， city, priority'), ['priority', 'city']);
   assert.equal(serializeWorldTags(['city', 'city', 'future']), '["city","future"]');
 
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-world-api-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -37,11 +33,6 @@ test('world REST API validates categories and preserves the complete CRUD contra
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(db.getProjectDbPath(project));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();

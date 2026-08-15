@@ -1,15 +1,13 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 test('legacy timeline events receive a stable initial automatic order during migration', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-timeline-migration-'));
+  const { dataDir } = withIsolatedDataDir(t);
   const project = 'legacy-timeline-order';
   const projectPath = path.join(dataDir, 'projects', `${project}.mythpen.db`);
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
 
   const initSqlJs = require('sql.js');
   const { getWasmBinary } = require('../wasm-binary');
@@ -39,15 +37,6 @@ test('legacy timeline events receive a stable initial automatic order during mig
   legacyDb.close();
 
   const db = require('../db');
-  t.after(async () => {
-    db.closeProjectDb(db.getProjectDbPath(project));
-    // The config DB batches its initial schema flush for 250 ms.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
-  });
-
   await db.initDatabase();
   const projectDb = db.getProjectDb(project);
   assert.equal(projectDb.prepare("SELECT value FROM project_meta WHERE key = 'schema_version'").get().value, '10');

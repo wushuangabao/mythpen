@@ -3,6 +3,7 @@ const {
   isSuccessfulTextFinishReason,
   normalizeFinishReason,
 } = require('./ai-polish-completion');
+const { createManuscriptService } = require('./manuscript-service');
 
 class ContinuationSaveError extends Error {
   constructor(code, message) {
@@ -33,44 +34,43 @@ function validateContinuationCompletion(continuation, finishReason) {
   );
 }
 
-function saveContinuation(database, projectName, chapterId, continuation, finishReason) {
+function saveContinuation(
+  database,
+  projectName,
+  chapterId,
+  continuation,
+  finishReason,
+  expectedBodyHash,
+  usage,
+) {
   validateContinuationCompletion(continuation, finishReason);
   if (!Number.isInteger(chapterId) || chapterId < 1) {
     throw new ContinuationSaveError('chapter_invalid', 'Chapter identifier is invalid');
   }
 
-  const projectDb = database.getProjectDb(projectName);
-  return projectDb.transaction(() => {
-    const chapter = projectDb
-      .prepare('SELECT id, content FROM chapters WHERE id = ?')
-      .get(chapterId);
-    if (!chapter) {
-      throw new ContinuationSaveError('chapter_missing', 'Chapter no longer exists');
-    }
-
-    const existingContent = chapter.content || '';
-    const nextContent = existingContent
-      ? `${existingContent}\n\n${continuation}`
-      : continuation;
-    const wordCount = nextContent.replace(/\s/g, '').length;
-    const updated = projectDb
-      .prepare("UPDATE chapters SET content = ?, word_count = ?, status = 'writing', updated_at = datetime('now') WHERE id = ?")
-      .run(nextContent, wordCount, chapter.id);
-    if (updated.changes === 0) {
-      throw new ContinuationSaveError('chapter_missing', 'Chapter no longer exists');
-    }
-
-    database.updateProjectWordCount(projectDb);
-    const persistedChapter = projectDb
-      .prepare('SELECT data_version FROM chapters WHERE id = ?')
-      .get(chapter.id);
-    return {
-      chapterId: chapter.id,
-      content: nextContent,
-      wordCount,
-      dataVersion: persistedChapter?.data_version,
-    };
-  })();
+  const result = createManuscriptService(database).appendChapterBody({
+    projectName,
+    chapterId,
+    appended: continuation,
+    expectedBodyHash,
+    source: 'ai_continue',
+    usage,
+  });
+  if (result.missing) {
+    throw new ContinuationSaveError('chapter_missing', 'Chapter no longer exists');
+  }
+  if (result.conflict) {
+    throw new ContinuationSaveError(
+      'continuation_conflict',
+      'Chapter changed while the continuation was being generated',
+    );
+  }
+  return {
+    chapterId: result.chapterId,
+    content: result.content,
+    wordCount: result.wordCount,
+    dataVersion: result.dataVersion,
+  };
 }
 
 module.exports = { ContinuationSaveError, saveContinuation, validateContinuationCompletion };

@@ -1,8 +1,14 @@
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { openControlStore } = require('../control-store');
+const { canonicalDatabasePath } = require('../sqljs-atomic-store');
+const { FAULT_POINTS, withFaults } = require('../testing/fault-injection');
+const { getWasmBinary } = require('../wasm-binary');
+const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -19,10 +25,35 @@ async function callApi(baseUrl, pathName, options = {}) {
   return { status: response.status, body: await response.json() };
 }
 
-test('chapter revisions enter review immediately and rebase after outside edits', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-chapter-revisions-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+function projectControlStore(database, projectName) {
+  const filePath = database.getProjectDbPath(projectName);
+  const dbKey = createHash('sha256').update(canonicalDatabasePath(filePath)).digest('hex');
+  return openControlStore(path.join(database.getDataDir(), 'control', 'sqlite', dbKey));
+}
+
+async function readFormalRows(filePath, sql, params = []) {
+  const initSqlJs = require('sql.js');
+  const SQL = await initSqlJs({ wasmBinary: getWasmBinary() });
+  const database = new SQL.Database(fs.readFileSync(filePath));
+  try {
+    const statement = database.prepare(sql);
+    try {
+      statement.bind(params);
+      const rows = [];
+      while (statement.step()) rows.push(statement.getAsObject());
+      return rows;
+    } finally {
+      statement.free();
+    }
+  } finally {
+    database.close();
+  }
+}
+
+test('chapter revisions enter review immediately and rebase after outside edits', {
+  timeout: 15_000,
+}, async (t) => {
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -34,11 +65,6 @@ test('chapter revisions enter review immediately and rebase after outside edits'
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(db.getProjectDbPath(project));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();
@@ -47,9 +73,9 @@ test('chapter revisions enter review immediately and rebase after outside edits'
   assert.ok(projectDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'chapter_revisions'").get());
 
   projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
-  projectDb
+  withRawManuscriptSetup(() => projectDb
     .prepare("INSERT INTO chapters (volume_id, num, title, content, word_count, status) VALUES (1, 1, 'Chapter', ?, ?, 'writing')")
-    .run(original, original.length);
+    .run(original, original.length));
   const chapter = projectDb.prepare('SELECT * FROM chapters WHERE id = 1').get();
 
   const app = express();
@@ -361,7 +387,7 @@ test('chapter revisions enter review immediately and rebase after outside edits'
     body: { baseContent: polished, proposedContent: 'AI candidate from an older draft' },
   });
   const outsideEdit = 'Author changed the chapter outside the review';
-  projectDb.prepare('UPDATE chapters SET content = ?, word_count = ? WHERE id = ?').run(outsideEdit, outsideEdit.length, chapter.id);
+  withRawManuscriptSetup(() => projectDb.prepare('UPDATE chapters SET content = ?, word_count = ? WHERE id = ?').run(outsideEdit, outsideEdit.length, chapter.id));
 
   const rebasedActive = await callApi(baseUrl, `/${project}/chapters/${chapter.id}/revisions/active`);
   assert.equal(rebasedActive.status, 200);
@@ -402,7 +428,7 @@ test('chapter revisions enter review immediately and rebase after outside edits'
   });
   assert.equal(staleRejectCandidate.status, 201);
   const newerOutsideEdit = 'An edit that happened before rejecting the proposal';
-  projectDb.prepare('UPDATE chapters SET content = ?, word_count = ? WHERE id = ?').run(newerOutsideEdit, newerOutsideEdit.length, chapter.id);
+  withRawManuscriptSetup(() => projectDb.prepare('UPDATE chapters SET content = ?, word_count = ? WHERE id = ?').run(newerOutsideEdit, newerOutsideEdit.length, chapter.id));
   const staleReject = await callApi(baseUrl, `/${project}/revisions/${staleRejectCandidate.body.revision.id}/reject-all`, {
     method: 'POST',
     body: { expectedBaseContent: 'AI candidate from an older draft' },
@@ -418,7 +444,7 @@ test('chapter revisions enter review immediately and rebase after outside edits'
   assert.equal(projectDb.prepare('SELECT content FROM chapters WHERE id = ?').get(chapter.id).content, newerOutsideEdit);
 
   const laterOutsideEdit = 'A later external edit';
-  projectDb.prepare('UPDATE chapters SET content = ?, word_count = ? WHERE id = ?').run(laterOutsideEdit, laterOutsideEdit.length, chapter.id);
+  withRawManuscriptSetup(() => projectDb.prepare('UPDATE chapters SET content = ?, word_count = ? WHERE id = ?').run(laterOutsideEdit, laterOutsideEdit.length, chapter.id));
   const unchangedAtGenerationStart = await callApi(baseUrl, `/${project}/chapters/${chapter.id}/revisions`, {
     method: 'POST',
     body: { baseContent: 'Earlier snapshot', proposedContent: 'Earlier snapshot' },
@@ -431,4 +457,126 @@ test('chapter revisions enter review immediately and rebase after outside edits'
   const deleted = await callApi(baseUrl, `/${project}/chapters/${chapter.num}`, { method: 'DELETE' });
   assert.equal(deleted.status, 200);
   assert.equal(projectDb.prepare('SELECT COUNT(*) AS count FROM chapter_revisions').get().count, 0);
+});
+
+test('revision acceptance records its source before one chapter-and-revision publication', async (t) => {
+  withIsolatedDataDir(t);
+  const db = require('../db');
+  const { applyRevision, createPendingRevision } = require('../chapter-revisions');
+  const project = 'revision-source-order';
+  await db.initDatabase();
+  const projectDb = db.createProjectDb(project);
+  projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
+  withRawManuscriptSetup(() => projectDb
+    .prepare("INSERT INTO chapters (volume_id, num, title, content, word_count, status) VALUES (1, 1, 'Chapter', 'Original', 8, 'writing')")
+    .run());
+  const revision = createPendingRevision(project, 1, 'Original', 'Accepted replacement').revision;
+  const controlStore = projectControlStore(db, project);
+  const eventsBefore = controlStore.read();
+  const preparedBefore = eventsBefore.filter((event) => event.type === 'sqlite.publish.prepared').length;
+
+  const result = applyRevision(project, revision.id, 'accept-all', undefined, 'Original');
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(
+    projectDb.prepare('SELECT content, status FROM chapters WHERE id = 1').get(),
+    { content: 'Accepted replacement', status: 'accepted' },
+  );
+  assert.equal(
+    projectDb.prepare('SELECT status FROM chapter_revisions WHERE id = ?').get(revision.id).status,
+    'accepted',
+  );
+  const events = controlStore.read();
+  assert.equal(
+    events.filter((event) => event.type === 'sqlite.publish.prepared').length,
+    preparedBefore + 1,
+  );
+  const sourceEvent = events.filter((event) => event.type === 'manuscript.body_mutation.attempt').at(-1);
+  assert.equal(sourceEvent.payload.source, 'revision_accept');
+  assert.equal(sourceEvent.payload.operation, 'replace');
+  assert.equal(JSON.stringify(sourceEvent).includes('Accepted replacement'), false);
+  assert.equal(events[events.indexOf(sourceEvent) + 1].type, 'sqlite.publish.prepared');
+});
+
+test('revision publication failure keeps formal chapter and revision atomic before retry', async (t) => {
+  withIsolatedDataDir(t);
+  const db = require('../db');
+  const { applyRevision, createPendingRevision } = require('../chapter-revisions');
+  const project = 'revision-publication-failure';
+  await db.initDatabase();
+  const projectDb = db.createProjectDb(project);
+  projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
+  withRawManuscriptSetup(() => projectDb
+    .prepare("INSERT INTO chapters (volume_id, num, title, content, word_count, status) VALUES (1, 1, 'Chapter', 'Original', 8, 'writing')")
+    .run());
+  const revision = createPendingRevision(project, 1, 'Original', 'Accepted after retry').revision;
+  const projectPath = db.getProjectDbPath(project);
+  const controlStore = projectControlStore(db, project);
+  const preparedBefore = controlStore.read().filter((event) => event.type === 'sqlite.publish.prepared').length;
+
+  await assert.rejects(
+    withFaults({
+      [FAULT_POINTS.ATOMIC_STORE_PUBLISH_BEFORE_CANDIDATE_WRITE]: { throw: 'EIO' },
+    }, async () => applyRevision(project, revision.id, 'accept-all', undefined, 'Original')),
+    (error) => error.code === 'EIO'
+      && error.faultPoint === FAULT_POINTS.ATOMIC_STORE_PUBLISH_BEFORE_CANDIDATE_WRITE,
+  );
+
+  assert.deepEqual(
+    await readFormalRows(
+      projectPath,
+      'SELECT content, status FROM chapters WHERE id = ?',
+      [1],
+    ),
+    [{ content: 'Original', status: 'review' }],
+  );
+  assert.deepEqual(
+    await readFormalRows(
+      projectPath,
+      'SELECT status FROM chapter_revisions WHERE id = ?',
+      [revision.id],
+    ),
+    [{ status: 'pending' }],
+  );
+  const eventsAfterFailure = controlStore.read();
+  assert.equal(
+    eventsAfterFailure.filter((event) => event.type === 'sqlite.publish.prepared').length,
+    preparedBefore,
+  );
+  const sourceEvent = eventsAfterFailure
+    .filter((event) => event.type === 'manuscript.body_mutation.attempt')
+    .at(-1);
+  assert.equal(sourceEvent.payload.source, 'revision_accept');
+  assert.equal(JSON.stringify(sourceEvent).includes('Accepted after retry'), false);
+
+  projectDb
+    .prepare("INSERT INTO project_meta (key, value) VALUES ('revision_retry', 'published')")
+    .run();
+  assert.deepEqual(
+    await readFormalRows(
+      projectPath,
+      'SELECT content, status FROM chapters WHERE id = ?',
+      [1],
+    ),
+    [{ content: 'Original', status: 'review' }],
+  );
+  assert.deepEqual(
+    await readFormalRows(
+      projectPath,
+      'SELECT status FROM chapter_revisions WHERE id = ?',
+      [revision.id],
+    ),
+    [{ status: 'pending' }],
+  );
+
+  const retried = applyRevision(project, revision.id, 'accept-all', undefined, 'Original');
+  assert.equal(retried.accepted, true);
+  assert.deepEqual(
+    await readFormalRows(projectPath, 'SELECT content, status FROM chapters WHERE id = ?', [1]),
+    [{ content: 'Accepted after retry', status: 'accepted' }],
+  );
+  assert.deepEqual(
+    await readFormalRows(projectPath, 'SELECT status FROM chapter_revisions WHERE id = ?', [revision.id]),
+    [{ status: 'accepted' }],
+  );
 });

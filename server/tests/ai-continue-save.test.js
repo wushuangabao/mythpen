@@ -1,72 +1,204 @@
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
+const path = require('node:path');
 const test = require('node:test');
 
+const { openControlStore } = require('../control-store');
 const { saveContinuation } = require('../ai-continue-save');
+const { canonicalDatabasePath } = require('../sqljs-atomic-store');
+const { FAULT_POINTS, withFaults } = require('../testing/fault-injection');
+const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
-function fakeDatabase({ chapter = { id: 7, content: 'Existing' }, updateChanges = 1, dataVersion = 4 } = {}) {
-  const writes = [];
-  const reads = [];
-  const projectDb = {
-    transaction: (operation) => () => operation(),
-    prepare(sql) {
-      return {
-        get(...params) {
-          reads.push({ sql, params });
-          if (sql.startsWith('SELECT id, content')) return chapter;
-          if (sql.startsWith('SELECT SUM')) return { total: 24 };
-          if (sql.startsWith('SELECT data_version')) return { data_version: dataVersion };
-          throw new Error(`Unexpected get: ${sql}`);
-        },
-        run(...params) {
-          writes.push({ sql, params });
-          if (sql.startsWith('UPDATE chapters')) return { changes: updateChanges };
-          return { changes: 1 };
-        },
-      };
-    },
-  };
-  return {
-    database: {
-      getProjectDb: () => projectDb,
-      updateProjectWordCount(targetDb) {
-        const total = targetDb.prepare('SELECT SUM(word_count) AS total FROM chapters').get()?.total || 0;
-        targetDb.prepare("UPDATE project_meta SET value = ? WHERE key = 'word_count'").run(String(total));
-        targetDb.prepare("UPDATE project_meta SET value = ? WHERE key = 'updated_at'").run('now');
-      },
-    },
-    reads,
-    writes,
-  };
+function bodyHash(content) {
+  return createHash('sha256').update(content).digest('hex');
 }
 
-test('continuation saving selects the exact chapter id, appends text, and updates aggregate metadata', () => {
-  const { database, reads, writes } = fakeDatabase();
-  const result = saveContinuation(database, 'project', 7, 'Continuation', 'stop');
+function projectControlStore(database, projectName) {
+  const filePath = database.getProjectDbPath(projectName);
+  const dbKey = createHash('sha256').update(canonicalDatabasePath(filePath)).digest('hex');
+  return openControlStore(path.join(database.getDataDir(), 'control', 'sqlite', dbKey));
+}
 
-  assert.match(reads[0].sql, /WHERE id = \?/);
-  assert.deepEqual(reads[0].params, [7]);
+function preparedCount(controlStore) {
+  return controlStore.read().filter((event) => event.type === 'sqlite.publish.prepared').length;
+}
+
+async function createChapter(t, projectName, content = 'Existing') {
+  withIsolatedDataDir(t);
+  const database = require('../db');
+  await database.initDatabase();
+  const projectDb = database.createProjectDb(projectName);
+  projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
+  withRawManuscriptSetup(() => projectDb
+    .prepare('INSERT INTO chapters (volume_id, num, title, content, word_count) VALUES (1, 1, ?, ?, ?)')
+    .run('Chapter', content, content.replace(/\s/g, '').length));
+  const chapter = projectDb.prepare('SELECT * FROM chapters WHERE volume_id = 1 AND num = 1').get();
+  return { chapter, database, projectDb };
+}
+
+test('continuation saving appends exact bytes through ManuscriptService using the generation-start body hash', async (t) => {
+  const { chapter, database, projectDb } = await createChapter(t, 'continue-exact');
+  const controlStore = projectControlStore(database, 'continue-exact');
+  const preparedBefore = preparedCount(controlStore);
+  const result = saveContinuation(
+    database,
+    'continue-exact',
+    chapter.id,
+    'Continuation',
+    'stop',
+    bodyHash('Existing'),
+    { inputTokens: 11, outputTokens: 7, model: 'continuation-model' },
+  );
+
   assert.equal(result.content, 'Existing\n\nContinuation');
   assert.equal(result.wordCount, 'ExistingContinuation'.length);
-  assert.equal(result.dataVersion, 4);
-  assert.equal(writes[0].params[0], result.content);
-  assert.equal(writes[0].params[2], 7);
-  assert.equal(writes.length, 3);
+  assert.equal(result.dataVersion, chapter.data_version + 1);
+  assert.deepEqual(
+    projectDb.prepare('SELECT content, word_count, status FROM chapters WHERE id = ?').get(chapter.id),
+    { content: result.content, word_count: result.wordCount, status: 'writing' },
+  );
+  assert.deepEqual(
+    projectDb.prepare('SELECT task_name, chapter_num, input_tokens, output_tokens, model FROM token_usage').all(),
+    [{
+      task_name: 'continue',
+      chapter_num: chapter.num,
+      input_tokens: 11,
+      output_tokens: 7,
+      model: 'continuation-model',
+    }],
+  );
+
+  const events = controlStore.read();
+  assert.equal(preparedCount(controlStore), preparedBefore + 1);
+  const sourceEvent = events.filter((event) => event.type === 'manuscript.body_mutation.attempt').at(-1);
+  assert.equal(sourceEvent.payload.source, 'ai_continue');
+  assert.equal(sourceEvent.payload.expectedBodySha256, bodyHash('Existing'));
+  assert.equal(events[events.indexOf(sourceEvent) + 1].type, 'sqlite.publish.prepared');
 });
 
-test('continuation saving fails when the chapter disappeared or the update changed no rows', () => {
+test('continuation persistence failure is marked and later usage cannot publish its dirty body', async (t) => {
+  const { isManuscriptPersistenceError } = require('../manuscript-service');
+  const { chapter, database, projectDb } = await createChapter(
+    t,
+    'continue-publication-failure',
+    'Before body',
+  );
+  let persistenceError;
+  try {
+    await withFaults({
+      [FAULT_POINTS.ATOMIC_STORE_PUBLISH_BEFORE_CANDIDATE_WRITE]: { throw: 'EIO' },
+    }, async () => saveContinuation(
+      database,
+      'continue-publication-failure',
+      chapter.id,
+      'Failed continuation',
+      'stop',
+      bodyHash('Before body'),
+      { inputTokens: 13, outputTokens: 8, model: 'continuation-model' },
+    ));
+  } catch (error) {
+    persistenceError = error;
+  }
+
+  const marked = typeof isManuscriptPersistenceError === 'function'
+    && isManuscriptPersistenceError(persistenceError);
+  assert.equal(persistenceError?.code, 'EIO');
+  assert.equal(marked, true);
+  // This is the old caller behavior that exposed the bug. A marked persistence
+  // error must prevent this branch from running at all.
+  if (!marked) {
+    database.projectExecute(
+      'continue-publication-failure',
+      'INSERT INTO token_usage (task_name, chapter_num, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?)',
+      ['continue', chapter.num, 13, 8, 'continuation-model'],
+    );
+  }
+  assert.equal(
+    projectDb.prepare('SELECT content FROM chapters WHERE id = ?').get(chapter.id).content,
+    'Before body',
+  );
+  assert.equal(projectDb.prepare('SELECT COUNT(*) AS count FROM token_usage').get().count, 0);
+});
+
+test('a concurrent body change rejects the append without a source event or database publication', async (t) => {
+  const { chapter, database, projectDb } = await createChapter(t, 'continue-conflict', 'Generation base');
+  const { writeChapterBody } = require('../manuscript-service');
+  writeChapterBody({
+    projectName: 'continue-conflict',
+    chapterId: chapter.id,
+    content: 'Concurrent author edit',
+    source: 'rest',
+  });
+  const controlStore = projectControlStore(database, 'continue-conflict');
+  const publicationsBefore = preparedCount(controlStore);
+  const sourceEventsBefore = controlStore.read().filter((event) => event.type === 'manuscript.body_mutation.attempt').length;
+
   assert.throws(
-    () => saveContinuation(fakeDatabase({ chapter: null }).database, 'project', 3, 'Continuation', 'stop'),
+    () => saveContinuation(
+      database,
+      'continue-conflict',
+      chapter.id,
+      'Generated continuation',
+      'stop',
+      bodyHash('Generation base'),
+    ),
+    (error) => error.code === 'continuation_conflict',
+  );
+
+  assert.equal(projectDb.prepare('SELECT content FROM chapters WHERE id = ?').get(chapter.id).content, 'Concurrent author edit');
+  assert.equal(preparedCount(controlStore), publicationsBefore);
+  assert.equal(
+    controlStore.read().filter((event) => event.type === 'manuscript.body_mutation.attempt').length,
+    sourceEventsBefore,
+  );
+});
+
+test('retrying the same continuation cannot duplicate the appended bytes or publish again', async (t) => {
+  const { chapter, database, projectDb } = await createChapter(t, 'continue-retry', 'Existing');
+  const expectedBodyHash = bodyHash('Existing');
+  const first = saveContinuation(
+    database,
+    'continue-retry',
+    chapter.id,
+    'Continuation',
+    'stop',
+    expectedBodyHash,
+  );
+  const controlStore = projectControlStore(database, 'continue-retry');
+  const publicationsAfterFirst = preparedCount(controlStore);
+
+  assert.throws(
+    () => saveContinuation(
+      database,
+      'continue-retry',
+      chapter.id,
+      'Continuation',
+      'stop',
+      expectedBodyHash,
+    ),
+    (error) => error.code === 'continuation_conflict',
+  );
+  assert.equal(projectDb.prepare('SELECT content FROM chapters WHERE id = ?').get(chapter.id).content, first.content);
+  assert.equal(first.content, 'Existing\n\nContinuation');
+  assert.equal(preparedCount(controlStore), publicationsAfterFirst);
+});
+
+test('continuation saving preserves missing and invalid chapter errors', async (t) => {
+  const { database } = await createChapter(t, 'continue-errors');
+  assert.throws(
+    () => saveContinuation(database, 'continue-errors', 999, 'Continuation', 'stop', bodyHash('')),
     (error) => error.code === 'chapter_missing',
   );
   assert.throws(
-    () => saveContinuation(fakeDatabase({ updateChanges: 0 }).database, 'project', 3, 'Continuation', 'stop'),
-    (error) => error.code === 'chapter_missing',
+    () => saveContinuation(database, 'continue-errors', 0, 'Continuation', 'stop', bodyHash('')),
+    (error) => error.code === 'chapter_invalid',
   );
 });
 
 test('continuation saving rejects an empty model response instead of reporting success', () => {
   assert.throws(
-    () => saveContinuation(fakeDatabase().database, 'project', 3, '   ', 'stop'),
+    () => saveContinuation({}, 'project', 3, '   ', 'stop', bodyHash('Existing')),
     (error) => error.code === 'continuation_empty',
   );
 });
@@ -87,7 +219,14 @@ test('continuation saving rejects missing and abnormal model completion reasons 
       },
     };
     assert.throws(
-      () => saveContinuation(database, 'project', 7, 'Partial continuation', reason),
+      () => saveContinuation(
+        database,
+        'project',
+        7,
+        'Partial continuation',
+        reason,
+        bodyHash('Existing'),
+      ),
       (error) => error.code === code,
     );
     assert.equal(opened, false);

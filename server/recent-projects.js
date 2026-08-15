@@ -1,6 +1,20 @@
 const fs = require('node:fs');
 
-function fallbackProject(row) {
+function normalizeOpenState(openState) {
+  if (openState?.openState === 'ready') {
+    return { openState: 'ready', reasonCode: null, recommendedAction: null };
+  }
+  if (openState?.openState === 'isolated') {
+    return {
+      openState: 'isolated',
+      reasonCode: openState.reasonCode || 'RECOVERY_REQUIRED',
+      recommendedAction: openState.recommendedAction || null,
+    };
+  }
+  return { openState: 'isolated', reasonCode: 'RECOVERY_REQUIRED', recommendedAction: null };
+}
+
+function fallbackProject(row, openState) {
   return {
     id: row.id,
     name: row.name,
@@ -12,14 +26,37 @@ function fallbackProject(row) {
     mode: 'medium-novel',
     instanceId: '',
     status: '未知',
+    ...normalizeOpenState(openState),
   };
 }
 
-function readRecentProject(row, { fsApi = fs, openProjectDb }) {
+function readRecentProject(row, {
+  fsApi = fs,
+  getProjectOpenState = () => null,
+  openProjectDb,
+  recordProjectOpenFailure = () => ({
+    openState: 'isolated',
+    reasonCode: 'RECOVERY_REQUIRED',
+    recommendedAction: null,
+  }),
+}) {
+  const openState = normalizeOpenState(getProjectOpenState(row.file_path));
+  if (openState.openState === 'isolated') return fallbackProject(row, openState);
   try {
-    if (!fsApi.statSync(row.file_path).isFile()) return fallbackProject(row);
-  } catch {
-    return fallbackProject(row);
+    if (!fsApi.statSync(row.file_path).isFile()) {
+      const error = Object.assign(new Error('Registered project path is not a file'), {
+        code: 'RECOVERY_REQUIRED',
+      });
+      return fallbackProject(
+        row,
+        normalizeOpenState(recordProjectOpenFailure(row.file_path, error)),
+      );
+    }
+  } catch (error) {
+    return fallbackProject(
+      row,
+      normalizeOpenState(recordProjectOpenFailure(row.file_path, error)),
+    );
   }
 
   try {
@@ -42,9 +79,13 @@ function readRecentProject(row, { fsApi = fs, openProjectDb }) {
       mode: meta.mode || 'medium-novel',
       instanceId: meta.project_instance_id || '',
       status: wordCount > 30000 ? '写作中' : wordCount > 5000 ? '进行中' : '刚起步',
+      ...openState,
     };
-  } catch {
-    return fallbackProject(row);
+  } catch (error) {
+    return fallbackProject(
+      row,
+      normalizeOpenState(recordProjectOpenFailure(row.file_path, error)),
+    );
   }
 }
 

@@ -5,7 +5,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { runCli } = require('../cli');
-const { copyAndVerifyDirectory } = require('../storage-migration');
+const { createJsonStore } = require('../path-store');
+const {
+  assertDataRootMigrationSupported,
+  copyAndVerifyDirectory,
+  fileManifest,
+} = require('../storage-migration');
+const { acquireConfigLifecycleLease } = require('../config-lifecycle-lease');
 
 function memoryStore(initial = {}) {
   const values = { ...initial };
@@ -26,6 +32,44 @@ function tempDir(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `mythpen-cli-${name}-`));
 }
 
+function writeDatabase(SQL, filePath, statements) {
+  const database = new SQL.Database();
+  for (const [sql, params] of statements) database.run(sql, params);
+  fs.writeFileSync(filePath, Buffer.from(database.export()));
+  database.close();
+}
+
+function writeProjectFixture(SQL, filePath, markerRows = [['schema_version', '10']]) {
+  writeDatabase(SQL, filePath, [
+    ['CREATE TABLE project_meta (key TEXT, value TEXT NOT NULL)'],
+    ['CREATE TABLE chapters (id TEXT PRIMARY KEY, content TEXT)'],
+    ...markerRows.map(([key, value]) => [
+      'INSERT INTO project_meta (key, value) VALUES (?, ?)',
+      [key, value],
+    ]),
+  ]);
+}
+
+function writeConfigFixture(SQL, source, registeredPaths, { includeRegistry = true } = {}) {
+  const statements = [['CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)']];
+  if (includeRegistry) {
+    statements.push(['CREATE TABLE recent_projects (id TEXT, file_path TEXT)']);
+    registeredPaths.forEach((filePath, index) => statements.push([
+      'INSERT INTO recent_projects (id, file_path) VALUES (?, ?)',
+      [String(index), filePath],
+    ]));
+  }
+  writeDatabase(SQL, path.join(source, 'config.db'), statements);
+}
+
+function runStorageCli(argv, dependencies = {}) {
+  return runCli(argv, {
+    assertDataRootMigrationSupported: async () => {},
+    acquireConfigLifecycleLeaseSet: () => ({ release() {} }),
+    ...dependencies,
+  });
+}
+
 async function inTemporaryWorkingDirectory(callback) {
   const previous = process.cwd();
   const directory = tempDir('cwd');
@@ -40,7 +84,7 @@ async function inTemporaryWorkingDirectory(callback) {
 
 test('data-dir get prints the effective data directory', async () => {
   const stdout = output();
-  const code = await runCli(['data-dir', 'get'], {
+  const code = await runStorageCli(['data-dir', 'get'], {
     store: memoryStore({ DataDir: 'D:\\MythpenData' }),
     env: {},
     homeDir: 'C:\\Users\\author',
@@ -61,7 +105,7 @@ test('get rejects every extra argument without output or configuration changes',
     const stdout = output();
     const stderr = output();
 
-    const code = await runCli(argv, {
+    const code = await runStorageCli(argv, {
       store,
       env: {},
       homeDir: 'C:\\Users\\author',
@@ -90,7 +134,7 @@ test('set rejects malformed argument shapes without creating directories or chan
     for (const argv of malformedArgv) {
       const store = memoryStore({ DataDir: 'C:\\OldData' });
       const stderr = output();
-      const code = await runCli(argv, {
+      const code = await runStorageCli(argv, {
         store,
         env: {},
         homeDir: 'C:\\Users\\author',
@@ -114,7 +158,7 @@ test('data-dir set --migrate switches only after a successful verified copy', as
   fs.writeFileSync(path.join(source, 'config.db'), 'database');
   const store = memoryStore({ DataDir: source });
 
-  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
     store,
     env: {},
     homeDir: 'C:\\Users\\author',
@@ -129,22 +173,429 @@ test('data-dir set --migrate switches only after a successful verified copy', as
   assert.equal(fs.readFileSync(path.join(source, 'config.db'), 'utf8'), 'database');
 });
 
-test('migration refuses to run while Mythpen is active and does not switch', async () => {
-  const store = memoryStore({ DataDir: 'C:\\OldData' });
+test('data-dir busy rejection happens before target, migration, and path-store side effects', async () => {
+  const source = tempDir('busy-source');
+  const targetParent = tempDir('busy-target-parent');
+  const target = path.join(targetParent, 'target');
+  const controlRoot = tempDir('busy-control');
+  fs.writeFileSync(path.join(source, 'config.db'), 'unchanged source');
+  const store = memoryStore({ DataDir: source });
   const stderr = output();
+  let migrationCalls = 0;
+  let storeSetCalls = 0;
+  store.set = () => { storeSetCalls += 1; };
+  const sourceBefore = fileManifest(source);
+  const targetParentBefore = fileManifest(targetParent);
+  const storeBefore = JSON.stringify(store.values);
+  const held = acquireConfigLifecycleLease(path.join(source, 'config.db'), { controlRoot });
 
-  const code = await runCli(['data-dir', 'set', 'D:\\NewData', '--migrate'], {
+  let code;
+  try {
+    code = await runCli(['data-dir', 'set', target, '--migrate'], {
+      store,
+      env: {},
+      homeDir: 'C:\\Users\\author',
+      applicationControlRoot: controlRoot,
+      assertDataRootMigrationSupported: async () => {},
+      copyAndVerifyDirectory: async () => { migrationCalls += 1; },
+      stdout: output(),
+      stderr,
+    });
+  } finally {
+    held.release();
+  }
+
+  assert.equal(code, 1);
+  assert.equal(storeSetCalls, 0);
+  assert.equal(migrationCalls, 0);
+  assert.deepEqual(fileManifest(source), sourceBefore);
+  assert.deepEqual(fileManifest(targetParent), targetParentBefore);
+  assert.equal(JSON.stringify(store.values), storeBefore);
+  assert.equal(fs.existsSync(target), false);
+  assert.match(stderr.lines.join('\n'), /already in use/);
+});
+
+test('native data-root rejection happens before target, migration, and path-store side effects', async () => {
+  const source = tempDir('native-source');
+  const target = path.join(tempDir('native-target-parent'), 'target');
+  fs.writeFileSync(path.join(source, 'config.db'), 'unchanged source');
+  const store = memoryStore({ DataDir: source });
+  let leaseCalls = 0;
+  let migrationCalls = 0;
+  let storeSetCalls = 0;
+  store.set = () => { storeSetCalls += 1; };
+  const unsupported = new Error('native projects cannot move data roots');
+  unsupported.code = 'NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED';
+
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
     store,
     env: {},
     homeDir: 'C:\\Users\\author',
-    isServerRunning: async () => true,
+    assertDataRootMigrationSupported: async () => { throw unsupported; },
+    acquireConfigLifecycleLeaseSet: () => { leaseCalls += 1; },
+    copyAndVerifyDirectory: async () => { migrationCalls += 1; },
     stdout: output(),
-    stderr,
+    stderr: output(),
   });
 
   assert.equal(code, 1);
-  assert.equal(store.values.DataDir, 'C:\\OldData');
-  assert.match(stderr.lines.join('\n'), /请先完全退出 Mythpen/);
+  assert.equal(store.values.DataDir, source);
+  assert.equal(leaseCalls, 0);
+  assert.equal(migrationCalls, 0);
+  assert.equal(storeSetCalls, 0);
+  assert.equal(fs.readFileSync(path.join(source, 'config.db'), 'utf8'), 'unchanged source');
+  assert.equal(fs.existsSync(target), false);
+});
+
+test('a fixed port-3001 probe is not used as migration correctness mutex', async () => {
+  const source = tempDir('port-source');
+  const target = path.join(tempDir('port-target-parent'), 'target');
+  const store = memoryStore({ DataDir: source });
+  let released = false;
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
+    store,
+    env: {},
+    homeDir: 'C:\\Users\\author',
+    isServerRunning: async () => { throw new Error('fixed port probe must not run'); },
+    assertDataRootMigrationSupported: async () => {},
+    acquireConfigLifecycleLeaseSet: () => ({
+      release() { released = true; },
+    }),
+    copyAndVerifyDirectory: async () => ({
+      source,
+      target,
+      fileCount: 0,
+      totalBytes: 0,
+      cleanupWarnings: [],
+    }),
+    stdout: output(),
+    stderr: output(),
+  });
+
+  assert.equal(code, 0);
+  assert.equal(released, true);
+  assert.equal(store.values.DataDir, path.resolve(target));
+});
+
+test('read-only native root preflight detects schema 11 and native backend markers', async () => {
+  const SQL = await require('sql.js')();
+  for (const marker of ['schema', 'backend']) {
+    const source = tempDir(`native-preflight-${marker}`);
+    const projectsDir = path.join(source, 'projects');
+    fs.mkdirSync(projectsDir);
+    const projectPath = path.join(projectsDir, `${marker}.mythpen.db`);
+    const config = new SQL.Database();
+    config.run('CREATE TABLE recent_projects (id TEXT, file_path TEXT)');
+    config.run('INSERT INTO recent_projects (id, file_path) VALUES (?, ?)', [marker, projectPath]);
+    fs.writeFileSync(path.join(source, 'config.db'), Buffer.from(config.export()));
+    config.close();
+    writeProjectFixture(SQL, projectPath, [
+      ['schema_version', marker === 'schema' ? '11' : '10'],
+      ['durability_backend', marker === 'backend' ? 'native-sqlite-v2' : 'sqljs-v1'],
+    ]);
+
+    await assert.rejects(
+      assertDataRootMigrationSupported(source, { sqlModule: SQL }),
+      (error) => error.code === 'NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED' && error.status === 409,
+      marker,
+    );
+  }
+});
+
+test('real scanner fails closed for unregistered, malformed, escaped, and unsafe project state', async () => {
+  const SQL = await require('sql.js')();
+  const scenarios = [
+    {
+      name: 'native-without-config',
+      setup(source, projects) {
+        writeProjectFixture(SQL, path.join(projects, 'native.mythpen.db'), [
+          ['schema_version', '11'],
+          ['durability_backend', 'native-sqlite-v2'],
+        ]);
+      },
+      code: 'NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED',
+    },
+    {
+      name: 'unregistered-native',
+      setup(source, projects) {
+        writeConfigFixture(SQL, source, []);
+        writeProjectFixture(SQL, path.join(projects, 'native.mythpen.db'), [['schema_version', '11']]);
+      },
+      code: 'NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED',
+    },
+    {
+      name: 'relative-registration',
+      setup(source, projects) {
+        const projectPath = path.join(projects, 'relative.mythpen.db');
+        writeProjectFixture(SQL, projectPath);
+        writeConfigFixture(SQL, source, [path.join('projects', path.basename(projectPath))]);
+      },
+    },
+    {
+      name: 'escaped-registration',
+      setup(source) {
+        const external = path.join(tempDir('external-project'), 'escaped.mythpen.db');
+        writeProjectFixture(SQL, external);
+        writeConfigFixture(SQL, source, [external]);
+      },
+    },
+    {
+      name: 'missing-registration',
+      setup(source, projects) {
+        writeConfigFixture(SQL, source, [path.join(projects, 'missing.mythpen.db')]);
+      },
+    },
+    {
+      name: 'duplicate-marker',
+      setup(source, projects) {
+        const projectPath = path.join(projects, 'duplicate.mythpen.db');
+        writeProjectFixture(SQL, projectPath, [['schema_version', '10'], ['schema_version', '10']]);
+        writeConfigFixture(SQL, source, [projectPath]);
+      },
+    },
+    {
+      name: 'malformed-marker',
+      setup(source, projects) {
+        const projectPath = path.join(projects, 'malformed.mythpen.db');
+        writeProjectFixture(SQL, projectPath, [['schema_version', '11junk']]);
+        writeConfigFixture(SQL, source, [projectPath]);
+      },
+    },
+    {
+      name: 'unknown-backend',
+      setup(source, projects) {
+        const projectPath = path.join(projects, 'backend.mythpen.db');
+        writeProjectFixture(SQL, projectPath, [
+          ['schema_version', '10'],
+          ['durability_backend', 'mystery-store'],
+        ]);
+        writeConfigFixture(SQL, source, [projectPath]);
+      },
+    },
+    {
+      name: 'unreadable-database',
+      setup(source, projects) {
+        const projectPath = path.join(projects, 'broken.mythpen.db');
+        fs.writeFileSync(projectPath, 'not sqlite');
+        writeConfigFixture(SQL, source, [projectPath]);
+      },
+    },
+    {
+      name: 'extra-hardlink',
+      setup(source, projects) {
+        const projectPath = path.join(projects, 'linked.mythpen.db');
+        writeProjectFixture(SQL, projectPath);
+        fs.linkSync(projectPath, path.join(source, 'linked-copy.db'));
+        writeConfigFixture(SQL, source, [projectPath]);
+      },
+    },
+    {
+      name: 'missing-registry-table',
+      setup(source, projects) {
+        writeProjectFixture(SQL, path.join(projects, 'v1.mythpen.db'));
+        writeConfigFixture(SQL, source, [], { includeRegistry: false });
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const source = tempDir(`preflight-${scenario.name}`);
+    const projects = path.join(source, 'projects');
+    fs.mkdirSync(projects);
+    scenario.setup(source, projects);
+    await assert.rejects(
+      assertDataRootMigrationSupported(source, { sqlModule: SQL }),
+      (error) => scenario.code ? error.code === scenario.code : Boolean(error),
+      scenario.name,
+    );
+  }
+});
+
+test('real scanner and CLI allow a truly empty root and a complete ordinary v1 root', async () => {
+  const SQL = await require('sql.js')();
+  const missing = path.join(tempDir('preflight-missing-parent'), 'new-data-root');
+  await assert.doesNotReject(assertDataRootMigrationSupported(missing, { sqlModule: SQL }));
+
+  const empty = tempDir('preflight-empty');
+  await assert.doesNotReject(assertDataRootMigrationSupported(empty, { sqlModule: SQL }));
+
+  const source = tempDir('preflight-v1');
+  const projects = path.join(source, 'projects');
+  fs.mkdirSync(projects);
+  const projectPath = path.join(projects, 'v1.mythpen.db');
+  writeProjectFixture(SQL, projectPath, [['schema_version', '10']]);
+  writeConfigFixture(SQL, source, [projectPath]);
+  await assert.doesNotReject(assertDataRootMigrationSupported(source, { sqlModule: SQL }));
+
+  const target = path.join(tempDir('preflight-v1-target'), 'data');
+  const store = memoryStore({ DataDir: source });
+  const code = await runCli(['data-dir', 'set', target], {
+    store,
+    env: {},
+    applicationControlRoot: tempDir('preflight-v1-control'),
+    stdout: output(),
+    stderr: output(),
+  });
+  assert.equal(code, 0);
+  assert.equal(store.values.DataDir, path.resolve(target));
+});
+
+test('unmocked CLI rejects native-without-config before target or path-store changes', async () => {
+  const SQL = await require('sql.js')();
+  const source = tempDir('cli-native-without-config');
+  const projects = path.join(source, 'projects');
+  fs.mkdirSync(projects);
+  writeProjectFixture(SQL, path.join(projects, 'native.mythpen.db'), [['schema_version', '11']]);
+  const targetParent = tempDir('cli-native-without-config-target');
+  const target = path.join(targetParent, 'data');
+  const store = memoryStore({ DataDir: source });
+  const sourceBefore = fileManifest(source);
+  const targetBefore = fileManifest(targetParent);
+  const storeBefore = JSON.stringify(store.values);
+
+  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+    store,
+    env: {},
+    applicationControlRoot: tempDir('cli-native-without-config-control'),
+    stdout: output(),
+    stderr: output(),
+  });
+  assert.equal(code, 1);
+  assert.deepEqual(fileManifest(source), sourceBefore);
+  assert.deepEqual(fileManifest(targetParent), targetBefore);
+  assert.equal(JSON.stringify(store.values), storeBefore);
+});
+
+function createWindowsJunctionPreflightScenario(SQL, name) {
+  if (name.endsWith('registered-parent-alias')) {
+    const source = tempDir('junction-registered-source');
+    const projects = path.join(source, 'projects');
+    fs.mkdirSync(projects);
+    const projectPath = path.join(projects, 'v1.mythpen.db');
+    writeProjectFixture(SQL, projectPath);
+    const alias = path.join(tempDir('junction-registered-alias-parent'), 'projects-alias');
+    fs.symlinkSync(projects, alias, 'junction');
+    writeConfigFixture(SQL, source, [path.join(alias, path.basename(projectPath))]);
+    return { source };
+  }
+
+  const physicalParent = tempDir('junction-source-physical-parent');
+  const physicalSource = path.join(physicalParent, 'source');
+  const projects = path.join(physicalSource, 'projects');
+  fs.mkdirSync(projects, { recursive: true });
+  writeProjectFixture(SQL, path.join(projects, 'v1.mythpen.db'));
+  const aliasParent = path.join(tempDir('junction-source-alias-parent'), 'data-parent-alias');
+  fs.symlinkSync(physicalParent, aliasParent, 'junction');
+  const source = path.join(aliasParent, 'source');
+  writeConfigFixture(SQL, physicalSource, [path.join(source, 'projects', 'v1.mythpen.db')]);
+  return { source };
+}
+
+test('Windows real scanner rejects junction aliases in registered and source path chains', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const SQL = await require('sql.js')();
+  for (const name of ['registered-parent-alias', 'source-ancestor-alias']) {
+    const { source } = createWindowsJunctionPreflightScenario(SQL, name);
+    await assert.rejects(
+      assertDataRootMigrationSupported(source, { sqlModule: SQL }),
+      (error) => error.code === 'STORAGE_UNAVAILABLE',
+      name,
+    );
+  }
+});
+
+test('Windows unmocked CLI rejects junction aliases without source, target, or path-store changes', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const SQL = await require('sql.js')();
+  for (const name of ['registered-parent-alias', 'source-ancestor-alias']) {
+    const { source } = createWindowsJunctionPreflightScenario(SQL, `cli-${name}`);
+    const targetParent = tempDir(`cli-${name}-target-parent`);
+    const target = path.join(targetParent, 'data');
+    const pathStoreRoot = tempDir(`cli-${name}-path-store`);
+    const pathStoreFile = path.join(pathStoreRoot, 'paths.json');
+    fs.writeFileSync(pathStoreFile, JSON.stringify({ DataDir: source }, null, 2));
+    const store = createJsonStore(pathStoreFile);
+    const sourceBefore = fileManifest(source);
+    const targetBefore = fileManifest(targetParent);
+    const pathStoreBefore = fileManifest(pathStoreRoot);
+
+    const code = await runCli(['data-dir', 'set', target], {
+      store,
+      env: {},
+      applicationControlRoot: tempDir(`cli-${name}-control`),
+      stdout: output(),
+      stderr: output(),
+    });
+
+    assert.equal(code, 1, name);
+    assert.deepEqual(fileManifest(source), sourceBefore, name);
+    assert.deepEqual(fileManifest(targetParent), targetBefore, name);
+    assert.deepEqual(fileManifest(pathStoreRoot), pathStoreBefore, name);
+    assert.equal(fs.existsSync(target), false, name);
+  }
+});
+
+function fsApiWithDeniedDataRootChildren(source) {
+  const denied = new Set([
+    path.resolve(source, 'config.db').toLowerCase(),
+    path.resolve(source, 'projects').toLowerCase(),
+  ]);
+  return new Proxy(fs, {
+    get(realFs, property) {
+      if (property !== 'lstatSync') return Reflect.get(realFs, property);
+      return (filePath, ...arguments_) => {
+        if (denied.has(path.resolve(filePath).toLowerCase())) {
+          const error = new Error(`access denied: ${filePath}`);
+          error.code = 'EACCES';
+          throw error;
+        }
+        return realFs.lstatSync(filePath, ...arguments_);
+      };
+    },
+  });
+}
+
+test('real scanner fails closed when data-root child probes return EACCES', async () => {
+  const source = tempDir('preflight-access-denied');
+  const fsApi = fsApiWithDeniedDataRootChildren(source);
+
+  await assert.rejects(
+    assertDataRootMigrationSupported(source, { fsApi }),
+    (error) => error.code === 'STORAGE_UNAVAILABLE' && error.cause?.code === 'EACCES',
+  );
+});
+
+test('CLI with real scanner preserves manifests when data-root child probes return EACCES', async () => {
+  const source = tempDir('cli-access-denied-source');
+  const fsApi = fsApiWithDeniedDataRootChildren(source);
+  const targetParent = tempDir('cli-access-denied-target-parent');
+  const target = path.join(targetParent, 'data');
+  const pathStoreRoot = tempDir('cli-access-denied-path-store');
+  const pathStoreFile = path.join(pathStoreRoot, 'paths.json');
+  fs.writeFileSync(pathStoreFile, JSON.stringify({ DataDir: source }, null, 2));
+  const store = createJsonStore(pathStoreFile);
+  const sourceBefore = fileManifest(source);
+  const targetBefore = fileManifest(targetParent);
+  const pathStoreBefore = fileManifest(pathStoreRoot);
+
+  const code = await runCli(['data-dir', 'set', target], {
+    store,
+    env: {},
+    applicationControlRoot: tempDir('cli-access-denied-control'),
+    assertDataRootMigrationSupported: (dataDir) => (
+      assertDataRootMigrationSupported(dataDir, { fsApi })
+    ),
+    stdout: output(),
+    stderr: output(),
+  });
+
+  assert.equal(code, 1);
+  assert.deepEqual(fileManifest(source), sourceBefore);
+  assert.deepEqual(fileManifest(targetParent), targetBefore);
+  assert.deepEqual(fileManifest(pathStoreRoot), pathStoreBefore);
+  assert.equal(fs.existsSync(target), false);
 });
 
 test('a failed verified copy leaves the existing data-dir configuration unchanged', async () => {
@@ -155,7 +606,7 @@ test('a failed verified copy leaves the existing data-dir configuration unchange
   const store = memoryStore({ DataDir: source });
   const stderr = output();
 
-  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
     store,
     env: {},
     homeDir: 'C:\\Users\\author',
@@ -196,7 +647,7 @@ test('copy and manifest failures leave configuration unchanged and the same targ
       },
     });
 
-    const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+    const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
       store,
       env: {},
       homeDir: 'C:\\Users\\author',
@@ -255,7 +706,7 @@ test('cleanup warnings are printed after the verified path is persisted', async 
       },
     };
 
-    const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+    const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
       store,
       env: {},
       homeDir: 'C:\\Users\\author',
@@ -289,7 +740,7 @@ test('stdout failures after a committed migration cannot prevent configuration p
     const stderr = output();
     let writes = 0;
 
-    const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+    const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
       store,
       env: {},
       homeDir: 'C:\\Users\\author',
@@ -339,7 +790,7 @@ test('migration publishes through the Windows atomic helper boundary', async () 
     };
     const stderr = output();
 
-    const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+    const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
       store, env: {}, homeDir: 'C:\\Users\\author',
       isServerRunning: async () => false,
       copyAndVerifyDirectory: (from, to) => copyAndVerifyDirectory(from, to, {
@@ -388,7 +839,7 @@ test('persists a corroborated commit when execFile reports an error after moving
     })
   );
 
-  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
     store, env: {}, homeDir: 'C:\\Users\\author',
     isServerRunning: async () => false,
     copyAndVerifyDirectory: (from, to) => copyAndVerifyDirectory(from, to, {
@@ -412,7 +863,7 @@ test('committed migration reports an actionable recovery command when store.set 
   const store = memoryStore({ DataDir: source });
   store.set = () => { throw new Error('registry access denied'); };
   const stderr = output();
-  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
     store, env: {}, homeDir: 'C:\\Users\\author',
     isServerRunning: async () => false, stdout: output(), stderr,
   });
@@ -438,7 +889,7 @@ test('store failure diagnostic includes every committed cleanup residual', async
     { path: 'C:\\residual\\marker-a', error: 'marker locked' },
     { path: 'C:\\residual\\backup-b', error: 'backup locked' },
   ];
-  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
     store, env: {}, homeDir: 'C:\\Users\\author', isServerRunning: async () => false,
     copyAndVerifyDirectory: () => ({
       source: 'C:\\Old', target, fileCount: 1, totalBytes: 1, cleanupWarnings: warnings,
@@ -459,14 +910,14 @@ test('export-dir get and set --migrate mirror data-dir behavior', async () => {
   const store = memoryStore({ ExportDir: source });
   const stdout = output();
 
-  const getCode = await runCli(['export-dir', 'get'], {
+  const getCode = await runStorageCli(['export-dir', 'get'], {
     store,
     env: {},
     homeDir: 'C:\\Users\\author',
     stdout,
     stderr: output(),
   });
-  const setCode = await runCli(['export-dir', 'set', target, '--migrate'], {
+  const setCode = await runStorageCli(['export-dir', 'set', target, '--migrate'], {
     store,
     env: {},
     homeDir: 'C:\\Users\\author',
@@ -493,7 +944,7 @@ test('set records persistent paths but reports environment overrides for both st
     const store = memoryStore();
     const stdout = output();
 
-    const code = await runCli([scenario.scope, 'set', target], {
+    const code = await runStorageCli([scenario.scope, 'set', target], {
       store,
       env: { [scenario.envName]: effective },
       homeDir: 'C:\\Users\\author',
@@ -515,14 +966,14 @@ test('invalid commands and flags return usage exit code without changing configu
   const store = memoryStore({ DataDir: 'C:\\OldData' });
   const stderr = output();
 
-  const unknownCode = await runCli(['unknown', 'get'], {
+  const unknownCode = await runStorageCli(['unknown', 'get'], {
     store,
     env: {},
     homeDir: 'C:\\Users\\author',
     stdout: output(),
     stderr,
   });
-  const invalidFlagCode = await runCli(['data-dir', 'set', 'D:\\NewData', '--force'], {
+  const invalidFlagCode = await runStorageCli(['data-dir', 'set', 'D:\\NewData', '--force'], {
     store,
     env: {},
     homeDir: 'C:\\Users\\author',

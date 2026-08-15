@@ -8,9 +8,10 @@ const {
   resolveStoragePaths,
 } = require('./storage-paths');
 const {
+  assertDataRootMigrationSupported: inspectDataRootMigrationSupport,
   copyAndVerifyDirectory,
-  isServerRunning: detectServer,
 } = require('./storage-migration');
+const { acquireConfigLifecycleLeaseSet } = require('./config-lifecycle-lease');
 
 const HELP = `Mythpen storage CLI
 
@@ -27,8 +28,11 @@ async function runCli(argv, dependencies = {}) {
   const store = dependencies.store || createPathStore();
   const env = dependencies.env || process.env;
   const homeDir = dependencies.homeDir;
-  const serverRunning = dependencies.isServerRunning || detectServer;
   const migrateDirectory = dependencies.copyAndVerifyDirectory || copyAndVerifyDirectory;
+  const assertMigrationSupported = dependencies.assertDataRootMigrationSupported
+    || inspectDataRootMigrationSupport;
+  const acquireConfigLeases = dependencies.acquireConfigLifecycleLeaseSet
+    || acquireConfigLifecycleLeaseSet;
   const [scope, action, ...arguments_] = argv;
   const definitions = {
     'data-dir': { key: DATA_DIR_VALUE, field: 'dataDir', envKey: 'MYTHPEN_DATA_DIR' },
@@ -62,11 +66,20 @@ async function runCli(argv, dependencies = {}) {
   const before = resolveStoragePaths({ store, env, homeDir });
   const target = path.resolve(rawTarget);
   let migrationResult = null;
+  let configLeases = null;
+  let resultCode = 0;
   try {
+    if (scope === 'data-dir') await assertMigrationSupported(before.dataDir);
+    const configPaths = [before.configDbPath];
+    if (scope === 'data-dir') configPaths.push(path.join(target, 'config.db'));
+    configLeases = acquireConfigLeases(configPaths, {
+      ...(dependencies.applicationControlRoot
+        ? { controlRoot: dependencies.applicationControlRoot }
+        : {}),
+    });
+    if (scope === 'data-dir') await assertMigrationSupported(before.dataDir);
+
     if (migrate) {
-      if (await serverRunning()) {
-        throw new Error('请先完全退出 Mythpen，再执行迁移。');
-      }
       migrationResult = await migrateDirectory(before[definition.field], target);
     } else {
       fs.mkdirSync(target, { recursive: true });
@@ -87,28 +100,37 @@ async function runCli(argv, dependencies = {}) {
       } else {
         stderr.write(`目录已准备但配置保存失败：${target}；底层原因：${error.message}`);
       }
-      return 1;
+      resultCode = 1;
     }
-    if (migrationResult) {
+    if (resultCode === 0 && migrationResult) {
       stdout.write(`已复制并校验 ${migrationResult.fileCount} 个文件；源目录仍保留：${migrationResult.source}`);
     }
-    for (const warning of migrationResult?.cleanupWarnings || []) {
+    for (const warning of resultCode === 0 ? migrationResult?.cleanupWarnings || [] : []) {
       stdout.write(
         `迁移已完成，但临时备份清理失败：${warning.path}（${warning.error}）`,
       );
     }
-    if (env[definition.envKey]) {
+    if (resultCode === 0 && env[definition.envKey]) {
       stdout.write(`持久设置已保存：${scope}：${target}`);
       stdout.write(`当前有效路径仍由环境变量 ${definition.envKey} 覆盖：${before[definition.field]}`);
-    } else {
+    } else if (resultCode === 0) {
       stdout.write(`已设置 ${scope}：${target}`);
       stdout.write('请重新启动 Mythpen 使设置生效。');
     }
-    return 0;
   } catch (error) {
     stderr.write(error.message);
-    return 1;
+    resultCode = 1;
+  } finally {
+    if (configLeases) {
+      try {
+        configLeases.release();
+      } catch (error) {
+        stderr.write(error.message);
+        resultCode = 1;
+      }
+    }
   }
+  return resultCode;
 }
 
 if (require.main === module) {

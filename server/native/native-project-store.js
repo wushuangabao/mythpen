@@ -1,0 +1,2260 @@
+const { createHash, randomUUID } = require('node:crypto');
+const { Database } = require('bun:sqlite');
+
+const controlStoreModule = require('../control-store');
+const { createDatabaseIdentityGuard } = require('./database-identity-guard');
+const {
+  auditWritableTableManifest,
+  canonicalTriggerDefinitions,
+  canonicalTriggerSetDigest,
+} = require('./durability-schema');
+const {
+  classifyNativeSql,
+  classifyNativeTransactionSql,
+} = require('./native-sql-authorization');
+const {
+  FAULT_POINTS,
+  crashOnlyFaultPoint,
+  faultPoint,
+} = require('../testing/fault-injection');
+
+// Deliberately module-private. Business statement facades never receive this capability.
+const DURABILITY_SQL_CAPABILITY = Symbol('native durability SQL capability');
+const HASH_PATTERN = /^[0-9a-f]{64}$/;
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ISO_MILLISECOND_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const CONNECTION_EPOCH_FILTER_DOMAIN = Buffer.from(
+  'mythpen-controlstore-connection-epoch-v1\0',
+  'utf8',
+);
+const CONNECTION_EPOCH_FILTER_BYTES = 1_048_576;
+const NATIVE_EVENT_KEYS = ['digest', 'payload', 'prevDigest', 'seq', 'type'];
+const COMMON_PAYLOAD_KEYS = [
+  'version',
+  'eventId',
+  'dbKey',
+  'projectInstanceIdSha256',
+  'createdAt',
+  'ownershipHash',
+  'connectionEpoch',
+];
+const OPERATION_KINDS = new Set([
+  'chapter_body_write',
+  'project_metadata_write',
+  'project_structure_write',
+  'ai_usage_write',
+  'chat_write',
+  'project_seed',
+]);
+const TARGET_KINDS = new Set([
+  'project',
+  'volume',
+  'chapter',
+  'character',
+  'world_entry',
+  'timeline',
+  'auxiliary',
+  'token_usage',
+  'chat',
+  'seed',
+]);
+const ABANDON_REASONS = new Set([
+  'validation_failed',
+  'cas_failed',
+  'cancelled',
+  'superseded',
+]);
+
+function nativeError(code, message, cause) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.code = code;
+  return error;
+}
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function exactKeys(value, expected) {
+  return isPlainObject(value)
+    && Object.keys(value).sort().join(',') === [...expected].sort().join(',');
+}
+
+function evidenceError(message, cause) {
+  return nativeError('NATIVE_ADMISSION_REJECTED', message, cause);
+}
+
+function requireExactKeys(value, expected, label) {
+  if (!exactKeys(value, expected)) throw evidenceError(`${label} has an inexact key set`);
+}
+
+function requireHash(value, label) {
+  if (typeof value !== 'string' || !HASH_PATTERN.test(value)) {
+    throw evidenceError(`${label} must be one lowercase SHA-256 digest`);
+  }
+}
+
+function requireUuid(value, label) {
+  if (typeof value !== 'string' || !UUID_V4_PATTERN.test(value)) {
+    throw evidenceError(`${label} must be one UUID v4`);
+  }
+}
+
+function requireIsoTimestamp(value, label) {
+  if (
+    typeof value !== 'string'
+    || !ISO_MILLISECOND_PATTERN.test(value)
+    || Number.isNaN(Date.parse(value))
+    || new Date(value).toISOString() !== value
+  ) {
+    throw evidenceError(`${label} must be one exact millisecond UTC timestamp`);
+  }
+}
+
+function requireSafeInteger(value, label, minimum = 0) {
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw evidenceError(`${label} must be a safe integer >= ${minimum}`);
+  }
+}
+
+function requireIdentity(value, label) {
+  requireExactKeys(value, ['dev', 'ino'], label);
+  if (!/^\d+$/.test(value.dev) || !/^\d+$/.test(value.ino)) {
+    throw evidenceError(`${label} must contain decimal dev and ino strings`);
+  }
+}
+
+function sameIdentity(left, right) {
+  return left?.dev === right?.dev && left?.ino === right?.ino;
+}
+
+function requireCommonPayload(payload, expected, label) {
+  if (payload.version !== 1) throw evidenceError(`${label}.version must equal 1`);
+  requireUuid(payload.eventId, `${label}.eventId`);
+  requireUuid(payload.connectionEpoch, `${label}.connectionEpoch`);
+  requireIsoTimestamp(payload.createdAt, `${label}.createdAt`);
+  for (const key of ['dbKey', 'projectInstanceIdSha256', 'ownershipHash']) {
+    requireHash(payload[key], `${label}.${key}`);
+    if (payload[key] !== expected[key]) {
+      throw evidenceError(`${label}.${key} differs from the immutable genesis basis`);
+    }
+  }
+}
+
+function validateSourcePayload(payload, expected) {
+  const ownKeys = [
+    'logicalRequestDigest',
+    'attemptSeq',
+    'previousAttemptSourceDigest',
+    'operationKind',
+    'targetKind',
+    'targetIdSha256',
+    'expectedDataVersion',
+  ];
+  requireExactKeys(payload, [...COMMON_PAYLOAD_KEYS, ...ownKeys], 'manuscript.source payload');
+  requireCommonPayload(payload, expected, 'manuscript.source payload');
+  requireHash(payload.logicalRequestDigest, 'manuscript.source logicalRequestDigest');
+  requireSafeInteger(payload.attemptSeq, 'manuscript.source attemptSeq', 1);
+  if (payload.previousAttemptSourceDigest !== null) {
+    requireHash(payload.previousAttemptSourceDigest, 'manuscript.source previousAttemptSourceDigest');
+  }
+  if (!OPERATION_KINDS.has(payload.operationKind)) {
+    throw evidenceError('manuscript.source operationKind is unknown');
+  }
+  if (!TARGET_KINDS.has(payload.targetKind)) {
+    throw evidenceError('manuscript.source targetKind is unknown');
+  }
+  if (payload.targetIdSha256 !== null) {
+    requireHash(payload.targetIdSha256, 'manuscript.source targetIdSha256');
+  }
+  if (payload.expectedDataVersion !== null) {
+    requireSafeInteger(payload.expectedDataVersion, 'manuscript.source expectedDataVersion');
+  }
+}
+
+function validateAbandonedPayload(payload, expected) {
+  requireExactKeys(
+    payload,
+    [...COMMON_PAYLOAD_KEYS, 'sourceDigest', 'reasonCode'],
+    'manuscript.source.abandoned payload',
+  );
+  requireCommonPayload(payload, expected, 'manuscript.source.abandoned payload');
+  requireHash(payload.sourceDigest, 'manuscript.source.abandoned sourceDigest');
+  if (!ABANDON_REASONS.has(payload.reasonCode)) {
+    throw evidenceError('manuscript.source.abandoned reasonCode is unknown');
+  }
+}
+
+function validatePreparedPayload(payload, expected) {
+  const ownKeys = [
+    'transactionId',
+    'sourceDigest',
+    'beforeSeq',
+    'expectedFinalSeq',
+    'schemaVersion',
+    'backend',
+    'expectedGateEmpty',
+    'expectedTriggerVersion',
+    'expectedTriggerSetDigest',
+    'expectedIdentity',
+    'operationKind',
+  ];
+  requireExactKeys(payload, [...COMMON_PAYLOAD_KEYS, ...ownKeys], 'sqlite.tx.prepared payload');
+  requireCommonPayload(payload, expected, 'sqlite.tx.prepared payload');
+  requireUuid(payload.transactionId, 'sqlite.tx.prepared transactionId');
+  requireHash(payload.sourceDigest, 'sqlite.tx.prepared sourceDigest');
+  requireSafeInteger(payload.beforeSeq, 'sqlite.tx.prepared beforeSeq');
+  requireSafeInteger(payload.expectedFinalSeq, 'sqlite.tx.prepared expectedFinalSeq', 1);
+  if (
+    payload.beforeSeq === Number.MAX_SAFE_INTEGER
+    || payload.expectedFinalSeq !== payload.beforeSeq + 1
+  ) {
+    throw evidenceError('sqlite.tx.prepared expectedFinalSeq must equal beforeSeq + 1');
+  }
+  if (
+    payload.schemaVersion !== 11
+    || payload.backend !== 'native-sqlite-v2'
+    || payload.expectedGateEmpty !== true
+    || payload.expectedTriggerVersion !== 1
+  ) {
+    throw evidenceError('sqlite.tx.prepared freezes an invalid database contract');
+  }
+  requireHash(payload.expectedTriggerSetDigest, 'sqlite.tx.prepared expectedTriggerSetDigest');
+  requireIdentity(payload.expectedIdentity, 'sqlite.tx.prepared expectedIdentity');
+  if (!OPERATION_KINDS.has(payload.operationKind)) {
+    throw evidenceError('sqlite.tx.prepared operationKind is unknown');
+  }
+}
+
+function validateCommittedPayload(payload, expected) {
+  const ownKeys = [
+    'preparedDigest',
+    'finalSeq',
+    'schemaVersion',
+    'backend',
+    'gateEmpty',
+    'triggerVersion',
+    'triggerSetDigest',
+    'postCommitIdentity',
+  ];
+  requireExactKeys(payload, [...COMMON_PAYLOAD_KEYS, ...ownKeys], 'sqlite.tx.committed payload');
+  requireCommonPayload(payload, expected, 'sqlite.tx.committed payload');
+  requireHash(payload.preparedDigest, 'sqlite.tx.committed preparedDigest');
+  requireSafeInteger(payload.finalSeq, 'sqlite.tx.committed finalSeq', 1);
+  if (
+    payload.schemaVersion !== 11
+    || payload.backend !== 'native-sqlite-v2'
+    || payload.gateEmpty !== true
+    || payload.triggerVersion !== 1
+  ) {
+    throw evidenceError('sqlite.tx.committed records an invalid database contract');
+  }
+  requireHash(payload.triggerSetDigest, 'sqlite.tx.committed triggerSetDigest');
+  requireIdentity(payload.postCommitIdentity, 'sqlite.tx.committed postCommitIdentity');
+}
+
+function validateRollbackPredicate(payload) {
+  const common = [
+    'schemaVersion',
+    'backend',
+    'finalSeq',
+    'gateEmpty',
+    'triggerVersion',
+    'triggerSetDigest',
+    'identity',
+  ];
+  const shapes = {
+    begin_not_acquired: {
+      reasonCode: 'sqlite_busy',
+      keys: [
+        'autocommit',
+        'writeLockAcquired',
+        'gateSqlExecuted',
+        'businessSqlExecuted',
+        'seqSqlExecuted',
+        ...common,
+      ],
+      booleans: {
+        autocommit: true,
+        writeLockAcquired: false,
+        gateSqlExecuted: false,
+        businessSqlExecuted: false,
+        seqSqlExecuted: false,
+      },
+    },
+    transaction_rolled_back: {
+      reasonCode: 'transaction_failed',
+      keys: ['autocommit', 'rollbackCompleted', ...common],
+      booleans: { autocommit: true, rollbackCompleted: true },
+    },
+    recovery_before_commit: {
+      reasonCode: 'crash_recovery',
+      keys: ['autocommit', 'hotJournalRecovered', ...common],
+      booleans: { autocommit: true, hotJournalRecovered: true },
+    },
+  };
+  const shape = shapes[payload.rollbackKind];
+  if (!shape || payload.reasonCode !== shape.reasonCode) {
+    throw evidenceError('sqlite.tx.rolled_back reasonCode/rollbackKind pair is invalid');
+  }
+  requireExactKeys(payload.predicate, shape.keys, `${payload.rollbackKind} predicate`);
+  for (const [key, value] of Object.entries(shape.booleans)) {
+    if (payload.predicate[key] !== value) {
+      throw evidenceError(`${payload.rollbackKind} predicate.${key} is invalid`);
+    }
+  }
+  if (
+    payload.predicate.schemaVersion !== 11
+    || payload.predicate.backend !== 'native-sqlite-v2'
+    || payload.predicate.finalSeq !== payload.beforeSeq
+    || payload.predicate.gateEmpty !== true
+    || payload.predicate.triggerVersion !== 1
+  ) {
+    throw evidenceError(`${payload.rollbackKind} predicate records an invalid database contract`);
+  }
+  requireHash(payload.predicate.triggerSetDigest, `${payload.rollbackKind} predicate triggerSetDigest`);
+  requireIdentity(payload.predicate.identity, `${payload.rollbackKind} predicate identity`);
+}
+
+function validateRolledBackPayload(payload, expected) {
+  const ownKeys = ['preparedDigest', 'beforeSeq', 'reasonCode', 'rollbackKind', 'predicate'];
+  requireExactKeys(payload, [...COMMON_PAYLOAD_KEYS, ...ownKeys], 'sqlite.tx.rolled_back payload');
+  requireCommonPayload(payload, expected, 'sqlite.tx.rolled_back payload');
+  requireHash(payload.preparedDigest, 'sqlite.tx.rolled_back preparedDigest');
+  requireSafeInteger(payload.beforeSeq, 'sqlite.tx.rolled_back beforeSeq');
+  validateRollbackPredicate(payload);
+}
+
+function validateNativeEvent(event, previous, expected) {
+  requireExactKeys(event, NATIVE_EVENT_KEYS, `${event?.type || 'native'} event`);
+  requireSafeInteger(event.seq, 'native event seq', 1);
+  requireHash(event.digest, 'native event digest');
+  requireHash(event.prevDigest, 'native event prevDigest');
+  if (event.seq !== previous.seq + 1 || event.prevDigest !== previous.digest) {
+    throw evidenceError('Native suffix chain is not contiguous');
+  }
+  if (event.type === 'manuscript.source') validateSourcePayload(event.payload, expected);
+  else if (event.type === 'manuscript.source.abandoned') validateAbandonedPayload(event.payload, expected);
+  else if (event.type === 'sqlite.tx.prepared') validatePreparedPayload(event.payload, expected);
+  else if (event.type === 'sqlite.tx.committed') validateCommittedPayload(event.payload, expected);
+  else if (event.type === 'sqlite.tx.rolled_back') validateRolledBackPayload(event.payload, expected);
+  else throw evidenceError(`Unknown native suffix event type: ${String(event.type)}`);
+}
+
+function evidenceAdmissionEvent(events, admissionEventDigest = null) {
+  if (events.admissionEvent) return events.admissionEvent;
+  if (admissionEventDigest !== null) {
+    return events.find((event) => event.digest === admissionEventDigest) || null;
+  }
+  return events[0];
+}
+
+function checkpointFrontier(checkpoint) {
+  if (checkpoint === null) return null;
+  return Object.freeze({
+    checkpointDigest: checkpoint.checkpointDigest,
+    coveredSeq: checkpoint.coveredSeq,
+    coveredDigest: checkpoint.coveredDigest,
+    finalSeq: checkpoint.finalSeq,
+    latestCleanBasisDigest: checkpoint.latestCleanBasisDigest,
+  });
+}
+
+function sameCheckpointFrontier(left, right) {
+  if (left === null || right === null) return left === right;
+  return left.checkpointDigest === right.checkpointDigest
+    && left.coveredSeq === right.coveredSeq
+    && left.coveredDigest === right.coveredDigest
+    && left.finalSeq === right.finalSeq
+    && left.latestCleanBasisDigest === right.latestCleanBasisDigest;
+}
+
+function connectionEpochFilterPositions(basisDigest, connectionEpoch) {
+  const basis = Buffer.from(basisDigest, 'hex');
+  const epoch = Buffer.from(connectionEpoch.toLowerCase(), 'ascii');
+  return Array.from({ length: 7 }, (_unused, index) => {
+    const digest = createHash('sha256').update(Buffer.concat([
+      CONNECTION_EPOCH_FILTER_DOMAIN,
+      Buffer.from([index]),
+      basis,
+      epoch,
+    ])).digest();
+    return (((digest[0] << 16) | (digest[1] << 8) | digest[2]) >>> 1);
+  });
+}
+
+function inheritedConnectionEpochFilter(checkpoint) {
+  if (checkpoint === null) return null;
+  const filter = checkpoint.connectionEpochFilter;
+  if (
+    filter?.algorithm !== 'sha256-domain-separated-v1'
+    || filter?.bitCount !== 8_388_608
+    || filter?.hashCount !== 7
+    || typeof filter?.bitsBase64 !== 'string'
+  ) {
+    throw evidenceError('Native checkpoint connection epoch filter is inexact');
+  }
+  const bytes = Buffer.from(filter.bitsBase64, 'base64');
+  if (
+    bytes.length !== CONNECTION_EPOCH_FILTER_BYTES
+    || bytes.toString('base64') !== filter.bitsBase64
+  ) {
+    throw evidenceError('Native checkpoint connection epoch filter encoding is inexact');
+  }
+  return Object.freeze({
+    basisDigest: checkpoint.admissionBasis.basisDigest,
+    bitsBase64: filter.bitsBase64,
+  });
+}
+
+function filterMayContainConnectionEpoch(filter, connectionEpoch) {
+  if (filter === null) return false;
+  const bytes = Buffer.from(filter.bitsBase64, 'base64');
+  return connectionEpochFilterPositions(filter.basisDigest, connectionEpoch).every(
+    (bit) => (bytes[bit >>> 3] & (1 << (bit & 7))) !== 0,
+  );
+}
+
+function parseNativeEvidence(events, expected, admittedBasis = null) {
+  const checkpoint = events.checkpoint || null;
+  const activationBasis = admittedBasis?.basisKind === 'native_activation';
+  const genesis = evidenceAdmissionEvent(events, admittedBasis?.basisDigest || null);
+  const genesisPayload = genesis?.payload;
+  if (activationBasis) {
+    if (
+      checkpoint !== null
+      || genesis?.type !== 'sqlite.native.activation.activated'
+      || !Number.isSafeInteger(genesis?.seq)
+      || genesis.seq < 2
+      || !HASH_PATTERN.test(genesis?.prevDigest || '')
+      || !HASH_PATTERN.test(genesis?.digest || '')
+      || genesisPayload?.schemaVersion !== 11
+      || genesisPayload?.backend !== 'native-sqlite-v2'
+      || genesisPayload?.finalSeq !== 0
+      || genesisPayload?.gateEmpty !== true
+      || genesisPayload?.triggerVersion !== 1
+      || genesisPayload?.finalIdentity === undefined
+    ) {
+      throw evidenceError('Native activation admission basis is inexact');
+    }
+  } else if (
+    genesis?.type !== 'sqlite.native.stage_b.fixture_genesis'
+    || genesis?.seq !== 1
+    || genesis?.prevDigest !== null
+    || !HASH_PATTERN.test(genesis?.digest || '')
+  ) {
+    throw evidenceError('Native evidence does not begin with one exact fixture genesis');
+  }
+  const immutable = {
+    dbKey: expected.dbKey,
+    projectInstanceIdSha256: expected.projectInstanceIdSha256,
+    ownershipHash: expected.ownershipHash,
+  };
+  for (const key of Object.keys(immutable)) {
+    if (genesisPayload?.[key] !== undefined && genesisPayload[key] !== immutable[key]) {
+      throw evidenceError(`Fixture genesis ${key} differs from the admitted basis`);
+    }
+  }
+
+  if (
+    checkpoint !== null
+    && (
+      checkpoint.admissionBasis?.basisKind !== 'stage_b_fixture_genesis'
+      || checkpoint.admissionBasis?.basisDigest !== genesis.digest
+      || checkpoint.admissionBasis?.admissionEvent?.digest !== genesis.digest
+      || checkpoint.chainRoot?.seq !== 1
+      || checkpoint.chainRoot?.digest !== genesis.digest
+      || !Number.isSafeInteger(checkpoint.coveredSeq)
+      || checkpoint.coveredSeq < 1
+      || !HASH_PATTERN.test(checkpoint.coveredDigest || '')
+      || !Number.isSafeInteger(checkpoint.finalSeq)
+      || checkpoint.finalSeq < 0
+      || checkpoint.dbKey !== expected.dbKey
+      || checkpoint.schema !== genesisPayload.schemaVersion
+      || checkpoint.backend !== genesisPayload.backend
+      || checkpoint.triggerVersion !== genesisPayload.triggerVersion
+      || checkpoint.triggerSetDigest !== genesisPayload.triggerSetDigest
+      || checkpoint.projectInstanceIdSha256 !== expected.projectInstanceIdSha256
+      || !sameIdentity(checkpoint.identity, expected.identity)
+      || checkpoint.retryContinuationOpen !== false
+      || !Array.isArray(checkpoint.unresolved)
+      || checkpoint.unresolved.length !== 0
+    )
+  ) {
+    throw evidenceError('Native checkpoint summary differs from its admitted genesis basis');
+  }
+
+  let mode = 'clean';
+  let projectedSeq = checkpoint?.finalSeq || 0;
+  let source = null;
+  let prepared = null;
+  const sourceHistory = new Map();
+  const usedConnectionEpochs = new Set();
+  const activeEpochObservations = [];
+  if (
+    checkpoint === null
+    && !activationBasis
+    && UUID_V4_PATTERN.test(genesisPayload?.connectionEpoch || '')
+  ) {
+    const normalizedGenesisEpoch = genesisPayload.connectionEpoch.toLowerCase();
+    usedConnectionEpochs.add(normalizedGenesisEpoch);
+    activeEpochObservations.push(normalizedGenesisEpoch);
+  }
+  let previous = checkpoint === null
+    ? genesis
+    : Object.freeze({ seq: checkpoint.coveredSeq, digest: checkpoint.coveredDigest });
+  const startIndex = checkpoint === null
+    ? activationBasis
+      ? events.findIndex((event) => event.digest === genesis.digest) + 1
+      : 1
+    : 0;
+  for (let index = startIndex; index < events.length; index += 1) {
+    const event = events[index];
+    validateNativeEvent(event, previous, immutable);
+    previous = event;
+    const normalizedEpoch = event.payload.connectionEpoch.toLowerCase();
+    activeEpochObservations.push(normalizedEpoch);
+    if (event.type === 'manuscript.source') {
+      if (mode !== 'clean') throw evidenceError('manuscript.source is not a legal successor');
+      if (event.payload.attemptSeq === 1) {
+        if (event.payload.previousAttemptSourceDigest !== null) {
+          throw evidenceError('First source attempt must not name a previous source');
+        }
+      } else {
+        const previousSource = sourceHistory.get(event.payload.previousAttemptSourceDigest);
+        if (
+          !previousSource
+          || previousSource.payload.logicalRequestDigest !== event.payload.logicalRequestDigest
+          || previousSource.payload.attemptSeq + 1 !== event.payload.attemptSeq
+        ) {
+          throw evidenceError('Retry source does not continue the preceding logical request attempt');
+        }
+      }
+      sourceHistory.set(event.digest, event);
+      source = event;
+      prepared = null;
+      mode = 'source';
+      usedConnectionEpochs.add(normalizedEpoch);
+      continue;
+    }
+    if (event.type === 'manuscript.source.abandoned') {
+      if (
+        mode !== 'source'
+        || event.payload.sourceDigest !== source.digest
+        || event.payload.connectionEpoch !== source.payload.connectionEpoch
+      ) {
+        throw evidenceError('manuscript.source.abandoned does not consume the current source');
+      }
+      source = null;
+      mode = 'clean';
+      usedConnectionEpochs.add(normalizedEpoch);
+      continue;
+    }
+    if (event.type === 'sqlite.tx.prepared') {
+      if (
+        mode !== 'source'
+        || event.payload.sourceDigest !== source.digest
+        || event.payload.connectionEpoch !== source.payload.connectionEpoch
+        || event.payload.beforeSeq !== projectedSeq
+        || event.payload.operationKind !== source.payload.operationKind
+        || event.payload.expectedTriggerSetDigest !== expected.triggerSetDigest
+        || !sameIdentity(event.payload.expectedIdentity, expected.identity)
+      ) {
+        throw evidenceError('sqlite.tx.prepared does not consume the current source and clean state');
+      }
+      prepared = event;
+      mode = 'prepared';
+      usedConnectionEpochs.add(normalizedEpoch);
+      continue;
+    }
+    if (event.type === 'sqlite.tx.committed') {
+      const sameEpoch = event.payload.connectionEpoch === prepared?.payload.connectionEpoch;
+      if (
+        mode !== 'prepared'
+        || event.payload.preparedDigest !== prepared.digest
+        || event.payload.finalSeq !== prepared.payload.expectedFinalSeq
+        || event.payload.triggerSetDigest !== expected.triggerSetDigest
+        || !sameIdentity(event.payload.postCommitIdentity, expected.identity)
+        || (!sameEpoch && usedConnectionEpochs.has(normalizedEpoch))
+      ) {
+        throw evidenceError('sqlite.tx.committed does not terminate the current prepared event');
+      }
+      projectedSeq = event.payload.finalSeq;
+      source = null;
+      prepared = null;
+      mode = 'clean';
+      usedConnectionEpochs.add(normalizedEpoch);
+      continue;
+    }
+    if (
+      mode !== 'prepared'
+      || event.payload.preparedDigest !== prepared.digest
+      || event.payload.beforeSeq !== prepared.payload.beforeSeq
+      || event.payload.predicate.triggerSetDigest !== expected.triggerSetDigest
+      || !sameIdentity(event.payload.predicate.identity, expected.identity)
+    ) {
+      throw evidenceError('sqlite.tx.rolled_back does not terminate the current prepared event');
+    }
+    const sameEpoch = event.payload.connectionEpoch === prepared.payload.connectionEpoch;
+    if (
+      event.payload.rollbackKind === 'recovery_before_commit'
+        ? sameEpoch || usedConnectionEpochs.has(normalizedEpoch)
+        : !sameEpoch
+    ) {
+      throw evidenceError('sqlite.tx.rolled_back uses an unauthorized connection epoch');
+    }
+    source = null;
+    prepared = null;
+    mode = 'clean';
+    usedConnectionEpochs.add(normalizedEpoch);
+  }
+  const tail = events.at(-1) || Object.freeze({
+    seq: checkpoint.coveredSeq,
+    digest: checkpoint.coveredDigest,
+  });
+  return Object.freeze({
+    admissionEvent: genesis,
+    frontier: checkpointFrontier(checkpoint),
+    inheritedConnectionEpochFilter: inheritedConnectionEpochFilter(checkpoint),
+    events,
+    tail,
+    mode,
+    projectedSeq,
+    source,
+    prepared,
+    usedConnectionEpochs: Object.freeze([...usedConnectionEpochs]),
+    activeEpochObservations: Object.freeze(activeEpochObservations),
+  });
+}
+
+function evidenceSnapshot(controlStore) {
+  if (!controlStore || typeof controlStore.read !== 'function') {
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'ControlStore evidence is required');
+  }
+  let events;
+  let bounded = false;
+  try {
+    if (typeof controlStore.readEvidence === 'function') {
+      bounded = true;
+      const evidence = structuredClone(controlStore.readEvidence());
+      const admissionEvent = evidence.checkpoint?.admissionBasis?.admissionEvent
+        || evidence.events?.[0];
+      if (
+        !Array.isArray(evidence.events)
+        || (!admissionEvent && evidence.events.length === 0)
+      ) {
+        throw nativeError(
+          'NATIVE_ADMISSION_REJECTED',
+          'Empty ControlStore evidence is never admissible',
+        );
+      }
+      const checkpoint = deepFreeze(evidence.checkpoint);
+      const boundedTail = deepFreeze(evidence.tail);
+      const copiedAdmissionEvent = deepFreeze(admissionEvent);
+      events = evidence.events;
+      Object.defineProperties(events, {
+        admissionEvent: { value: copiedAdmissionEvent },
+        boundedTail: { value: boundedTail },
+        checkpoint: { value: checkpoint },
+      });
+    } else {
+      events = controlStore.read();
+    }
+  } catch (cause) {
+    if (cause?.code === 'NATIVE_ADMISSION_REJECTED') throw cause;
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'ControlStore evidence cannot be read', cause);
+  }
+  if (
+    !Array.isArray(events)
+    || (events.length === 0 && (!bounded || events.checkpoint === null))
+  ) {
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'Empty ControlStore evidence is never admissible');
+  }
+  try {
+    return bounded ? deepFreeze(events) : deepFreeze(structuredClone(events));
+  } catch (cause) {
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'ControlStore evidence is not serializable', cause);
+  }
+}
+
+function verifyAdmission(admissionVerifier, events, context, admissionEventDigest = null) {
+  if (typeof admissionVerifier !== 'function') {
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'admissionVerifier must be a function capability');
+  }
+  let basis;
+  try {
+    // The capability authenticates only the immutable genesis basis. Suffix
+    // authorization belongs to the core policy below and is never delegated
+    // back into the Stage B testing factory.
+    const admissionEvent = evidenceAdmissionEvent(events, admissionEventDigest);
+    const activationPrefix = admissionEvent?.type === 'sqlite.native.activation.activated'
+      ? events.slice(0, events.findIndex((event) => event.digest === admissionEvent.digest) + 1)
+      : null;
+    basis = admissionVerifier(Object.freeze({
+      ...context,
+      evidence: Object.freeze([admissionEvent]),
+      activationPrefix: activationPrefix === null ? null : deepFreeze(activationPrefix),
+    }));
+  } catch (cause) {
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'Native admission verifier rejected the evidence', cause);
+  }
+  if (
+    basis === null
+    || typeof basis !== 'object'
+    || Array.isArray(basis)
+    || Object.keys(basis).sort().join(',') !== 'basisDigest,basisKind'
+    || !['stage_b_fixture_genesis', 'native_activation'].includes(basis.basisKind)
+    || typeof basis.basisDigest !== 'string'
+    || !/^[0-9a-f]{64}$/.test(basis.basisDigest)
+    || (
+      basis.basisKind === 'stage_b_fixture_genesis'
+        ? evidenceAdmissionEvent(events)?.type !== 'sqlite.native.stage_b.fixture_genesis'
+        : evidenceAdmissionEvent(events, admissionEventDigest)?.type
+          !== 'sqlite.native.activation.activated'
+    )
+    || basis.basisDigest !== evidenceAdmissionEvent(events, admissionEventDigest)?.digest
+  ) {
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'Native admission basis is not exact');
+  }
+  return Object.freeze({ basisKind: basis.basisKind, basisDigest: basis.basisDigest });
+}
+
+function evidenceExpectations(context, events, admittedBasis = null) {
+  const admissionEvent = evidenceAdmissionEvent(events, admittedBasis?.basisDigest || null);
+  return Object.freeze({
+    dbKey: context.dbKey,
+    projectInstanceIdSha256: context.projectInstanceIdSha256,
+    ownershipHash: context.ownershipHash,
+    triggerSetDigest: admissionEvent?.payload?.triggerSetDigest,
+    identity: admissionEvent?.payload?.identity || admissionEvent?.payload?.finalIdentity,
+  });
+}
+
+function assertEvidenceCurrent(controlStore, admissionVerifier, context, admittedBasis) {
+  const current = evidenceSnapshot(controlStore);
+  const currentBasis = verifyAdmission(
+    admissionVerifier,
+    current,
+    context,
+    admittedBasis.basisDigest,
+  );
+  if (
+    currentBasis.basisKind !== admittedBasis.basisKind
+    || currentBasis.basisDigest !== admittedBasis.basisDigest
+  ) {
+    throw nativeError('NATIVE_ADMISSION_REJECTED', 'ControlStore admission basis changed');
+  }
+  return parseNativeEvidence(
+    current,
+    evidenceExpectations(context, current, admittedBasis),
+    admittedBasis,
+  );
+}
+
+function pragmaScalar(database, sql) {
+  const row = database.query(sql).get();
+  return row && Object.values(row)[0];
+}
+
+function configureConnection(database, capability) {
+  if (capability !== DURABILITY_SQL_CAPABILITY) {
+    throw nativeError('NATIVE_SQL_FORBIDDEN', 'Durability SQL requires the private capability');
+  }
+  const journalMode = String(pragmaScalar(database, 'PRAGMA journal_mode = DELETE')).toLowerCase();
+  database.exec('PRAGMA synchronous = EXTRA');
+  database.exec('PRAGMA foreign_keys = ON');
+  database.exec('PRAGMA busy_timeout = 100');
+  const values = {
+    journalMode,
+    synchronous: Number(pragmaScalar(database, 'PRAGMA synchronous')),
+    foreignKeys: Number(pragmaScalar(database, 'PRAGMA foreign_keys')),
+    busyTimeout: Number(pragmaScalar(database, 'PRAGMA busy_timeout')),
+  };
+  if (
+    values.journalMode !== 'delete'
+    || values.synchronous !== 3
+    || values.foreignKeys !== 1
+    || values.busyTimeout !== 100
+    || database.inTransaction !== false
+  ) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native SQLite PRAGMA readback is not exact');
+  }
+}
+
+function parseCanonicalSequence(raw) {
+  if (
+    typeof raw !== 'string'
+    || !/^(0|[1-9][0-9]*)$/.test(raw)
+  ) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'durability_commit_seq is not canonical decimal TEXT');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0 || String(value) !== raw) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'durability_commit_seq exceeds the safe integer contract');
+  }
+  return value;
+}
+
+function liveStateSnapshot(database, expectedGateRows = 0) {
+  try {
+    auditWritableTableManifest(database);
+    const reservedRows = database.query(
+      "SELECT key, value, typeof(value) AS storageType FROM project_meta WHERE key IN ('schema_version', 'project_instance_id', 'durability_backend', 'durability_commit_seq', 'durability_trigger_version', 'durability_trigger_set_digest') ORDER BY key",
+    ).all();
+    if (reservedRows.length !== 6 || new Set(reservedRows.map(({ key }) => key)).size !== 6) {
+      throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native reserved project_meta rows are not exact');
+    }
+    const reserved = new Map(reservedRows.map((row) => [row.key, row]));
+    if (reservedRows.some(({ storageType }) => storageType !== 'text')) {
+      throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native reserved project_meta values must be TEXT');
+    }
+    const schemaVersion = reserved.get('schema_version')?.value;
+    const projectInstanceId = reserved.get('project_instance_id')?.value;
+    const backend = reserved.get('durability_backend')?.value;
+    const triggerVersionRaw = reserved.get('durability_trigger_version')?.value;
+    const triggerSetDigest = reserved.get('durability_trigger_set_digest')?.value;
+    if (
+      schemaVersion !== '11'
+      || !UUID_V4_PATTERN.test(projectInstanceId || '')
+      || backend !== 'native-sqlite-v2'
+      || triggerVersionRaw !== '1'
+      || !HASH_PATTERN.test(triggerSetDigest || '')
+    ) {
+      throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native reserved metadata values are invalid');
+    }
+    const finalSeq = parseCanonicalSequence(reserved.get('durability_commit_seq')?.value);
+    const gateCount = database.query('SELECT COUNT(*) AS count FROM "_durability_write_gate"').get()?.count;
+    if (gateCount !== expectedGateRows) {
+      throw nativeError('NATIVE_GATE_NOT_EMPTY', 'Durability write gate row count is not exact');
+    }
+
+    const expectedDefinitions = canonicalTriggerDefinitions();
+    const expectedByName = new Map(expectedDefinitions.map((definition) => [definition.name, definition]));
+    const observedRows = database.query(
+      "SELECT name, tbl_name AS tableName, sql FROM sqlite_schema WHERE type = 'trigger' AND substr(name, 1, ?) = ? ORDER BY name",
+    ).all('_mythpen_downgrade_guard__'.length, '_mythpen_downgrade_guard__');
+    if (observedRows.length !== expectedDefinitions.length) {
+      throw nativeError('NATIVE_CONNECTION_REJECTED', 'Canonical trigger count is not exact');
+    }
+    const observedDefinitions = observedRows.map((row, index) => {
+      const expectedDefinition = expectedByName.get(row.name);
+      if (
+        !expectedDefinition
+        || row.name !== expectedDefinitions[index].name
+        || row.tableName !== expectedDefinition.table
+      ) {
+        throw nativeError('NATIVE_CONNECTION_REJECTED', 'Canonical trigger identity is not exact');
+      }
+      return {
+        name: row.name,
+        table: row.tableName,
+        operation: expectedDefinition.operation,
+        sql: row.sql,
+      };
+    });
+    const expectedTriggerSetDigest = canonicalTriggerSetDigest(expectedDefinitions);
+    const observedTriggerSetDigest = canonicalTriggerSetDigest(observedDefinitions);
+    if (
+      triggerSetDigest !== expectedTriggerSetDigest
+      || observedTriggerSetDigest !== expectedTriggerSetDigest
+    ) {
+      throw nativeError('NATIVE_CONNECTION_REJECTED', 'Canonical trigger digest three-way comparison failed');
+    }
+    return Object.freeze({
+      schemaVersion: 11,
+      projectInstanceId,
+      projectInstanceIdSha256: createHash('sha256').update(projectInstanceId).digest('hex'),
+      backend,
+      finalSeq,
+      gateEmpty: gateCount === 0,
+      triggerVersion: 1,
+      triggerSetDigest,
+    });
+  } catch (cause) {
+    if (cause?.code?.startsWith('NATIVE_')) throw cause;
+    if (cause?.code === 'SQLITE_BUSY' || cause?.code === 'SQLITE_LOCKED' || cause?.code === 'SQLITE_IOERR') {
+      throw nativeError('NATIVE_STORE_DISPOSITION_UNKNOWN', 'Native live-state read is operationally uncertain', cause);
+    }
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native live-state inspection failed', cause);
+  }
+}
+
+function assertLiveStateBasis(snapshot, history, expected) {
+  const genesis = history.admissionEvent?.payload;
+  if (
+    snapshot.schemaVersion !== 11
+    || snapshot.backend !== 'native-sqlite-v2'
+    || snapshot.projectInstanceIdSha256 !== expected.projectInstanceIdSha256
+    || genesis?.dbKey !== expected.dbKey
+    || genesis?.ownershipHash !== expected.ownershipHash
+    || genesis?.projectInstanceIdSha256 !== expected.projectInstanceIdSha256
+    || genesis?.schemaVersion !== snapshot.schemaVersion
+    || genesis?.backend !== snapshot.backend
+    || genesis?.finalSeq !== 0
+    || genesis?.gateEmpty !== true
+    || genesis?.triggerVersion !== snapshot.triggerVersion
+    || genesis?.triggerSetDigest !== snapshot.triggerSetDigest
+    || !sameIdentity(genesis?.identity || genesis?.finalIdentity, expected.identity)
+  ) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'SQLite live state differs from admitted evidence');
+  }
+}
+
+function assertLiveStateMatches(snapshot, history, expected, connectionEpoch, options = {}) {
+  assertLiveStateBasis(snapshot, history, expected);
+  if (history.mode === 'prepared' && options.allowPrepared !== true) {
+    throw nativeError('RECOVERY_REQUIRED', 'Native evidence ends with an unresolved prepared transaction');
+  }
+  const expectedSeq = options.expectedSeq ?? history.projectedSeq;
+  if (snapshot.finalSeq !== expectedSeq) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'SQLite sequence differs from projected evidence');
+  }
+  if (
+    history.mode === 'source'
+    && history.source.payload.connectionEpoch !== connectionEpoch
+  ) {
+    throw nativeError('NATIVE_SOURCE_NOT_CURRENT', 'Pending source belongs to another connection epoch');
+  }
+}
+
+function createNativeProjectStore() {
+  throw nativeError(
+    'NATIVE_ACTIVATION_DISABLED',
+    'Native project activation is disabled outside the Stage B testing factory',
+  );
+}
+
+function validateExecuteInput(input, callback) {
+  if (
+    !exactKeys(input, ['sourceDigest', 'operationKind', 'logicalRequestDigest', 'attemptSeq'])
+    || !HASH_PATTERN.test(input.sourceDigest || '')
+    || !HASH_PATTERN.test(input.logicalRequestDigest || '')
+    || !Number.isSafeInteger(input.attemptSeq)
+    || input.attemptSeq < 1
+    || !OPERATION_KINDS.has(input.operationKind)
+    || typeof callback !== 'function'
+  ) {
+    throw nativeError('NATIVE_TRANSACTION_INPUT_INVALID', 'executeTransaction input is not exact');
+  }
+}
+
+function createNativeProjectStoreCore(options = {}) {
+  const {
+    databasePath,
+    controlStore,
+    dbKey,
+    projectInstanceIdSha256,
+    ownershipHash,
+    assertWriterLease,
+    admissionVerifier,
+    identityApi = createDatabaseIdentityGuard,
+    sqliteFactory = (filePath) => new Database(filePath, { create: false, strict: true }),
+    projectLogicalRequestGuard = null,
+    checkpointRunner = null,
+    bindLogicalRequestFinalizer = null,
+    assertCheckpointMaintenanceLease = null,
+    admissionEventDigest = null,
+  } = options;
+  const evidence = evidenceSnapshot(controlStore);
+  const admissionContext = Object.freeze({
+    databasePath,
+    dbKey,
+    projectInstanceIdSha256,
+    ownershipHash,
+  });
+  const admittedBasis = verifyAdmission(
+    admissionVerifier,
+    evidence,
+    admissionContext,
+    admissionEventDigest,
+  );
+  const initialHistory = parseNativeEvidence(
+    evidence,
+    evidenceExpectations(admissionContext, evidence, admittedBasis),
+    admittedBasis,
+  );
+  let frozenFrontier = initialHistory.frontier;
+  let frozenEventDigests = Object.freeze(initialHistory.events.map((event) => event.digest));
+  const frozenSource = initialHistory.mode === 'source' ? initialHistory.source : null;
+  const frozenPrepared = initialHistory.mode === 'prepared' ? initialHistory.prepared : null;
+  let connectionEpoch = null;
+  if (typeof identityApi !== 'function') {
+    throw nativeError('NATIVE_DATABASE_IDENTITY_STALE', 'identityApi must be a function');
+  }
+  if (typeof sqliteFactory !== 'function' || typeof assertWriterLease !== 'function') {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native connection dependencies are incomplete');
+  }
+  if (
+    projectLogicalRequestGuard !== null
+    && typeof projectLogicalRequestGuard !== 'function'
+  ) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native logical request guard is invalid');
+  }
+  if (checkpointRunner !== null && typeof checkpointRunner !== 'function') {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native checkpoint runner is invalid');
+  }
+  if (
+    bindLogicalRequestFinalizer !== null
+    && typeof bindLogicalRequestFinalizer !== 'function'
+  ) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native logical finalizer binder is invalid');
+  }
+  if (
+    assertCheckpointMaintenanceLease !== null
+    && typeof assertCheckpointMaintenanceLease !== 'function'
+  ) {
+    throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native checkpoint lease assertion is invalid');
+  }
+  const checkpointController = bindLogicalRequestFinalizer === null
+    ? null
+    : controlStoreModule.getBoundedControlStoreCheckpointController(controlStore);
+
+  function assertProjectLogicalRequest() {
+    if (projectLogicalRequestGuard !== null) projectLogicalRequestGuard();
+  }
+
+  let guard;
+  let database;
+  let state = 'recovery_required';
+  let activeOperation = null;
+  let expectedBasis;
+  try {
+    guard = identityApi({ databasePath });
+    if (!guard || typeof guard.assertCurrent !== 'function' || typeof guard.close !== 'function') {
+      throw nativeError('NATIVE_DATABASE_IDENTITY_STALE', 'identityApi returned an invalid guard');
+    }
+    const admissionIdentity = evidenceAdmissionEvent(
+      evidence,
+      admittedBasis.basisDigest,
+    )?.payload;
+    if (!sameIdentity(guard.identity, admissionIdentity?.identity || admissionIdentity?.finalIdentity)) {
+      throw nativeError('NATIVE_DATABASE_IDENTITY_STALE', 'Database identity differs from admission evidence');
+    }
+    expectedBasis = Object.freeze({
+      dbKey,
+      ownershipHash,
+      projectInstanceIdSha256,
+      identity: guard.identity,
+    });
+    if (initialHistory.mode === 'clean') {
+      controlledOpen(assertExactInitialHistory);
+    } else {
+      readControlledHistory(assertExactInitialHistory);
+    }
+  } catch (error) {
+    try {
+      database?.close();
+    } catch {
+      // No facade escaped; preserve the admission/open failure.
+    }
+    try {
+      guard?.close();
+    } catch {
+      // No facade escaped; preserve the admission/open failure.
+    }
+    if (
+      initialHistory.mode === 'prepared'
+      && error?.code === 'NATIVE_DATABASE_IDENTITY_STALE'
+    ) {
+      throw recoveryRequired(
+        'Prepared recovery database identity changed before construction completed',
+        error,
+      );
+    }
+    throw error;
+  }
+
+  function assertFrozenPrefix(history) {
+    if (
+      !sameCheckpointFrontier(history.frontier, frozenFrontier)
+      || history.events.length < frozenEventDigests.length
+      || frozenEventDigests.some((digest, index) => history.events[index]?.digest !== digest)
+    ) {
+      throw evidenceError('Native evidence no longer has the frozen admitted prefix');
+    }
+  }
+
+  function assertExactInitialHistory(history) {
+    assertFrozenPrefix(history);
+    if (
+      history.events.length !== frozenEventDigests.length
+      || history.tail.digest !== initialHistory.tail.digest
+      || history.mode !== initialHistory.mode
+    ) {
+      throw evidenceError('Native evidence changed during cold classification');
+    }
+    return history;
+  }
+
+  function assertExactPreparedRecoveryHistory(history) {
+    assertFrozenPrefix(history);
+    if (
+      history.events.length !== frozenEventDigests.length
+      || history.tail.digest !== initialHistory.tail.digest
+      || history.mode !== 'prepared'
+      || history.prepared?.digest !== frozenPrepared?.digest
+    ) {
+      throw recoveryRequired('Frozen prepared tail changed before recovery completed');
+    }
+    return history;
+  }
+
+  function classifyFrozenSourceHistory(history) {
+    if (!frozenSource) throw evidenceError('Cold source classification has no frozen source');
+    assertFrozenPrefix(history);
+    if (
+      history.events.length === frozenEventDigests.length
+      && history.mode === 'source'
+      && history.source?.digest === frozenSource.digest
+      && history.tail.digest === frozenSource.digest
+    ) {
+      return Object.freeze({ kind: 'pending', source: history.source });
+    }
+    const abandoned = history.events[frozenEventDigests.length];
+    if (
+      history.events.length === frozenEventDigests.length + 1
+      && history.mode === 'clean'
+      && history.tail.digest === abandoned?.digest
+      && abandoned?.type === 'manuscript.source.abandoned'
+      && abandoned.payload.sourceDigest === frozenSource.digest
+      && abandoned.payload.connectionEpoch === frozenSource.payload.connectionEpoch
+      && ['cancelled', 'superseded'].includes(abandoned.payload.reasonCode)
+    ) {
+      return Object.freeze({ kind: 'abandoned', abandoned });
+    }
+    throw evidenceError('Cold source has no unique exact caller-owned abandoned successor');
+  }
+
+  function readControlledHistory(validateHistory) {
+    const preflightHistory = assertEvidenceCurrent(
+      controlStore,
+      admissionVerifier,
+      admissionContext,
+      admittedBasis,
+    );
+    validateHistory(preflightHistory);
+    guard.assertCurrent();
+    controlStore.assertCurrent();
+    const history = assertEvidenceCurrent(
+      controlStore,
+      admissionVerifier,
+      admissionContext,
+      admittedBasis,
+    );
+    validateHistory(history);
+    assertWriterLease();
+    return history;
+  }
+
+  function mintFreshConnectionEpoch(history) {
+    const used = new Set(history.usedConnectionEpochs);
+    for (let attempt = 0; attempt < 128; attempt += 1) {
+      const observed = randomUUID();
+      if (!UUID_V4_PATTERN.test(observed)) continue;
+      const candidate = observed.toLowerCase();
+      if (
+        used.has(candidate)
+        || filterMayContainConnectionEpoch(
+          history.inheritedConnectionEpochFilter,
+          candidate,
+        )
+      ) {
+        continue;
+      }
+      return candidate;
+    }
+    throw recoveryRequired(
+      'No fresh native connection epoch remains after 128 authenticated candidates',
+    );
+  }
+
+  function controlledOpen(validateHistory, options = {}) {
+    let openedDatabase;
+    let candidateEpoch;
+    let firstStatementStarted = false;
+    try {
+      const preOpenHistory = readControlledHistory(validateHistory);
+      if (options.mintAfterLiveValidation !== true) {
+        candidateEpoch = mintFreshConnectionEpoch(preOpenHistory);
+      }
+      openedDatabase = sqliteFactory(guard.canonicalPath);
+      guard.assertCurrent();
+      controlStore.assertCurrent();
+      const postOpenHistory = assertEvidenceCurrent(
+        controlStore,
+        admissionVerifier,
+        admissionContext,
+        admittedBasis,
+      );
+      validateHistory(postOpenHistory);
+      assertWriterLease();
+      firstStatementStarted = true;
+      configureConnection(openedDatabase, DURABILITY_SQL_CAPABILITY);
+      const snapshot = liveStateSnapshot(openedDatabase);
+      if (typeof options.validateSnapshot === 'function') {
+        options.validateSnapshot(snapshot, postOpenHistory);
+      } else {
+        assertLiveStateMatches(snapshot, postOpenHistory, expectedBasis, null);
+      }
+      if (options.mintAfterLiveValidation === true) {
+        candidateEpoch = mintFreshConnectionEpoch(postOpenHistory);
+      }
+      if (options.activate !== false) {
+        database = openedDatabase;
+        connectionEpoch = candidateEpoch;
+        state = 'active';
+      }
+      return Object.freeze({
+        history: postOpenHistory,
+        snapshot,
+        database: openedDatabase,
+        connectionEpoch: candidateEpoch,
+      });
+    } catch (cause) {
+      if (
+        openedDatabase
+        && firstStatementStarted
+        && options.fenceAfterStatementFailure === true
+      ) {
+        return fencePreparedRecoveryUncertainty(cause, { database: openedDatabase });
+      }
+      if (openedDatabase) {
+        const closeErrors = closeResourcesBestEffort([openedDatabase]);
+        if (closeErrors.length > 0) {
+          closeErrors.push(...closeResourcesBestEffort([guard]));
+          throw dispositionUnknownError(
+            cause,
+            'Rejected controlled SQLite open could not be closed exactly',
+            closeErrors,
+          );
+        }
+      }
+      throw cause;
+    }
+  }
+
+  function stateError() {
+    const code = state === 'recovery_required'
+      ? 'RECOVERY_REQUIRED'
+      : state === 'released'
+      ? 'NATIVE_STORE_RELEASED'
+      : state === 'fenced'
+        ? 'NATIVE_STORE_FENCED'
+        : 'NATIVE_STORE_DISPOSITION_UNKNOWN';
+    return nativeError(code, `Native store connection is ${state}`);
+  }
+
+  function fenceOnUncertainty(error) {
+    if (state === 'active') {
+      state = 'fenced';
+      try {
+        database.close();
+        guard.close();
+      } catch (closeError) {
+        state = 'disposition_unknown';
+        try {
+          Object.defineProperty(error, 'closeError', { value: closeError });
+        } catch {
+          // Preserve the primary uncertainty.
+        }
+      }
+    }
+    throw error;
+  }
+
+  function operationInProgressError() {
+    return nativeError(
+      'NATIVE_OPERATION_IN_PROGRESS',
+      'Another synchronous native store operation is already in progress',
+    );
+  }
+
+  function assertOperationIdle() {
+    if (activeOperation !== null) throw operationInProgressError();
+  }
+
+  function withOperation(description, callback) {
+    assertOperationIdle();
+    const operationToken = Symbol(description);
+    activeOperation = operationToken;
+    try {
+      return callback(operationToken);
+    } finally {
+      if (activeOperation === operationToken) activeOperation = null;
+    }
+  }
+
+  function closeResourcesBestEffort(resources) {
+    const closeErrors = [];
+    for (const resource of resources) {
+      try {
+        resource?.close();
+      } catch (closeError) {
+        closeErrors.push(closeError);
+      }
+    }
+    return closeErrors;
+  }
+
+  function dispositionUnknownError(primary, message, closeErrors) {
+    state = 'disposition_unknown';
+    const error = nativeError('NATIVE_STORE_DISPOSITION_UNKNOWN', message, primary);
+    try {
+      Object.defineProperty(error, 'closeError', {
+        value: closeErrors[0],
+        enumerable: false,
+      });
+      if (closeErrors.length > 1) {
+        Object.defineProperty(error, 'additionalCloseErrors', {
+          value: Object.freeze(closeErrors.slice(1)),
+          enumerable: false,
+        });
+      }
+    } catch {
+      // Preserve the primary disposition error even if metadata attachment fails.
+    }
+    return error;
+  }
+
+  function inspectAuthorities({
+    expectedGateRows = 0,
+    expectedInTransaction = false,
+    expectedSeq,
+    allowPrepared = false,
+    expectedPreparedDigest,
+  } = {}) {
+    if (state !== 'active') throw stateError();
+    guard.assertCurrent();
+    controlStore.assertCurrent();
+    const history = assertEvidenceCurrent(
+      controlStore,
+      admissionVerifier,
+      admissionContext,
+      admittedBasis,
+    );
+    assertWriterLease();
+    const snapshot = liveStateSnapshot(database, expectedGateRows);
+    assertLiveStateMatches(
+      snapshot,
+      history,
+      expectedBasis,
+      connectionEpoch,
+      { expectedSeq, allowPrepared },
+    );
+    if (
+      expectedPreparedDigest !== undefined
+      && (
+        history.mode !== 'prepared'
+        || history.prepared?.digest !== expectedPreparedDigest
+        || history.tail?.digest !== expectedPreparedDigest
+      )
+    ) {
+      throw nativeError('NATIVE_ADMISSION_REJECTED', 'Prepared evidence is no longer the exact tail');
+    }
+    if (database.inTransaction !== expectedInTransaction) {
+      throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native SQLite autocommit state is not exact');
+    }
+    return Object.freeze({ history, snapshot });
+  }
+
+  let finalizedLogicalTailDigest = initialHistory.tail.digest;
+
+  function currentCheckpointSnapshot(history) {
+    const tail = controlStore.tail();
+    if (
+      tail === null
+      || tail.seq !== history.tail.seq
+      || tail.digest !== history.tail.digest
+    ) {
+      throw nativeError('NATIVE_ADMISSION_REJECTED', 'Checkpoint snapshot tail is not exact');
+    }
+    return deepFreeze({
+      incarnationId: controlStore.incarnationId,
+      tail: { seq: tail.seq, digest: tail.digest },
+      cleanBasisDigest: tail.digest,
+    });
+  }
+
+  function checkpointAuthority(history, snapshot, checkpointSnapshot) {
+    return deepFreeze({
+      snapshot: checkpointSnapshot,
+      cleanBasis: {
+        admissionBasis: {
+          basisKind: admittedBasis.basisKind,
+          basisDigest: admittedBasis.basisDigest,
+          admissionEvent: structuredClone(history.admissionEvent),
+        },
+        dbKey,
+        schema: snapshot.schemaVersion,
+        backend: snapshot.backend,
+        finalSeq: snapshot.finalSeq,
+        triggerVersion: snapshot.triggerVersion,
+        triggerSetDigest: snapshot.triggerSetDigest,
+        projectInstanceIdSha256: snapshot.projectInstanceIdSha256,
+        identity: structuredClone(guard.identity),
+        latestCleanBasisDigest: checkpointSnapshot.cleanBasisDigest,
+        unresolved: [],
+      },
+      epochObservations: history.activeEpochObservations,
+    });
+  }
+
+  function finalizeLogicalRequest() {
+    if (state !== 'active') return null;
+    const { history, snapshot } = inspectAuthorities();
+    if (
+      history.mode !== 'clean'
+      || history.tail.digest === finalizedLogicalTailDigest
+    ) {
+      return null;
+    }
+    finalizedLogicalTailDigest = history.tail.digest;
+    const status = checkpointController.maintenanceStatus();
+    if (status.level === 'none') return null;
+
+    const capturedSnapshot = currentCheckpointSnapshot(history);
+    const authority = checkpointAuthority(history, snapshot, capturedSnapshot);
+    const verifyCurrent = Object.freeze(function verifyCurrent() {
+      try {
+        assertCheckpointMaintenanceLease();
+        const current = inspectAuthorities();
+        const currentSnapshot = currentCheckpointSnapshot(current.history);
+        return current.history.mode === 'clean'
+          && currentSnapshot.incarnationId === capturedSnapshot.incarnationId
+          && currentSnapshot.tail.seq === capturedSnapshot.tail.seq
+          && currentSnapshot.tail.digest === capturedSnapshot.tail.digest
+          && currentSnapshot.cleanBasisDigest === capturedSnapshot.cleanBasisDigest
+          && current.snapshot.finalSeq === snapshot.finalSeq
+          && current.snapshot.schemaVersion === snapshot.schemaVersion
+          && current.snapshot.backend === snapshot.backend
+          && current.snapshot.triggerVersion === snapshot.triggerVersion
+          && current.snapshot.triggerSetDigest === snapshot.triggerSetDigest
+          && current.snapshot.projectInstanceIdSha256 === snapshot.projectInstanceIdSha256;
+      } catch {
+        return false;
+      }
+    });
+    const installCheckpoint = Object.freeze(function installCheckpoint() {
+      assertCheckpointMaintenanceLease();
+      const receipt = checkpointController.installCheckpoint(
+        Object.freeze(function authorityProvider() { return authority; }),
+      );
+      const installed = inspectAuthorities();
+      if (
+        installed.history.frontier?.checkpointDigest !== receipt.checkpointDigest
+        || installed.history.frontier?.coveredSeq !== receipt.coveredSeq
+        || installed.history.events.length !== 0
+        || installed.history.mode !== 'clean'
+      ) {
+        throw recoveryRequired('Installed checkpoint did not advance the native frontier exactly');
+      }
+      frozenFrontier = installed.history.frontier;
+      frozenEventDigests = Object.freeze([]);
+      return receipt;
+    });
+    return deepFreeze({
+      snapshot: capturedSnapshot,
+      verifyCurrent,
+      installCheckpoint,
+    });
+  }
+
+  function normalizedAuthorityError(cause, message) {
+    return cause?.code?.startsWith('NATIVE_') || cause?.code === 'RECOVERY_REQUIRED'
+      ? cause
+      : nativeError('NATIVE_DATABASE_IDENTITY_STALE', message, cause);
+  }
+
+  function assertActive(options = {}) {
+    try {
+      return inspectAuthorities();
+    } catch (cause) {
+      if (options.transactionAdmission === true && cause?.code === 'NATIVE_GATE_NOT_EMPTY') {
+        return fenceOnUncertainty(recoveryRequired(
+          'Transaction admission found a pre-existing durability gate',
+          cause,
+        ));
+      }
+      return fenceOnUncertainty(normalizedAuthorityError(
+        cause,
+        'Native connection identity is uncertain',
+      ));
+    }
+  }
+
+  function readStatement(sql, params, mode) {
+    assertOperationIdle();
+    assertActive();
+    const classification = classifyNativeSql(sql);
+    if (classification.kind !== 'business_read') {
+      throw nativeError('NATIVE_SQL_FORBIDDEN', 'Only business reads are allowed outside a transaction');
+    }
+    try {
+      return database.query(sql)[mode](...params);
+    } catch (error) {
+      if (error?.code === 'SQLITE_BUSY' || error?.code === 'SQLITE_IOERR') {
+        return fenceOnUncertainty(nativeError(
+          'NATIVE_STORE_DISPOSITION_UNKNOWN',
+          'SQLite read ended with operational uncertainty',
+          error,
+        ));
+      }
+      throw error;
+    }
+  }
+
+  function unsupported(code, message) {
+    assertOperationIdle();
+    assertActive();
+    throw nativeError(code, message);
+  }
+
+  function closeWithState(finalState) {
+    if (state !== 'active' && state !== 'recovery_required') throw stateError();
+    try {
+      if (database) database.close();
+      guard.close();
+      state = finalState;
+    } catch (cause) {
+      state = 'disposition_unknown';
+      throw nativeError('NATIVE_STORE_DISPOSITION_UNKNOWN', 'Native connection close disposition is unknown', cause);
+    }
+  }
+
+  function commonPayloadForEpoch(payloadConnectionEpoch) {
+    return {
+      version: 1,
+      eventId: randomUUID(),
+      dbKey,
+      projectInstanceIdSha256,
+      createdAt: new Date().toISOString(),
+      ownershipHash,
+      connectionEpoch: payloadConnectionEpoch,
+    };
+  }
+
+  function commonTransactionPayload() {
+    return commonPayloadForEpoch(connectionEpoch);
+  }
+
+  function recoveryRequired(message, cause) {
+    return nativeError('RECOVERY_REQUIRED', message, cause);
+  }
+
+  function readHistoryForAppendPostcheck() {
+    controlStore.assertCurrent();
+    const history = assertEvidenceCurrent(
+      controlStore,
+      admissionVerifier,
+      admissionContext,
+      admittedBasis,
+    );
+    assertWriterLease();
+    return history;
+  }
+
+  function isLegalSourceConsumer(history, sourceDigest) {
+    const sourceIndex = history.events.findIndex((event) => event.digest === sourceDigest);
+    const successor = sourceIndex < 0 ? null : history.events[sourceIndex + 1];
+    return (
+      successor?.type === 'sqlite.tx.prepared'
+      && successor.payload.sourceDigest === sourceDigest
+    ) || (
+      successor?.type === 'manuscript.source.abandoned'
+      && successor.payload.sourceDigest === sourceDigest
+    );
+  }
+
+  function appendPrepared(source, payload) {
+    let appended;
+    try {
+      appended = controlStore.compareAndAppend(source.digest, {
+        type: 'sqlite.tx.prepared',
+        payload,
+      });
+    } catch (cause) {
+      if (cause?.code === 'CONTROL_STORE_CAS_FAILED') {
+        try {
+          const history = readHistoryForAppendPostcheck();
+          if (isLegalSourceConsumer(history, source.digest)) {
+            throw nativeError('NATIVE_SOURCE_NOT_CURRENT', 'Transaction source was already consumed');
+          }
+        } catch (inspectionError) {
+          if (inspectionError?.code === 'NATIVE_SOURCE_NOT_CURRENT') throw inspectionError;
+        }
+      }
+      return fenceOnUncertainty(recoveryRequired(
+        'Prepared evidence publication is uncertain',
+        cause,
+      ));
+    }
+    try {
+      const history = readHistoryForAppendPostcheck();
+      if (
+        history.mode !== 'prepared'
+        || history.tail.digest !== appended.digest
+        || history.prepared.digest !== appended.digest
+        || history.prepared.payload.sourceDigest !== source.digest
+      ) {
+        throw evidenceError('Prepared evidence post-check is not exact');
+      }
+      return history;
+    } catch (cause) {
+      return fenceOnUncertainty(recoveryRequired(
+        'Prepared evidence post-check is uncertain',
+        cause,
+      ));
+    }
+  }
+
+  function transactionFaultContext(transactionState) {
+    return Object.freeze({
+      transactionId: transactionState.transactionId,
+      sourceDigest: transactionState.sourceDigest,
+      preparedDigest: transactionState.preparedDigest,
+      beforeSeq: transactionState.beforeSeq,
+      expectedFinalSeq: transactionState.expectedFinalSeq,
+      writeLockAcquired: transactionState.writeLockAcquired,
+      gateSqlExecuted: transactionState.gateSqlExecuted,
+      businessSqlExecuted: transactionState.businessSqlExecuted,
+      seqSqlExecuted: transactionState.seqSqlExecuted,
+      gateDeleteSqlExecuted: transactionState.gateDeleteSqlExecuted,
+      commitInvoked: transactionState.commitInvoked,
+    });
+  }
+
+  function appendTerminal(prepared, type, payload, transactionState) {
+    let appended;
+    try {
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_BEFORE_TERMINAL_APPEND,
+        transactionFaultContext(transactionState),
+      );
+      appended = controlStore.compareAndAppend(prepared.digest, { type, payload });
+      const history = readHistoryForAppendPostcheck();
+      if (
+        history.mode !== 'clean'
+        || history.tail.digest !== appended.digest
+        || history.tail.type !== type
+        || history.tail.payload.preparedDigest !== prepared.digest
+      ) {
+        throw evidenceError('Transaction terminal evidence post-check is not exact');
+      }
+      return history;
+    } catch (cause) {
+      return fenceOnUncertainty(recoveryRequired(
+        'Transaction terminal publication is uncertain',
+        cause,
+      ));
+    }
+  }
+
+  function transactionFacade(operationToken, transactionState) {
+    function assertTransactionActive() {
+      if (
+        transactionState.live !== true
+        || activeOperation !== operationToken
+        || state !== 'active'
+        || database.inTransaction !== true
+      ) {
+        throw nativeError(
+          'NATIVE_TRANSACTION_FACADE_STALE',
+          'Transaction statement facade is outside its synchronous epoch',
+        );
+      }
+    }
+
+    function statement(sql, params, mode) {
+      assertTransactionActive();
+      const classification = classifyNativeTransactionSql(sql);
+      const requiredKind = mode === 'run' ? 'business_dml' : 'business_read';
+      if (classification.kind !== requiredKind) {
+        throw nativeError('NATIVE_SQL_FORBIDDEN', 'SQL is not authorized for this transaction method');
+      }
+      const result = database.query(sql)[mode](...params);
+      if (mode === 'run') transactionState.businessSqlExecuted = true;
+      return result;
+    }
+
+    return Object.freeze({
+      all(sql, ...params) {
+        return statement(sql, params, 'all');
+      },
+      get(sql, ...params) {
+        return statement(sql, params, 'get');
+      },
+      run(sql, ...params) {
+        return statement(sql, params, 'run');
+      },
+    });
+  }
+
+  function rollbackStartedTransaction(primaryError, transactionState, prepared, beforeSeq) {
+    transactionState.live = false;
+    try {
+      database.exec('ROLLBACK');
+      if (database.inTransaction !== false) {
+        throw nativeError('NATIVE_CONNECTION_REJECTED', 'ROLLBACK did not restore autocommit');
+      }
+      const { snapshot } = inspectAuthorities({
+        expectedGateRows: 0,
+        expectedInTransaction: false,
+        expectedSeq: beforeSeq,
+        allowPrepared: true,
+        expectedPreparedDigest: prepared.digest,
+      });
+      appendTerminal(prepared, 'sqlite.tx.rolled_back', {
+        ...commonTransactionPayload(),
+        preparedDigest: prepared.digest,
+        beforeSeq,
+        reasonCode: 'transaction_failed',
+        rollbackKind: 'transaction_rolled_back',
+        predicate: {
+          autocommit: true,
+          rollbackCompleted: true,
+          schemaVersion: snapshot.schemaVersion,
+          backend: snapshot.backend,
+          finalSeq: snapshot.finalSeq,
+          gateEmpty: snapshot.gateEmpty,
+          triggerVersion: snapshot.triggerVersion,
+          triggerSetDigest: snapshot.triggerSetDigest,
+          identity: guard.identity,
+        },
+      }, transactionState);
+    } catch (cause) {
+      if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
+      return fenceOnUncertainty(recoveryRequired(
+        'Transaction rollback disposition is uncertain',
+        cause,
+      ));
+    }
+    throw primaryError;
+  }
+
+  function handleBeginNotAcquired(beginError, transactionState, prepared, beforeSeq) {
+    try {
+      if (database.inTransaction !== false) {
+        throw nativeError('NATIVE_CONNECTION_REJECTED', 'Busy BEGIN did not remain in autocommit');
+      }
+      const { snapshot } = inspectAuthorities({
+        expectedGateRows: 0,
+        expectedInTransaction: false,
+        expectedSeq: beforeSeq,
+        allowPrepared: true,
+        expectedPreparedDigest: prepared.digest,
+      });
+      appendTerminal(prepared, 'sqlite.tx.rolled_back', {
+        ...commonTransactionPayload(),
+        preparedDigest: prepared.digest,
+        beforeSeq,
+        reasonCode: 'sqlite_busy',
+        rollbackKind: 'begin_not_acquired',
+        predicate: {
+          autocommit: true,
+          writeLockAcquired: false,
+          gateSqlExecuted: false,
+          businessSqlExecuted: false,
+          seqSqlExecuted: false,
+          schemaVersion: snapshot.schemaVersion,
+          backend: snapshot.backend,
+          finalSeq: snapshot.finalSeq,
+          gateEmpty: snapshot.gateEmpty,
+          triggerVersion: snapshot.triggerVersion,
+          triggerSetDigest: snapshot.triggerSetDigest,
+          identity: guard.identity,
+        },
+      }, transactionState);
+    } catch (cause) {
+      if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
+      return fenceOnUncertainty(recoveryRequired(
+        'Busy BEGIN predicate cannot be proven',
+        cause,
+      ));
+    }
+    throw nativeError('PROJECT_WRITE_BUSY', 'Native project writer is busy', beginError);
+  }
+
+  function executeOneTransaction(input, callback, operationToken) {
+    const { history, snapshot } = assertActive({ transactionAdmission: true });
+    const source = history.mode === 'source' ? history.source : null;
+    if (
+      !source
+      || source.digest !== input.sourceDigest
+      || source !== history.tail
+      || source.payload.connectionEpoch !== connectionEpoch
+      || source.payload.operationKind !== input.operationKind
+      || source.payload.logicalRequestDigest !== input.logicalRequestDigest
+      || source.payload.attemptSeq !== input.attemptSeq
+    ) {
+      throw nativeError('NATIVE_SOURCE_NOT_CURRENT', 'Transaction source is not the current owned tail');
+    }
+    if (snapshot.finalSeq === Number.MAX_SAFE_INTEGER) {
+      throw nativeError('NATIVE_CONNECTION_REJECTED', 'Native commit sequence cannot advance safely');
+    }
+    const beforeSeq = snapshot.finalSeq;
+    const expectedFinalSeq = beforeSeq + 1;
+    const transactionId = randomUUID();
+    const preparedHistory = appendPrepared(source, {
+      ...commonTransactionPayload(),
+      transactionId,
+      sourceDigest: source.digest,
+      beforeSeq,
+      expectedFinalSeq,
+      schemaVersion: snapshot.schemaVersion,
+      backend: snapshot.backend,
+      expectedGateEmpty: true,
+      expectedTriggerVersion: snapshot.triggerVersion,
+      expectedTriggerSetDigest: snapshot.triggerSetDigest,
+      expectedIdentity: guard.identity,
+      operationKind: input.operationKind,
+    });
+    const prepared = preparedHistory.prepared;
+    const transactionState = {
+      live: false,
+      transactionId,
+      sourceDigest: source.digest,
+      preparedDigest: prepared.digest,
+      beforeSeq,
+      expectedFinalSeq,
+      writeLockAcquired: false,
+      gateSqlExecuted: false,
+      businessSqlExecuted: false,
+      seqSqlExecuted: false,
+      gateDeleteSqlExecuted: false,
+      commitInvoked: false,
+    };
+    try {
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_PREPARED_POSTCHECK,
+        transactionFaultContext(transactionState),
+      );
+    } catch (cause) {
+      return fenceOnUncertainty(recoveryRequired(
+        'Prepared transaction was interrupted before BEGIN',
+        cause,
+      ));
+    }
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      if (database.inTransaction !== true) {
+        throw recoveryRequired('BEGIN IMMEDIATE did not prove an acquired transaction');
+      }
+    } catch (cause) {
+      if (cause?.code === 'SQLITE_BUSY' || cause?.code === 'SQLITE_LOCKED') {
+        return handleBeginNotAcquired(cause, transactionState, prepared, beforeSeq);
+      }
+      return fenceOnUncertainty(cause?.code === 'RECOVERY_REQUIRED'
+        ? cause
+        : recoveryRequired('BEGIN IMMEDIATE disposition is uncertain', cause));
+    }
+
+    transactionState.writeLockAcquired = true;
+    transactionState.live = true;
+    try {
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_BEGIN_ACQUIRED,
+        transactionFaultContext(transactionState),
+      );
+      inspectAuthorities({
+        expectedGateRows: 0,
+        expectedInTransaction: true,
+        expectedSeq: beforeSeq,
+        allowPrepared: true,
+        expectedPreparedDigest: prepared.digest,
+      });
+      const gateInsert = database.query(
+        'INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)',
+      ).run();
+      if (gateInsert?.changes !== 1) {
+        throw nativeError('NATIVE_CONNECTION_REJECTED', 'Opening the durability gate changed an inexact row count');
+      }
+      transactionState.gateSqlExecuted = true;
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_GATE_INSERT,
+        transactionFaultContext(transactionState),
+      );
+      const statements = transactionFacade(operationToken, transactionState);
+      let callbackResult;
+      let callbackFailed = false;
+      let callbackError;
+      try {
+        callbackResult = callback(statements);
+      } catch (cause) {
+        callbackFailed = true;
+        callbackError = cause;
+      }
+      transactionState.live = false;
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_BUSINESS_CALLBACK,
+        transactionFaultContext(transactionState),
+      );
+      if (!callbackFailed && callbackResult !== null && (
+        typeof callbackResult === 'object' || typeof callbackResult === 'function'
+      )) {
+        try {
+          if (typeof callbackResult.then === 'function') {
+            callbackFailed = true;
+            callbackError = nativeError(
+              'NATIVE_TRANSACTION_ASYNC_FORBIDDEN',
+              'Native transaction callbacks must be synchronous',
+            );
+          }
+        } catch (cause) {
+          callbackFailed = true;
+          callbackError = cause;
+        }
+      }
+      if (callbackFailed) throw callbackError;
+
+      const sequenceUpdate = database.query(
+        "UPDATE project_meta SET value = ? WHERE key = 'durability_commit_seq' AND value = ?",
+      ).run(String(expectedFinalSeq), String(beforeSeq));
+      if (sequenceUpdate?.changes !== 1) {
+        throw nativeError('NATIVE_CONNECTION_REJECTED', 'durability_commit_seq CAS changed an inexact row count');
+      }
+      transactionState.seqSqlExecuted = true;
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_SEQ_CAS,
+        transactionFaultContext(transactionState),
+      );
+      const gateDelete = database.query(
+        'DELETE FROM "_durability_write_gate" WHERE "gate_id" = 1',
+      ).run();
+      if (gateDelete?.changes !== 1) {
+        throw nativeError('NATIVE_CONNECTION_REJECTED', 'Closing the durability gate changed an inexact row count');
+      }
+      transactionState.gateDeleteSqlExecuted = true;
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_GATE_DELETE,
+        transactionFaultContext(transactionState),
+      );
+      inspectAuthorities({
+        expectedGateRows: 0,
+        expectedInTransaction: true,
+        expectedSeq: expectedFinalSeq,
+        allowPrepared: true,
+        expectedPreparedDigest: prepared.digest,
+      });
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_BEFORE_COMMIT_INVOKE,
+        transactionFaultContext(transactionState),
+      );
+      transactionState.commitInvoked = true;
+      database.exec('COMMIT');
+      faultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_COMMIT_RETURN,
+        transactionFaultContext(transactionState),
+      );
+      if (database.inTransaction !== false) {
+        return fenceOnUncertainty(recoveryRequired('COMMIT did not restore autocommit'));
+      }
+      const { snapshot: committedSnapshot } = inspectAuthorities({
+        expectedGateRows: 0,
+        expectedInTransaction: false,
+        expectedSeq: expectedFinalSeq,
+        allowPrepared: true,
+        expectedPreparedDigest: prepared.digest,
+      });
+      const terminalHistory = appendTerminal(prepared, 'sqlite.tx.committed', {
+        ...commonTransactionPayload(),
+        preparedDigest: prepared.digest,
+        finalSeq: expectedFinalSeq,
+        schemaVersion: committedSnapshot.schemaVersion,
+        backend: committedSnapshot.backend,
+        gateEmpty: committedSnapshot.gateEmpty,
+        triggerVersion: committedSnapshot.triggerVersion,
+        triggerSetDigest: committedSnapshot.triggerSetDigest,
+        postCommitIdentity: guard.identity,
+      }, transactionState);
+      crashOnlyFaultPoint(
+        FAULT_POINTS.NATIVE_TX_AFTER_TERMINAL_POSTCHECK,
+        Object.freeze({
+          ...transactionFaultContext(transactionState),
+          terminalDigest: terminalHistory.tail.digest,
+        }),
+      );
+      return callbackResult;
+    } catch (cause) {
+      transactionState.live = false;
+      if (state !== 'active') throw cause;
+      if (transactionState.commitInvoked) {
+        return fenceOnUncertainty(recoveryRequired(
+          'COMMIT or post-COMMIT disposition is uncertain',
+          cause,
+        ));
+      }
+      let transactionOpen;
+      try {
+        transactionOpen = database.inTransaction === true;
+      } catch (stateCause) {
+        return fenceOnUncertainty(recoveryRequired(
+          'Pre-COMMIT transaction state cannot be read',
+          stateCause,
+        ));
+      }
+      if (!transactionOpen) {
+        return fenceOnUncertainty(recoveryRequired(
+          'Pre-COMMIT transaction disposition is uncertain',
+          cause,
+        ));
+      }
+      return rollbackStartedTransaction(cause, transactionState, prepared, beforeSeq);
+    }
+  }
+
+  function validatePreparedRecoverySnapshot(snapshot, history) {
+    if (!frozenPrepared) throw evidenceError('Prepared recovery has no frozen prepared event');
+    assertLiveStateBasis(snapshot, history, expectedBasis);
+    if (
+      history.mode !== 'prepared'
+      || history.prepared?.digest !== frozenPrepared.digest
+      || history.tail.digest !== frozenPrepared.digest
+      || snapshot.schemaVersion !== frozenPrepared.payload.schemaVersion
+      || snapshot.backend !== frozenPrepared.payload.backend
+      || snapshot.gateEmpty !== frozenPrepared.payload.expectedGateEmpty
+      || snapshot.triggerVersion !== frozenPrepared.payload.expectedTriggerVersion
+      || snapshot.triggerSetDigest !== frozenPrepared.payload.expectedTriggerSetDigest
+      || !sameIdentity(guard.identity, frozenPrepared.payload.expectedIdentity)
+      || ![
+        frozenPrepared.payload.beforeSeq,
+        frozenPrepared.payload.expectedFinalSeq,
+      ].includes(snapshot.finalSeq)
+    ) {
+      throw recoveryRequired('Prepared live state is not one exact recoverable predicate');
+    }
+  }
+
+  function appendRecoveryTerminal(type, payload, recoveryEpoch, expectedFinalSeq) {
+    const appended = controlStore.compareAndAppend(frozenPrepared.digest, { type, payload });
+    guard.assertCurrent();
+    controlStore.assertCurrent();
+    const history = assertEvidenceCurrent(
+      controlStore,
+      admissionVerifier,
+      admissionContext,
+      admittedBasis,
+    );
+    assertWriterLease();
+    assertFrozenPrefix(history);
+    if (
+      history.events.length !== frozenEventDigests.length + 1
+      || history.mode !== 'clean'
+      || history.projectedSeq !== expectedFinalSeq
+      || history.tail.digest !== appended.digest
+      || history.tail.type !== type
+      || history.tail.payload.preparedDigest !== frozenPrepared.digest
+      || history.tail.payload.connectionEpoch !== recoveryEpoch
+    ) {
+      throw evidenceError('Prepared recovery terminal post-check is not exact');
+    }
+    return Object.freeze({ history, terminal: history.tail });
+  }
+
+  function fencePreparedRecoveryUncertainty(cause, recoveryResource) {
+    const primary = cause?.code === 'RECOVERY_REQUIRED'
+      ? cause
+      : recoveryRequired('Prepared recovery terminal disposition is uncertain', cause);
+    const closeErrors = closeResourcesBestEffort([recoveryResource.database, guard]);
+    if (closeErrors.length === 0) {
+      state = 'fenced';
+      throw primary;
+    }
+    throw dispositionUnknownError(
+      primary,
+      'Prepared recovery resources could not be closed exactly',
+      closeErrors,
+    );
+  }
+
+  function recoverPrepared() {
+    let recoveryResource;
+    try {
+      controlStore.assertCurrent();
+      const preflightHistory = assertEvidenceCurrent(
+        controlStore,
+        admissionVerifier,
+        admissionContext,
+        admittedBasis,
+      );
+      assertExactPreparedRecoveryHistory(preflightHistory);
+      recoveryResource = controlledOpen(assertExactPreparedRecoveryHistory, {
+        activate: false,
+        fenceAfterStatementFailure: true,
+        mintAfterLiveValidation: true,
+        validateSnapshot: validatePreparedRecoverySnapshot,
+      });
+      const {
+        snapshot,
+        database: recoveryDatabase,
+        connectionEpoch: recoveryEpoch,
+      } = recoveryResource;
+      const committed = snapshot.finalSeq === frozenPrepared.payload.expectedFinalSeq;
+      const type = committed ? 'sqlite.tx.committed' : 'sqlite.tx.rolled_back';
+      const payload = committed
+        ? {
+          ...commonPayloadForEpoch(recoveryEpoch),
+          preparedDigest: frozenPrepared.digest,
+          finalSeq: snapshot.finalSeq,
+          schemaVersion: snapshot.schemaVersion,
+          backend: snapshot.backend,
+          gateEmpty: snapshot.gateEmpty,
+          triggerVersion: snapshot.triggerVersion,
+          triggerSetDigest: snapshot.triggerSetDigest,
+          postCommitIdentity: guard.identity,
+        }
+        : {
+          ...commonPayloadForEpoch(recoveryEpoch),
+          preparedDigest: frozenPrepared.digest,
+          beforeSeq: frozenPrepared.payload.beforeSeq,
+          reasonCode: 'crash_recovery',
+          rollbackKind: 'recovery_before_commit',
+          predicate: {
+            autocommit: true,
+            hotJournalRecovered: true,
+            schemaVersion: snapshot.schemaVersion,
+            backend: snapshot.backend,
+            finalSeq: snapshot.finalSeq,
+            gateEmpty: snapshot.gateEmpty,
+            triggerVersion: snapshot.triggerVersion,
+            triggerSetDigest: snapshot.triggerSetDigest,
+            identity: guard.identity,
+          },
+        };
+      const terminalResult = appendRecoveryTerminal(
+        type,
+        payload,
+        recoveryEpoch,
+        snapshot.finalSeq,
+      );
+      assertLiveStateMatches(
+        snapshot,
+        terminalResult.history,
+        expectedBasis,
+        recoveryEpoch,
+      );
+      database = recoveryDatabase;
+      connectionEpoch = recoveryEpoch;
+      state = 'active';
+      return Object.freeze({
+        status: committed ? 'committed' : 'rolled_back',
+        preparedDigest: frozenPrepared.digest,
+        terminalDigest: terminalResult.terminal.digest,
+        finalSeq: snapshot.finalSeq,
+        connectionEpoch: recoveryEpoch,
+      });
+    } catch (cause) {
+      if (recoveryResource?.database) {
+        return fencePreparedRecoveryUncertainty(cause, recoveryResource);
+      }
+      if (
+        cause?.code === 'NATIVE_ADMISSION_REJECTED'
+        || cause?.code === 'NATIVE_STORE_DISPOSITION_UNKNOWN'
+        || cause?.code === 'RECOVERY_REQUIRED'
+      ) {
+        throw cause;
+      }
+      throw recoveryRequired('Prepared recovery could not be proven exactly', cause);
+    }
+  }
+
+  function recoverStore() {
+    if (state === 'active') {
+      const { history, snapshot } = assertActive();
+      if (history.mode !== 'clean') {
+        throw recoveryRequired('Native recovery requires a cold source or prepared facade');
+      }
+      return Object.freeze({
+        status: 'clean',
+        finalSeq: snapshot.finalSeq,
+        connectionEpoch,
+      });
+    }
+    if (state !== 'recovery_required') throw stateError();
+    if (initialHistory.mode === 'prepared') return recoverPrepared();
+    if (initialHistory.mode !== 'source') throw stateError();
+
+    let classification;
+    const history = readControlledHistory((currentHistory) => {
+      classification = classifyFrozenSourceHistory(currentHistory);
+    });
+    if (classification.kind === 'pending') {
+      return Object.freeze({
+        status: 'source_pending',
+        sourceDigest: frozenSource.digest,
+        finalSeq: history.projectedSeq,
+        connectionEpoch: null,
+      });
+    }
+
+    const abandonedDigest = classification.abandoned.digest;
+    const { snapshot } = controlledOpen((currentHistory) => {
+      const current = classifyFrozenSourceHistory(currentHistory);
+      if (current.kind !== 'abandoned' || current.abandoned.digest !== abandonedDigest) {
+        throw evidenceError('Caller-owned abandoned proof changed during controlled open');
+      }
+    });
+    return Object.freeze({
+      status: 'clean',
+      finalSeq: snapshot.finalSeq,
+      connectionEpoch,
+    });
+  }
+
+  const facade = {
+    get connectionEpoch() {
+      return connectionEpoch;
+    },
+    get state() {
+      return state;
+    },
+    readAll(sql, ...params) {
+      return readStatement(sql, params, 'all');
+    },
+    readGet(sql, ...params) {
+      return readStatement(sql, params, 'get');
+    },
+    executeTransaction(input, callback) {
+      return withOperation('native transaction operation', (operationToken) => {
+        assertProjectLogicalRequest();
+        if (state !== 'active') throw stateError();
+        validateExecuteInput(input, callback);
+        return executeOneTransaction(input, callback, operationToken);
+      });
+    },
+    recover() {
+      return withOperation('native recovery operation', () => {
+        assertProjectLogicalRequest();
+        return recoverStore();
+      });
+    },
+    checkpoint() {
+      if (checkpointRunner !== null) {
+        return withOperation('native checkpoint operation', () => {
+          if (state !== 'active') throw stateError();
+          return checkpointRunner();
+        });
+      }
+      return unsupported('NATIVE_OPERATION_NOT_IMPLEMENTED', 'Native checkpoint is not implemented in Task 2');
+    },
+    close() {
+      return withOperation('native close operation', () => closeWithState('released'));
+    },
+    fence() {
+      return withOperation('native fence operation', () => closeWithState('fenced'));
+    },
+  };
+  if (bindLogicalRequestFinalizer !== null) {
+    bindLogicalRequestFinalizer(finalizeLogicalRequest);
+  }
+  return Object.freeze(facade);
+}
+
+module.exports = { createNativeProjectStore, createNativeProjectStoreCore };

@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const { FAULT_POINTS, withFaults } = require('../testing/fault-injection');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 const {
   OpenAIProvider,
@@ -108,6 +110,67 @@ test('tool-call batch yields for cancellation and skips the announced tool plus 
   assert.deepEqual(announced, ['first', 'second']);
   assert.deepEqual(executed, ['first']);
   assert.deepEqual(completed, ['first']);
+});
+
+test('a marked manuscript persistence failure aborts the provider tool batch before later writes', async (t) => {
+  withIsolatedDataDir(t);
+  const database = require('../db');
+  const { executeTool } = require('../tools');
+  const {
+    createChapter,
+    isManuscriptPersistenceError,
+  } = require('../manuscript-service');
+  const projectName = 'ai-tool-persistence-abort';
+  await database.initDatabase();
+  const projectDb = database.createProjectDb(projectName);
+  projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
+  const chapter = createChapter({
+    projectName,
+    source: 'ai_tool',
+    fields: { volume_id: 1, chapter_num: 1, title: 'Chapter', content: 'Before body' },
+  }).chapter;
+  // Provider usage is known before its announced tools execute.
+  database.projectExecute(
+    projectName,
+    'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
+    ['stream_chat', 17, 9, 'provider-model'],
+  );
+  const executed = [];
+
+  await assert.rejects(
+    withFaults({
+      [FAULT_POINTS.ATOMIC_STORE_PUBLISH_BEFORE_CANDIDATE_WRITE]: { throw: 'EIO' },
+    }, async () => executeToolCallsWithAbort(
+      [
+        {
+          id: 'body',
+          name: 'update_chapter',
+          args: { chapter_id: chapter.id, content: 'Failed body' },
+        },
+        {
+          id: 'later',
+          name: 'create_memory',
+          args: { category: 'event', content: 'Must not run' },
+        },
+      ],
+      { isDisconnected: () => false },
+      (toolCall) => {
+        executed.push(toolCall.id);
+        return executeTool(projectName, toolCall.name, toolCall.args);
+      },
+    )),
+    (error) => typeof isManuscriptPersistenceError === 'function'
+      && isManuscriptPersistenceError(error)
+      && error.code === 'EIO',
+  );
+
+  assert.deepEqual(executed, ['body']);
+  assert.equal(projectDb.prepare('SELECT content FROM chapters WHERE id = ?').get(chapter.id).content, 'Before body');
+  assert.equal(projectDb.prepare('SELECT COUNT(*) AS count FROM memories').get().count, 0);
+  assert.deepEqual(
+    projectDb.prepare('SELECT SUM(input_tokens) AS input, SUM(output_tokens) AS output FROM token_usage').get(),
+    { input: 17, output: 9 },
+  );
 });
 
 test('OpenAI complete forwards AbortSignal to fetch', async () => {

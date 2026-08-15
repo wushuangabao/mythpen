@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { createHash } = require('node:crypto');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
@@ -21,12 +22,33 @@ const {
 } = require('./ai-polish-request');
 const { saveContinuation } = require('./ai-continue-save');
 const { bindAiProjectInstance } = require('./project-instance-middleware');
+const {
+  jsonErrorMiddleware,
+  jsonNotFoundMiddleware,
+  publicErrorEnvelope,
+  sendJsonError,
+} = require('./json-error-middleware');
+const { recordTokenUsageBestEffort } = require('./token-usage-recorder');
+const { startServerRuntime } = require('./server-runtime');
+const {
+  assertDurabilitySupported,
+  detectCapabilities,
+} = require('./platform/durability');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+let activeInstanceNonceMiddleware = null;
+let activeLifecycleAdmissionMiddleware = null;
 
 // ─── Middleware ───
 app.use(cors());
+app.use('/api', (req, res, next) => {
+  if (!activeInstanceNonceMiddleware) return next();
+  return activeInstanceNonceMiddleware(req, res, next);
+});
+app.use('/api', (req, res, next) => {
+  if (!activeLifecycleAdmissionMiddleware) return next();
+  return activeLifecycleAdmissionMiddleware(req, res, next);
+});
 app.use(express.json({ limit: '10mb' }));
 
 // ─── Request logging ───
@@ -81,13 +103,22 @@ function getAiConfig() {
   }
 }
 
+function safeSseError(error) {
+  const publicError = publicErrorEnvelope(error?.code).error;
+  return {
+    code: publicError.code,
+    error: publicError.message,
+    recoverable: publicError.recoverable,
+  };
+}
+
 
 // ─── AI Chat Completion (non-streaming) ───
-app.post('/api/ai/chat', async (req, res) => {
+app.post('/api/ai/chat', async (req, res, next) => {
   try {
     const { messages, project, temperature = 0.8 } = req.body;
     if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: 'messages is required' });
+      return sendJsonError(res, 'INVALID_PARAMS', 'messages is required');
     }
 
     const aiConfig = getAiConfig();
@@ -108,15 +139,13 @@ app.post('/api/ai/chat', async (req, res) => {
 
     // Record token usage
     if (result.usage.inputTokens || result.usage.outputTokens) {
-      try {
+      recordTokenUsageBestEffort(() => {
         const db = require('./db');
         db.projectExecute(project,
           'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
           ['chat', result.usage.inputTokens, result.usage.outputTokens, aiConfig.apiModel]
         );
-      } catch(e) {
-          console.warn('[AI Chat] Failed to record token usage:', e.message);
-        }
+      });
     }
 
     res.json({
@@ -125,18 +154,18 @@ app.post('/api/ai/chat', async (req, res) => {
     });
   } catch (err) {
     console.error('AI chat error:', err);
-    res.status(500).json({ error: err.message });
+    return next(err);
   }
 });
 
 
 // ─── AI Streaming Chat with Tool Calling (SSE) ───
-app.post('/api/ai/chat/stream', async (req, res) => {
+app.post('/api/ai/chat/stream', async (req, res, next) => {
   let streamContext = null;
   try {
     const { messages, project, temperature = 0.8, mode = 'writing' } = req.body;
     if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: 'messages is required' });
+      return sendJsonError(res, 'INVALID_PARAMS', 'messages is required');
     }
 
     const aiConfig = getAiConfig();
@@ -180,11 +209,7 @@ app.post('/api/ai/chat/stream', async (req, res) => {
           break;
         }
         if (streamContext.canWrite()) {
-          if (err.status) {
-            res.write(`event: error\ndata: ${JSON.stringify({ error: `API Error: ${err.status}`, detail: err.detail })}\n\n`);
-          } else {
-            res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
-          }
+          res.write(`event: error\ndata: ${JSON.stringify(safeSseError(err))}\n\n`);
           res.end();
         }
         return;
@@ -192,6 +217,15 @@ app.post('/api/ai/chat/stream', async (req, res) => {
 
       inputTokens += result.usage.inputTokens;
       outputTokens += result.usage.outputTokens;
+      if (result.usage.inputTokens || result.usage.outputTokens) {
+        recordTokenUsageBestEffort(() => {
+          db.projectExecute(
+            project,
+            'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
+            ['stream_chat', result.usage.inputTokens, result.usage.outputTokens, aiConfig.apiModel],
+          );
+        });
+      }
       if (streamContext.isDisconnected()) {
         disconnected = true;
         break;
@@ -257,21 +291,6 @@ app.post('/api/ai/chat/stream', async (req, res) => {
       }
     }
 
-
-    // Preserve usage from completed provider turns even if the client stopped
-    // before the next tool could run.
-    if (inputTokens || outputTokens) {
-      try {
-        const db = require('./db');
-        db.projectExecute(project,
-          'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
-          ['stream_chat', inputTokens, outputTokens, aiConfig.apiModel]
-        );
-      } catch(e) {
-        console.warn('[AI Stream] Failed to record token usage:', e.message);
-      }
-    }
-
     if (disconnected || streamContext.isDisconnected()) return;
     if (streamContext.canWrite()) {
       res.write(`event: task_end\ndata: ${JSON.stringify({ success: true, content: fullContent, inputTokens, outputTokens })}\n\n`);
@@ -282,9 +301,9 @@ app.post('/api/ai/chat/stream', async (req, res) => {
     if (streamContext?.isDisconnected()) return;
     console.error('AI stream error:', err);
     if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
+      return next(err);
     } else if (!streamContext || streamContext.canWrite()) {
-      res.write(`event: task_error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.write(`event: task_error\ndata: ${JSON.stringify(safeSseError(err))}\n\n`);
       res.end();
     }
   } finally {
@@ -299,18 +318,18 @@ function normalizePolishedContent(content) {
 }
 
 // ─── AI Polish (streaming, produces a review proposal without overwriting the chapter) ───
-app.post('/api/ai/polish', async (req, res) => {
+app.post('/api/ai/polish', async (req, res, next) => {
   let streamContext = null;
   try {
     const { chapterId, project } = req.body || {};
     if (!project || !Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: 'project and chapterId are required' });
+      return sendJsonError(res, 'INVALID_PARAMS', 'project and chapterId are required');
     }
 
     const db = require('./db');
     const chapter = db.projectGet(project, 'SELECT id, num, title, content FROM chapters WHERE id = ?', [chapterId]);
-    if (!chapter) return res.status(404).json({ error: 'Chapter not found' });
-    if (!chapter.content?.trim()) return res.status(400).json({ error: 'Chapter content is empty' });
+    if (!chapter) return sendJsonError(res, 'DB_NOT_FOUND', 'Chapter not found');
+    if (!chapter.content?.trim()) return sendJsonError(res, 'INVALID_PARAMS', 'Chapter content is empty');
 
     const baseContent = chapter.content;
     const aiConfig = getAiConfig();
@@ -338,14 +357,12 @@ app.post('/api/ai/polish', async (req, res) => {
     let reasoningCharacters = 0;
     const recordPolishUsage = () => {
       if (!inputTokens && !outputTokens) return;
-      try {
+      recordTokenUsageBestEffort(() => {
         db.projectExecute(project,
           'INSERT INTO token_usage (task_name, chapter_num, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?)',
           ['polish', chapter.num, inputTokens, outputTokens, aiConfig.apiModel],
         );
-      } catch (error) {
-        console.warn('[AI Polish] Failed to record token usage:', error.message);
-      }
+      });
     };
     try {
       for await (const event of adapter.stream(
@@ -374,7 +391,7 @@ app.post('/api/ai/polish', async (req, res) => {
       console.error('Polish stream error:', err);
       recordPolishUsage();
       if (streamContext.canWrite()) {
-        res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
+        res.write(`event: error\ndata: ${JSON.stringify(safeSseError(err))}\n\n`);
         res.end();
       }
       return;
@@ -420,9 +437,9 @@ app.post('/api/ai/polish', async (req, res) => {
     console.error('Polish error:', err);
     if (streamContext?.isDisconnected()) return;
     if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
+      return next(err);
     } else if (!streamContext || streamContext.canWrite()) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.write(`event: error\ndata: ${JSON.stringify(safeSseError(err))}\n\n`);
       res.end();
     }
   } finally {
@@ -431,17 +448,20 @@ app.post('/api/ai/polish', async (req, res) => {
 });
 
 // ─── AI Continue Writing (streaming) ───
-app.post('/api/ai/continue', async (req, res) => {
+app.post('/api/ai/continue', async (req, res, next) => {
   let streamContext = null;
   try {
     const { chapterId, context, style = '悬疑', project } = req.body || {};
     if (!project || !Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: 'project and chapterId are required' });
+      return sendJsonError(res, 'INVALID_PARAMS', 'project and chapterId are required');
     }
 
     const db = require('./db');
     const chapter = db.projectGet(project, 'SELECT * FROM chapters WHERE id = ?', [chapterId]);
-    if (!chapter) return res.status(404).json({ error: 'Chapter not found' });
+    if (!chapter) return sendJsonError(res, 'DB_NOT_FOUND', 'Chapter not found');
+    const continuationBaseBodyHash = createHash('sha256')
+      .update(chapter.content ?? '')
+      .digest('hex');
 
     const messages = [
       { role: 'user', content: `请续写以下小说的第${chapter.num}章「${chapter?.title || '未知'}」。保持${style}氛围，延续已有的文风和叙事视角。\n\n## 当前内容\n\n${chapter?.content?.slice(-1500) || '（新章节开头）'}\n\n## 用户额外要求\n${context || '请自然续写，保持文学质感。'}\n\n请直接开始续写，不要加任何前缀说明。` }
@@ -468,14 +488,12 @@ app.post('/api/ai/continue', async (req, res) => {
     let finishReason = null;
     const recordContinuationUsage = () => {
       if (!inputTokens && !outputTokens) return;
-      try {
+      recordTokenUsageBestEffort(() => {
         db.projectExecute(project,
           'INSERT INTO token_usage (task_name, chapter_num, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?)',
           ['continue', chapter.num, inputTokens, outputTokens, aiConfig.apiModel],
         );
-      } catch (error) {
-        console.warn('[AI Continue] Failed to record token usage:', error.message);
-      }
+      });
     };
 
     try {
@@ -502,7 +520,7 @@ app.post('/api/ai/continue', async (req, res) => {
       console.error('Continue stream error:', err);
       recordContinuationUsage();
       if (streamContext.canWrite()) {
-        res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
+        res.write(`event: error\ndata: ${JSON.stringify(safeSseError(err))}\n\n`);
         res.end();
       }
       return;
@@ -516,27 +534,29 @@ app.post('/api/ai/continue', async (req, res) => {
     let saveError = null;
     let savedChapter = null;
     try {
-      savedChapter = saveContinuation(db, project, chapterId, fullContent, finishReason);
+      savedChapter = saveContinuation(
+        db,
+        project,
+        chapterId,
+        fullContent,
+        finishReason,
+        continuationBaseBodyHash,
+      );
     } catch (error) {
       saveError = error;
       console.error('Continue save error:', error);
     }
 
-    // Generation consumed these tokens even if its completion state or the
-    // subsequent chapter save is rejected.
-    recordContinuationUsage();
-
     if (saveError) {
+      if (!db.isManuscriptPersistenceError(saveError)) recordContinuationUsage();
       if (streamContext.canWrite()) {
-        res.write(`event: error\ndata: ${JSON.stringify({
-          code: saveError.code || 'continuation_save_failed',
-          error: saveError.message || 'Failed to save continuation',
-        })}\n\n`);
+        res.write(`event: error\ndata: ${JSON.stringify(safeSseError(saveError))}\n\n`);
         res.end();
       }
       return;
     }
 
+    recordContinuationUsage();
     if (!streamContext.canWrite()) return;
     res.write(`event: done\ndata: ${JSON.stringify({
       success: true,
@@ -551,9 +571,9 @@ app.post('/api/ai/continue', async (req, res) => {
     console.error('Continue error:', err);
     if (streamContext?.isDisconnected()) return;
     if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
+      return next(err);
     } else if (!streamContext || streamContext.canWrite()) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.write(`event: error\ndata: ${JSON.stringify(safeSseError(err))}\n\n`);
       res.end();
     }
   } finally {
@@ -571,73 +591,61 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ─── Graceful shutdown ───
-// Called by Tauri on app exit to avoid antivirus flagging SIGKILL/TerminateProcess
-let serverInstance = null;
-let shutdownStarted = false;
-
-function flushDatabasesAndExit() {
-  try {
-    db.flushAllDatabases();
-  } catch (error) {
-    console.error('  Failed to flush databases during shutdown:', error);
-    process.exit(1);
-    return;
-  }
-  process.exit(0);
-}
-
-function gracefulShutdown() {
-  if (shutdownStarted) return;
-  shutdownStarted = true;
-  console.log('\n  🛑 Shutting down Mythpen API Server gracefully...');
-  if (serverInstance) {
-    serverInstance.close(() => {
-      console.log('  ✓ Server closed.');
-      flushDatabasesAndExit();
-    });
-    // Force exit after 5s if close hangs
-    setTimeout(() => {
-      console.error('  ⚠️  Server close timed out, forcing exit.');
-      flushDatabasesAndExit();
-    }, 5000);
-  } else {
-    flushDatabasesAndExit();
-  }
-}
-
-app.post('/api/shutdown', (req, res) => {
-  res.json({ status: 'shutting_down' });
-  setImmediate(() => gracefulShutdown());
-});
-
-// Handle SIGTERM from Tauri (sent before SIGKILL on some platforms)
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
+app.use(jsonNotFoundMiddleware);
+app.use(jsonErrorMiddleware);
 
 // Share cache invalidation with routes (settings updates clear the cache)
 db.invalidateAiConfigCache = invalidateAiConfigCache;
 
-// ─── Start (async — init DB then listen) ───
-const { initDatabase } = require('./db');
-const serverStartTime = Date.now();
-console.log('[Server] Mythpen API Server starting...');
-console.log('[Server] Port:', PORT);
-initDatabase()
-  .then(() => {
-    serverInstance = app.listen(PORT, () => {
-      const cfg = getAiConfig();
-      const elapsed = Date.now() - serverStartTime;
-      console.log(`\n  🖋️  Mythpen API Server`);
-      console.log(`  ─────────────────────`);
-      console.log(`  Local:   http://localhost:${PORT}`);
-      console.log(`  Health:  http://localhost:${PORT}/api/health`);
-      console.log(`  AI:      ${cfg.apiModel} @ ${cfg.apiBaseUrl}`);
-      console.log(`  Startup: ${elapsed}ms`);
-      console.log(`\n  Ready.\n`);
-    });
-  })
-  .catch(err => {
-    console.error('❌ Failed to initialise database:', err);
-    process.exit(1);
+function createApp({
+  instanceNonceMiddleware = null,
+  lifecycleAdmissionMiddleware = null,
+} = {}) {
+  activeInstanceNonceMiddleware = instanceNonceMiddleware;
+  activeLifecycleAdmissionMiddleware = lifecycleAdmissionMiddleware;
+  return app;
+}
+
+async function startMainServer() {
+  const startedAt = Date.now();
+  const desktopOwned = process.env.MYTHPEN_DESKTOP_OWNED === '1';
+  if (desktopOwned) {
+    console.log = (...args) => console.error(...args);
+  } else {
+    console.log('[Server] Mythpen API Server starting...');
+  }
+  const runtime = await startServerRuntime({
+    assertDurabilitySupported,
+    closeDatabases: db.closeAllDatabases,
+    configureRecoveryDiagnosticsCapabilities: db.configureRecoveryDiagnosticsCapabilities,
+    coordinator: db.getProjectWriteLifecycle(),
+    createApp,
+    detectCapabilities,
+    initDatabase: db.initDatabase,
+    inspectProjectDatabasesAtStartup: db.inspectProjectDatabasesAtStartup,
   });
+  if (!desktopOwned) {
+    const address = runtime.server.address();
+    const port = address && typeof address !== 'string' ? address.port : 'unknown';
+    const cfg = getAiConfig();
+    console.log(`\n  🖋️  Mythpen API Server`);
+    console.log(`  Local:   http://127.0.0.1:${port}`);
+    console.log(`  Health:  http://127.0.0.1:${port}/api/health`);
+    console.log(`  AI:      ${cfg.apiModel} @ ${cfg.apiBaseUrl}`);
+    console.log(`  Startup: ${Date.now() - startedAt}ms`);
+    console.log('\n  Ready.\n');
+  }
+  return runtime;
+}
+
+if (require.main === module) {
+  void startMainServer().catch((error) => {
+    console.error(`❌ Server startup failed [${error.code || 'UNKNOWN'}]:`, error.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  createApp,
+  startMainServer,
+};

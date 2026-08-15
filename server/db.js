@@ -5,23 +5,218 @@
 const path = require('path');
 const fs = require('fs');
 const { AsyncLocalStorage } = require('node:async_hooks');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { resolveStoragePaths } = require('./storage-paths');
 const { repairRecentProjectPaths } = require('./recent-project-paths');
 const { compareTimelineEvents } = require('./timeline-order');
-
-const STORAGE_PATHS = resolveStoragePaths();
-const DB_DIR = STORAGE_PATHS.dataDir;
-const CONFIG_DB = STORAGE_PATHS.configDbPath;
-const PROJECTS_DIR = STORAGE_PATHS.projectsDir;
-const EXPORT_DIR = STORAGE_PATHS.exportDir;
-
-// ─── Ensure directories ───
-if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
-if (!fs.existsSync(PROJECTS_DIR)) fs.mkdirSync(PROJECTS_DIR, { recursive: true });
+const { inspectControlStoreEvidence, openControlStore } = require('./control-store');
+const {
+  assertPublicationJournalRetirable,
+  canonicalDatabasePath,
+  createAtomicStore,
+  inspectProjectDatabaseBytes,
+} = require('./sqljs-atomic-store');
+const { fsyncDirectory } = require('./platform/durability');
+const { acquireConfigLifecycleLease } = require('./config-lifecycle-lease');
+const { createProjectWriteCoordinator } = require('./project-write-coordinator');
+const {
+  inspectRegisteredProject: inspectRegisteredProjectWithDependencies,
+  recoverRegisteredProject: recoverRegisteredProjectWithDependencies,
+} = require('./recovery-diagnostics');
+const { isOfflineSeedBootstrapActive } = require('./offline-seed-capability');
+const { classifyChapterBodyMutation } = require('./manuscript-sql-guard');
+const { createNativeDbAdapter } = require('./native/native-db-adapter');
+const {
+  isTestManuscriptBootstrapActive,
+  registerDatabaseInternals,
+  registerProjectWriteDiagnostics,
+} = require('./database-internals');
 
 let SQL;         // set by initDatabase()
 let configDb;    // wrapped config database
+let configLifecycleLease;
+let storagePaths = null;
+let storageFailure = null;
+let databaseInitializationStarted = false;
+let nativeActivationController = null;
+const controlStoresByAtomicStore = new WeakMap();
+const storesByWrapper = new WeakMap();
+const projectTransactionOwners = new WeakMap();
+const manuscriptClaims = new WeakMap();
+const manuscriptSqlAuthorizations = new WeakMap();
+const manuscriptPersistenceErrors = new WeakSet();
+const projectMigrationBodyWrites = new WeakSet();
+
+function storageUnavailableError() {
+  const error = new Error('Storage is unavailable after a failed reconfiguration; retry configureStorage() or restart');
+  error.code = 'STORAGE_UNAVAILABLE';
+  error.cause = storageFailure?.primaryError;
+  return error;
+}
+
+function assertStorageAvailable() {
+  if (storageFailure) throw storageUnavailableError();
+}
+
+function discardConnections(connections) {
+  const errors = [];
+  const uncertainConnections = [];
+  for (const connection of connections) {
+    if (!connection) continue;
+    try {
+      connection._discard();
+    } catch (error) {
+      errors.push(error);
+      uncertainConnections.push(connection);
+    }
+  }
+  return { errors, uncertainConnections };
+}
+
+function enterStorageFailure(primaryError, uncertainConnections = []) {
+  projectConnections.clear();
+  configDb = null;
+  storageFailure = { primaryError, uncertainConnections: [...new Set(uncertainConnections)] };
+}
+
+function releaseConfigLifecycleLease() {
+  if (!configLifecycleLease) return;
+  const lease = configLifecycleLease;
+  lease.release();
+  configLifecycleLease = null;
+}
+
+function retryFailedStorageCleanup() {
+  if (!storageFailure) return;
+  if (configLifecycleLease?.state === 'disposition_unknown') {
+    throw storageUnavailableError();
+  }
+  const { errors, uncertainConnections } = discardConnections(storageFailure.uncertainConnections);
+  if (errors.length > 0) {
+    const priorErrors = storageFailure.primaryError.storageRetryCleanupErrors || [];
+    attachSecondaryError(
+      storageFailure.primaryError,
+      'storageRetryCleanupErrors',
+      [...priorErrors, ...errors],
+    );
+    storageFailure.uncertainConnections = uncertainConnections;
+    throw storageUnavailableError();
+  }
+  try {
+    releaseConfigLifecycleLease();
+  } catch (error) {
+    attachSecondaryError(storageFailure.primaryError, 'configLeaseReleaseError', error);
+    throw storageUnavailableError();
+  }
+  storageFailure = null;
+}
+
+function configureStorage(overrides = {}) {
+  retryFailedStorageCleanup();
+  const candidateStoragePaths = resolveStoragePaths(
+    overrides.dataDir
+      ? { env: { ...process.env, MYTHPEN_DATA_DIR: overrides.dataDir } }
+      : {},
+  );
+  fs.mkdirSync(candidateStoragePaths.dataDir, { recursive: true });
+  fs.mkdirSync(candidateStoragePaths.projectsDir, { recursive: true });
+
+  const previousConfigDb = configDb;
+  const previousConfigLifecycleLease = configLifecycleLease;
+  const previousProjectConnections = [...projectConnections.entries()];
+
+  previousConfigDb?.flush();
+  for (const [, projectDb] of previousProjectConnections) projectDb.flush();
+
+  const closedConnections = new Set();
+  try {
+    for (const [, projectDb] of previousProjectConnections) {
+      projectDb.close();
+      closedConnections.add(projectDb);
+    }
+    if (previousConfigDb) {
+      previousConfigDb.close();
+      closedConnections.add(previousConfigDb);
+    }
+  } catch (error) {
+    const previousConnections = [
+      previousConfigDb,
+      ...previousProjectConnections.map(([, projectDb]) => projectDb),
+    ].filter((connection) => connection && !closedConnections.has(connection));
+    const cleanup = discardConnections(previousConnections);
+    if (cleanup.errors.length > 0) attachSecondaryError(error, 'storageCleanupErrors', cleanup.errors);
+    projectConnections.clear();
+    configDb = null;
+
+    if (cleanup.uncertainConnections.length > 0) {
+      enterStorageFailure(error, cleanup.uncertainConnections);
+      throw error;
+    }
+
+    let recoveredConfigDb = null;
+    const recoveredProjects = [];
+    try {
+      if (previousConfigDb) recoveredConfigDb = _openConfig(previousConfigLifecycleLease);
+      for (const [filePath] of previousProjectConnections) {
+        const projectDb = projectWriteCoordinator.withProjectWriteSync(
+          filePath,
+          () => _createProjectConnection(filePath),
+        );
+        recoveredProjects.push([filePath, projectDb]);
+      }
+    } catch (recoveryError) {
+      attachSecondaryError(error, 'storageRecoveryError', recoveryError);
+      const recoveryCleanup = discardConnections([
+        recoveredConfigDb,
+        ...recoveredProjects.map(([, projectDb]) => projectDb),
+      ]);
+      if (recoveryCleanup.errors.length > 0) {
+        attachSecondaryError(error, 'storageRecoveryCleanupErrors', recoveryCleanup.errors);
+      }
+      const uncertainConnections = [...recoveryCleanup.uncertainConnections];
+      if (recoveryError.storageUncertainConnection) {
+        uncertainConnections.push(recoveryError.storageUncertainConnection);
+      }
+      enterStorageFailure(error, uncertainConnections);
+      throw error;
+    }
+
+    configDb = recoveredConfigDb;
+    for (const [filePath, projectDb] of recoveredProjects) projectConnections.set(filePath, projectDb);
+    throw error;
+  }
+
+  projectConnections.clear();
+  configDb = null;
+  try {
+    releaseConfigLifecycleLease();
+  } catch (error) {
+    enterStorageFailure(error);
+    throw error;
+  }
+  storagePaths = candidateStoragePaths;
+  projectOpenStates.clear();
+  projectOpenStatesByLogicalPath.clear();
+  return storagePaths;
+}
+
+function installNativeActivationController(controller) {
+  if (databaseInitializationStarted || configDb || nativeActivationController) {
+    const error = new Error('Native activation controller must be installed exactly once before init');
+    error.code = 'NATIVE_ACTIVATION_DISABLED';
+    throw error;
+  }
+  const {
+    assertNativeActivationControllerForBuild,
+  } = require('./native/native-activation-controller');
+  nativeActivationController = assertNativeActivationControllerForBuild(controller);
+  return true;
+}
+
+function getStoragePaths() {
+  assertStorageAvailable();
+  return storagePaths || configureStorage();
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Schema versioning — bump these when adding migrations
@@ -29,18 +224,11 @@ let configDb;    // wrapped config database
 
 const CONFIG_SCHEMA_VERSION = 1;
 const PROJECT_SCHEMA_VERSION = 10;
+const STARTUP_RECOVERY_MAX_PROJECTS = 10_000;
 
 // ═══════════════════════════════════════════════════════════════
 // sql.js wrapper — provides a better-sqlite3-compatible API
 // ═══════════════════════════════════════════════════════════════
-
-function _loadDb(filePath) {
-  if (fs.existsSync(filePath)) {
-    const buf = fs.readFileSync(filePath);
-    return new SQL.Database(buf);
-  }
-  return new SQL.Database();
-}
 
 function attachSecondaryError(primaryError, property, secondaryError) {
   if ((typeof primaryError !== 'object' && typeof primaryError !== 'function') || primaryError === null) return;
@@ -54,36 +242,90 @@ function attachSecondaryError(primaryError, property, secondaryError) {
   }
 }
 
-function _flushDb(db, filePath) {
-  let data;
-  let exportFailed = false;
-  let exportError;
+function canonicalDbPath(filePath) {
+  return canonicalDatabasePath(filePath);
+}
+
+const RETIRED_CONTROL_DIRECTORY_PATTERN = /^([0-9a-f]{64})\.retired-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
+
+function pathExistsStrict(filePath) {
   try {
-    data = db.export();
+    fs.lstatSync(filePath);
+    return true;
   } catch (error) {
-    exportFailed = true;
-    exportError = error;
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function prepareControlStoreForNewIncarnation(filePath, controlDir, dbKey) {
+  if (pathExistsStrict(filePath)) return;
+  const controlParent = path.dirname(controlDir);
+  if (!pathExistsStrict(controlDir)) {
+    if (!pathExistsStrict(controlParent)) return;
+    const hasRetiredEvidence = fs.readdirSync(controlParent).some((name) => {
+      const match = RETIRED_CONTROL_DIRECTORY_PATTERN.exec(name);
+      return match?.[1] === dbKey;
+    });
+    // This also completes a previous attempt that renamed successfully but
+    // crashed or failed before the parent-directory fsync became observable.
+    if (hasRetiredEvidence) fsyncDirectory(controlParent);
+    return;
   }
 
-  let restoreFailed = false;
-  let restoreError;
-  try {
-    // sql.js resets connection-local PRAGMAs when export() rebuilds the
-    // underlying database. Every persistence path (scheduled writes,
-    // transactions, migrations, and close) comes through here, so restore
-    // referential-integrity enforcement before returning to callers.
-    db.run('PRAGMA foreign_keys = ON');
-  } catch (error) {
-    restoreFailed = true;
-    restoreError = error;
-  }
+  const oldControlStore = openControlStore(controlDir);
+  const retiredDir = path.join(controlParent, `${dbKey}.retired-${randomUUID()}`);
+  oldControlStore.retireAndActivate(retiredDir, (events) => {
+    // The lifecycle lease is held here. Recheck the creation predicate inside
+    // that lease so an existing database is never displaced by retirement.
+    if (pathExistsStrict(filePath)) {
+      const error = new Error(`Cannot start a new database incarnation because ${filePath} now exists`);
+      error.code = 'NEW_INCARNATION_CONFLICT';
+      throw error;
+    }
+    assertPublicationJournalRetirable({
+      filePath,
+      controlDirectory: controlDir,
+      events,
+    });
+  });
+}
 
-  if (exportFailed) {
-    if (restoreFailed) attachSecondaryError(exportError, 'foreignKeyRestoreError', restoreError);
-    throw exportError;
+function _createAtomicStore(filePath, {
+  assertWriterLease = () => {},
+  explicitCreate = false,
+} = {}) {
+  const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
+  const controlDir = path.join(getStoragePaths().dataDir, 'control', 'sqlite', dbKey);
+  if (explicitCreate && !pathExistsStrict(filePath)) {
+    assertWriterLease();
+    prepareControlStoreForNewIncarnation(filePath, controlDir, dbKey);
   }
-  if (restoreFailed) throw restoreError;
-  fs.writeFileSync(filePath, Buffer.from(data));
+  assertWriterLease();
+  const controlStore = openControlStore(controlDir);
+  const store = createAtomicStore({
+    assertWriterLease,
+    filePath,
+    controlStore,
+    sqlModule: SQL,
+  });
+  controlStoresByAtomicStore.set(store, controlStore);
+  try {
+    store.recover();
+  } catch (error) {
+    try {
+      store.close();
+    } catch (cleanupError) {
+      attachSecondaryError(error, 'storageOpenCleanupError', cleanupError);
+      attachSecondaryError(error, 'storageUncertainConnection', {
+        _discard() {
+          store.close();
+        },
+      });
+    }
+    throw error;
+  }
+  return store;
 }
 
 // ─── Named-param helper ───
@@ -91,6 +333,173 @@ function _flushDb(db, filePath) {
 // doesn't work — values come through as NULL.
 // We work around it by converting @param / :param / $param → ? at the JS level.
 const NAMED_PARAM_RE = /[$@:](\w+)/g;
+
+function isSingleReadOnlyStatement(sql) {
+  if (typeof sql !== 'string') return false;
+  let normalized = sql.trim();
+  while (normalized.length > 0) {
+    const lineComment = normalized.match(/^--[^\r\n]*(?:\r?\n|$)/);
+    if (lineComment) {
+      normalized = normalized.slice(lineComment[0].length).trimStart();
+      continue;
+    }
+    const blockComment = normalized.match(/^\/\*[\s\S]*?\*\//);
+    if (blockComment) {
+      normalized = normalized.slice(blockComment[0].length).trimStart();
+      continue;
+    }
+    break;
+  }
+  if (!/^(?:SELECT|EXPLAIN)\b/i.test(normalized)) return false;
+  return !/;\s*\S/.test(normalized);
+}
+
+function isThenable(value) {
+  return value !== null
+    && (typeof value === 'object' || typeof value === 'function')
+    && typeof value.then === 'function';
+}
+
+function transactionBoundaryError(code, message) {
+  const error = new TypeError(message);
+  error.code = code;
+  return error;
+}
+
+const SQL_TRANSACTION_CONTROL = new Set([
+  'BEGIN',
+  'COMMIT',
+  'END',
+  'ROLLBACK',
+  'SAVEPOINT',
+  'RELEASE',
+]);
+
+function containsTransactionControlStatement(sql) {
+  if (typeof sql !== 'string') return false;
+  let index = 0;
+  let atStatementStart = true;
+  let statementPrefix = [];
+  let inTriggerDefinition = false;
+  let triggerBodyStarted = false;
+  let atTriggerStatementStart = false;
+  let triggerClosingEnd = false;
+
+  function resetStatement() {
+    atStatementStart = true;
+    statementPrefix = [];
+    inTriggerDefinition = false;
+    triggerBodyStarted = false;
+    atTriggerStatementStart = false;
+    triggerClosingEnd = false;
+  }
+
+  while (index < sql.length) {
+    const char = sql[index];
+    const next = sql[index + 1];
+    if (/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    if (char === '-' && next === '-') {
+      index += 2;
+      while (index < sql.length && !/[\r\n]/.test(sql[index])) index += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const end = sql.indexOf('*/', index + 2);
+      index = end === -1 ? sql.length : end + 2;
+      continue;
+    }
+    if (char === ';') {
+      if (inTriggerDefinition && triggerBodyStarted && !triggerClosingEnd) {
+        atTriggerStatementStart = true;
+        index += 1;
+        continue;
+      }
+      resetStatement();
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`' || char === '[') {
+      const closing = char === '[' ? ']' : char;
+      index += 1;
+      while (index < sql.length) {
+        if (sql[index] === closing) {
+          if (closing !== ']' && sql[index + 1] === closing) {
+            index += 2;
+            continue;
+          }
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      atStatementStart = false;
+      statementPrefix = null;
+      if (inTriggerDefinition && triggerBodyStarted && atTriggerStatementStart) {
+        atTriggerStatementStart = false;
+      }
+      continue;
+    }
+    const word = sql.slice(index).match(/^[A-Za-z_]+/)?.[0];
+    if (word) {
+      const upperWord = word.toUpperCase();
+      if (atStatementStart) {
+        if (SQL_TRANSACTION_CONTROL.has(upperWord)) return true;
+        atStatementStart = false;
+        statementPrefix = [upperWord];
+      } else if (statementPrefix) {
+        statementPrefix.push(upperWord);
+        if (
+          statementPrefix[0] !== 'CREATE'
+          || (
+            statementPrefix.length === 2
+            && !['TEMP', 'TEMPORARY', 'TRIGGER'].includes(statementPrefix[1])
+          )
+          || (
+            statementPrefix.length === 3
+            && !['TEMP', 'TEMPORARY'].includes(statementPrefix[1])
+          )
+        ) {
+          statementPrefix = null;
+        } else if (
+          statementPrefix[1] === 'TRIGGER'
+          || statementPrefix[2] === 'TRIGGER'
+        ) {
+          inTriggerDefinition = true;
+          statementPrefix = null;
+        }
+      }
+
+      if (inTriggerDefinition) {
+        if (!triggerBodyStarted && upperWord === 'BEGIN') {
+          triggerBodyStarted = true;
+          atTriggerStatementStart = true;
+        } else if (triggerBodyStarted && atTriggerStatementStart) {
+          if (upperWord === 'END') triggerClosingEnd = true;
+          else atTriggerStatementStart = false;
+        }
+      }
+      index += word.length;
+      continue;
+    }
+    if (atStatementStart) {
+      atStatementStart = false;
+      statementPrefix = null;
+    }
+    index += 1;
+  }
+  return false;
+}
+
+function assertNoTransactionControl(sql) {
+  if (!containsTransactionControlStatement(sql)) return;
+  throw transactionBoundaryError(
+    'SQL_TRANSACTION_CONTROL_FORBIDDEN',
+    'Raw SQL transaction-control statements are forbidden; use db.transaction()',
+  );
+}
 
 function _normalizeParams(params) {
   if (params.length === 0) return null;
@@ -120,121 +529,527 @@ function _buildSql(sqlText, bindMeta) {
   return { sql: converted, args };
 }
 
+function manuscriptServiceRequired(message = 'Chapter body writes must use ManuscriptService') {
+  const error = new Error(message);
+  error.code = 'MANUSCRIPT_SERVICE_REQUIRED';
+  return error;
+}
+
+function positionalValueForInsertColumn(classification, args, columnName) {
+  if (!classification.columnNames || !classification.values || !Array.isArray(args)) return undefined;
+  const columnIndex = classification.columnNames.indexOf(columnName);
+  if (columnIndex < 0 || classification.values[columnIndex]?.trim() !== '?') return undefined;
+  let positionalIndex = 0;
+  for (let index = 0; index < columnIndex; index += 1) {
+    positionalIndex += (classification.values[index].match(/\?/g) || []).length;
+  }
+  return args[positionalIndex];
+}
+
+const exactManuscriptCreateColumns = Object.freeze([
+  'volume_id',
+  'num',
+  'title',
+  'outline',
+  'content',
+  'word_count',
+  'status',
+  'cognitive_frame',
+  'emotional_anchor',
+  'world_texture',
+  'concrete_mystery',
+  'interpersonal_tension',
+  'created_at',
+  'updated_at',
+]);
+const exactManuscriptCreateSql = new RegExp(
+  `^\\s*insert\\s+into\\s+chapters\\s*\\(\\s*`
+    + exactManuscriptCreateColumns.join('\\s*,\\s*')
+    + `\\s*\\)\\s*values\\s*\\(\\s*`
+    + [
+      '\\?', '\\?', '\\?', '\\?', '\\?', '\\?', "'pending'",
+      '\\?', '\\?', '\\?', '\\?', '\\?',
+      "datetime\\s*\\(\\s*'now'\\s*\\)",
+      "datetime\\s*\\(\\s*'now'\\s*\\)",
+    ].join('\\s*,\\s*')
+    + '\\s*\\)\\s*;?\\s*$',
+  'i',
+);
+
+function isExactManuscriptCreateStatement(classification, args) {
+  if (
+    classification.kind !== 'insert'
+    || classification.command !== 'insert'
+    || classification.target !== 'chapters'
+    || classification.statementPrefix.trim() !== ''
+    || !exactManuscriptCreateSql.test(classification.sql)
+    || !Array.isArray(classification.columnNames)
+    || classification.columnNames.length !== exactManuscriptCreateColumns.length
+    || !classification.columnNames.every(
+      (column, index) => column === exactManuscriptCreateColumns[index],
+    )
+    || !Array.isArray(classification.values)
+    || classification.values.length !== exactManuscriptCreateColumns.length
+    || !Array.isArray(args)
+    || args.length !== 11
+    || !/^;?$/.test(classification.valuesTail.trim())
+  ) {
+    return false;
+  }
+  const placeholderIndexes = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11]);
+  for (let index = 0; index < classification.values.length; index += 1) {
+    const value = classification.values[index].trim();
+    if (placeholderIndexes.has(index)) {
+      if (value !== '?') return false;
+    } else if (index === 6) {
+      if (value !== '') return false;
+    } else if (!/^datetime\s*\(\s*\)$/.test(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validateManuscriptSqlScope(scope, classification, args) {
+  if (scope.operation === 'create') {
+    return isExactManuscriptCreateStatement(classification, args)
+      && positionalValueForInsertColumn(classification, args, 'volume_id') === scope.volumeId
+      && positionalValueForInsertColumn(classification, args, 'num') === scope.chapterNumber;
+  }
+  if (classification.kind !== 'update' || !Array.isArray(args)) return false;
+  const where = /\bwhere\b([\s\S]*)$/.exec(classification.masked);
+  if (!where) return false;
+  const exactTargetPredicate = new RegExp(
+    `^\\s*(?:[a-z_$][\\w$]*\\s*\\.\\s*)?id\\s*=\\s*\\?`
+      + `(?:\\s+and\\s+(?:data_version\\s*=\\s*\\?`
+      + `|coalesce\\s*\\(\\s*content\\s*,\\s*\\)\\s*=\\s*\\?))*\\s*;?\\s*$`,
+  );
+  if (!exactTargetPredicate.test(where[1])) return false;
+  const placeholderIndex = (
+    classification.masked.slice(0, where.index).match(/\?/g) || []
+  ).length;
+  return args[placeholderIndex] === scope.chapterId;
+}
+
+function validateManuscriptSqlAuthorization(authorization, classification, args) {
+  const active = projectTransactionOwners.get(authorization.active.connection);
+  const store = storesByWrapper.get(authorization.active.connection);
+  if (
+    active !== authorization.active
+    || !store
+    || store.connectionEpoch !== authorization.connectionEpoch
+  ) {
+    return false;
+  }
+  return validateManuscriptSqlScope(authorization.scope, classification, args);
+}
+
+function assertManuscriptBodySqlAllowed(wrapper, sql, args) {
+  const classification = classifyChapterBodyMutation(sql);
+  const pendingAuthorization = manuscriptSqlAuthorizations.get(wrapper);
+  if (!classification) {
+    if (pendingAuthorization) {
+      manuscriptSqlAuthorizations.delete(wrapper);
+      throw manuscriptServiceRequired();
+    }
+    return;
+  }
+  if (isOfflineSeedBootstrapActive() || isTestManuscriptBootstrapActive()) return;
+  const exactLegacyMigrationTokens = [
+    'UPDATE', 'chapters', 'SET', 'content', '=', "''", 'WHERE', 'content', 'IS', 'NULL',
+  ];
+  const actualTokens = sql.trim().split(/\s+/);
+  if (
+    projectMigrationBodyWrites.has(wrapper)
+    && actualTokens.length === exactLegacyMigrationTokens.length
+    && actualTokens.every((token, index) => token === exactLegacyMigrationTokens[index])
+  ) {
+    return;
+  }
+
+  const authorization = pendingAuthorization;
+  manuscriptSqlAuthorizations.delete(wrapper);
+  if (!authorization || !validateManuscriptSqlAuthorization(authorization, classification, args)) {
+    throw manuscriptServiceRequired();
+  }
+}
+
 /**
  * Wrap a raw sql.js Database instance so it quacks like better-sqlite3.
  * Supports: .pragma(), .prepare(sql).{all,get,run}(), .exec(), .run(), .transaction(), .flush(), .close()
  *
  * IMPORTANT: Each .run()/.all()/.get() creates its own fresh prepared statement
- * because sql.js's db.export() (called by _flushDb) invalidates ALL existing statements.
- * The statement is freed before _flushDb() so export() never hits a stale handle.
+ * because sql.js's db.export() (called by AtomicStore.publish) invalidates ALL existing statements.
+ * The statement is freed before publishing so export() never hits a stale handle.
  */
 const DB_FLUSH_DELAY = 250; // ms — batch writes up to this interval
 
-function _wrapDb(db, filePath) {
+function _wrapDb(store, filePath, { writeCoordinator = null } = {}) {
   let dirty = false;
   let flushTimer = null;
+  let flushFailure = null;
+  let mutationSavepointSequence = 0;
+  let transactionDepth = 0;
 
-  function _flushSync() {
+  function assertWrapperAvailable() {
+    if (flushFailure) throw flushFailure;
+  }
+
+  function captureFlushFailure(error) {
+    if (!flushFailure) flushFailure = error;
+    try {
+      store.fence();
+    } catch (fenceError) {
+      attachSecondaryError(flushFailure, 'storageFenceError', fenceError);
+    }
+    return flushFailure;
+  }
+
+  function _flushSync(expectedEpoch = null, captureAsyncFailure = false) {
+    assertWrapperAvailable();
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     if (!dirty) return;
-    dirty = false;
-    _flushDb(db, filePath);
+    try {
+      if (expectedEpoch !== null) store.assertEpoch(expectedEpoch);
+      store.publish(store.currentConnection());
+      dirty = false;
+    } catch (error) {
+      if (captureAsyncFailure) throw captureFlushFailure(error);
+      throw error;
+    }
   }
 
   function _scheduleFlush() {
+    assertWrapperAvailable();
     dirty = true;
     if (!flushTimer) {
+      const scheduledEpoch = store.connectionEpoch;
       flushTimer = setTimeout(() => {
         flushTimer = null;
-        _flushSync();
+        try {
+          _flushSync(scheduledEpoch, true);
+        } catch {
+          // The first persistence error is retained on the wrapper. Timer
+          // callbacks never throw outside the request that scheduled them.
+        }
       }, DB_FLUSH_DELAY);
     }
   }
 
-  return {
-    _db: db,
+  function runMutationAction(action, { useSavepoint = true } = {}) {
+    assertWrapperAvailable();
+    if (!useSavepoint) return action();
+    const db = store.currentConnection();
+    const dirtyBefore = dirty;
+    const savepointName = `__mythpen_mutation_${++mutationSavepointSequence}`;
+    db.run(`SAVEPOINT ${savepointName}`);
+    try {
+      const result = action();
+      db.run(`RELEASE SAVEPOINT ${savepointName}`);
+      return result;
+    } catch (error) {
+      let rollbackSucceeded = false;
+      let cleanupFailed = false;
+      try {
+        db.run(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+        rollbackSucceeded = true;
+      } catch (rollbackError) {
+        cleanupFailed = true;
+        attachSecondaryError(error, 'mutationRollbackError', rollbackError);
+      }
+      if (rollbackSucceeded) {
+        try {
+          db.run(`RELEASE SAVEPOINT ${savepointName}`);
+        } catch (releaseError) {
+          cleanupFailed = true;
+          attachSecondaryError(error, 'mutationSavepointReleaseError', releaseError);
+        }
+      }
+      dirty = dirtyBefore;
+      if (cleanupFailed) captureFlushFailure(error);
+      throw error;
+    }
+  }
+
+  function runMutation(action, { flushImmediately = false, useSavepoint = true } = {}) {
+    assertWrapperAvailable();
+    if (!writeCoordinator) {
+      const result = runMutationAction(() => action(null), { useSavepoint });
+      if (flushImmediately) {
+        dirty = true;
+        _flushSync();
+      } else {
+        _scheduleFlush();
+      }
+      return result;
+    }
+
+    return writeCoordinator.withProjectWriteSync(filePath, (writeContext) => {
+      assertWrapperAvailable();
+      const result = runMutationAction(() => action(writeContext), { useSavepoint });
+      dirty = true;
+      if (!writeContext.reentrant) _flushSync();
+      return result;
+    });
+  }
+
+  function executePrepared(sql, params, { firstOnly = false } = {}) {
+    assertWrapperAvailable();
+    const action = () => {
+      assertWrapperAvailable();
+      const db = store.currentConnection();
+      const { sql: sql2, args } = _buildSql(sql, _normalizeParams(params));
+      assertManuscriptBodySqlAllowed(wrapper, sql2, args);
+      const statement = db.prepare(sql2);
+      try {
+        if (args) statement.bind(args);
+        if (firstOnly) return statement.step() ? statement.getAsObject() : null;
+        const rows = [];
+        while (statement.step()) rows.push(statement.getAsObject());
+        return rows;
+      } finally {
+        statement.free();
+      }
+    };
+    return isSingleReadOnlyStatement(sql) ? action() : runMutation(action);
+  }
+
+  const wrapper = {
+    get _failure() {
+      return flushFailure;
+    },
     _path: filePath,
 
     pragma(sql) {
-      db.run('PRAGMA ' + sql);
+      assertWrapperAvailable();
+      assertNoTransactionControl(`PRAGMA ${sql}`);
+      return runMutation(() => {
+        assertWrapperAvailable();
+        const db = store.currentConnection();
+        return db.run('PRAGMA ' + sql);
+      });
     },
 
     prepare(sql) {
+      assertWrapperAvailable();
+      assertNoTransactionControl(sql);
       return {
         all(...params) {
-          const { sql: sql2, args } = _buildSql(sql, _normalizeParams(params));
-          const s = db.prepare(sql2);
-          if (args) s.bind(args);
-          const rows = [];
-          while (s.step()) rows.push(s.getAsObject());
-          s.free();
-          return rows;
+          return executePrepared(sql, params);
         },
         get(...params) {
-          const { sql: sql2, args } = _buildSql(sql, _normalizeParams(params));
-          const s = db.prepare(sql2);
-          if (args) s.bind(args);
-          let row = null;
-          if (s.step()) row = s.getAsObject();
-          s.free();
-          return row;
+          return executePrepared(sql, params, { firstOnly: true });
         },
         run(...params) {
-          const { sql: sql2, args } = _buildSql(sql, _normalizeParams(params));
-          const s = db.prepare(sql2);
-          if (args) s.bind(args);
-          s.step();
-          const changes = db.getRowsModified();
-          s.free();
-          _scheduleFlush();
-          return { changes };
+          return runMutation(() => {
+            assertWrapperAvailable();
+            const db = store.currentConnection();
+            const { sql: sql2, args } = _buildSql(sql, _normalizeParams(params));
+            assertManuscriptBodySqlAllowed(wrapper, sql2, args);
+            const statement = db.prepare(sql2);
+            try {
+              if (args) statement.bind(args);
+              statement.step();
+              return { changes: db.getRowsModified() };
+            } finally {
+              statement.free();
+            }
+          });
         },
       };
     },
 
     exec(sql) {
-      const results = db.exec(sql);
-      _scheduleFlush();
-      return results;
+      assertWrapperAvailable();
+      assertNoTransactionControl(sql);
+      if (isSingleReadOnlyStatement(sql)) {
+        assertWrapperAvailable();
+        return store.currentConnection().exec(sql);
+      }
+      return runMutation(() => {
+        assertWrapperAvailable();
+        const db = store.currentConnection();
+        assertManuscriptBodySqlAllowed(wrapper, sql, null);
+        return db.exec(sql);
+      });
     },
 
     run(sql, params) {
-      db.run(sql, params || []);
-      _scheduleFlush();
+      assertWrapperAvailable();
+      assertNoTransactionControl(sql);
+      return runMutation(() => {
+        assertWrapperAvailable();
+        const db = store.currentConnection();
+        assertManuscriptBodySqlAllowed(wrapper, sql, Array.isArray(params) ? params : []);
+        return db.run(sql, params || []);
+      });
     },
 
     transaction(fn) {
+      assertWrapperAvailable();
       return (...args) => {
-        db.run('BEGIN');
-        let result;
-        try {
-          result = fn(...args);
-          db.run('COMMIT');
-        } catch (e) {
-          try {
-            db.run('ROLLBACK');
-          } catch (rollbackError) {
-            attachSecondaryError(e, 'rollbackError', rollbackError);
-          }
-          throw e;
+        assertWrapperAvailable();
+        if (transactionDepth > 0) {
+          throw transactionBoundaryError(
+            'NESTED_TRANSACTION',
+            'Nested transactions are not supported by this database wrapper',
+          );
         }
-        // Keep persistence outside the transaction catch: once COMMIT succeeds,
-        // a flush failure must not trigger an invalid ROLLBACK that hides the
-        // original persistence error.
-        _flushSync(); // flush immediately after commit for data safety
-        return result;
+        const dirtyBefore = dirty;
+        let transactionCommitted = false;
+        try {
+          return runMutation((writeContext) => {
+            assertWrapperAvailable();
+            const db = store.currentConnection();
+            db.run('BEGIN');
+            transactionDepth += 1;
+            const transactionOwner = writeContext
+              ? Object.freeze({
+                connection: wrapper,
+                connectionEpoch: store.connectionEpoch,
+                coordinatorOwnershipToken: writeContext.ownershipToken,
+                filePath,
+                writeContext,
+              })
+              : null;
+            if (transactionOwner) projectTransactionOwners.set(wrapper, transactionOwner);
+            let result;
+            try {
+              result = fn(...args);
+              assertWrapperAvailable();
+              if (isThenable(result)) {
+                void Promise.resolve(result).catch(() => {});
+                throw transactionBoundaryError(
+                  'ASYNC_TRANSACTION_CALLBACK',
+                  'Transaction callbacks must be synchronous',
+                );
+              }
+              db.run('COMMIT');
+              transactionCommitted = true;
+            } catch (e) {
+              try {
+                db.run('ROLLBACK');
+              } catch (rollbackError) {
+                attachSecondaryError(e, 'rollbackError', rollbackError);
+              }
+              throw e;
+            } finally {
+              if (transactionOwner && projectTransactionOwners.get(wrapper) === transactionOwner) {
+                projectTransactionOwners.delete(wrapper);
+              }
+              manuscriptSqlAuthorizations.delete(wrapper);
+              transactionDepth -= 1;
+            }
+            return result;
+          }, { flushImmediately: true, useSavepoint: false });
+        } catch (error) {
+          // A callback/COMMIT failure was rolled back and restores the prior
+          // dirty state. Once COMMIT succeeds, however, a publication failure
+          // must leave the live mutation dirty so the next lease owner can
+          // retry it (before prepared) or recover it (after prepared).
+          if (!transactionCommitted) dirty = dirtyBefore;
+          throw error;
+        }
       };
     },
 
     flush() {
-      _flushSync();
+      assertWrapperAvailable();
+      if (!dirty) return;
+      if (!writeCoordinator) {
+        _flushSync();
+        return;
+      }
+      return writeCoordinator.withProjectWriteSync(filePath, () => {
+        _flushSync();
+      });
     },
 
     close() {
+      let primaryError = null;
+      try {
+        if (dirty && writeCoordinator) {
+          writeCoordinator.withProjectWriteSync(filePath, () => _flushSync());
+        } else {
+          _flushSync();
+        }
+      } catch (error) {
+        primaryError = captureFlushFailure(error);
+      }
+      try {
+        store.close();
+      } catch (error) {
+        if (primaryError) {
+          attachSecondaryError(primaryError, 'storageCloseError', error);
+        } else {
+          primaryError = captureFlushFailure(error);
+        }
+      }
+      if (primaryError) throw primaryError;
+    },
+
+    _discard() {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      dirty = false;
+      flushFailure = null;
+      store.close();
+    },
+
+    _fenceForLeaseLoss(error) {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      return captureFlushFailure(error);
+    },
+
+    _flushInProjectWrite() {
+      assertWrapperAvailable();
+      if (!writeCoordinator) throw new Error('Project write flush is unavailable for the config database');
+      writeCoordinator.assertProjectWriteLease(filePath);
       _flushSync();
-      db.close();
+    },
+
+    _settleManuscriptPublicationFailureInProjectWrite(error) {
+      if (!writeCoordinator) throw new Error('Manuscript failure settlement is unavailable for the config database');
+      writeCoordinator.assertProjectWriteLease(filePath);
+      if (store.recoveryRequired) {
+        captureFlushFailure(error);
+        return;
+      }
+      try {
+        store.recover({ preserveLiveChanges: false });
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        dirty = false;
+        flushFailure = null;
+      } catch (discardError) {
+        attachSecondaryError(error, 'manuscriptDiscardError', discardError);
+        captureFlushFailure(error);
+      }
+    },
+
+    _recoverForProjectWrite() {
+      assertWrapperAvailable();
+      const recovered = store.recover({
+        preserveLiveChanges: Boolean(dirty || flushTimer),
+      });
+      if (recovered.status === 'live-preserved') return recovered;
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      dirty = false;
+      return recovered;
     },
   };
+  storesByWrapper.set(wrapper, store);
+  return registerDatabaseInternals(wrapper, { store });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -242,8 +1057,10 @@ function _wrapDb(db, filePath) {
 // ═══════════════════════════════════════════════════════════════
 
 async function initDatabase() {
+  databaseInitializationStarted = true;
+  const { dataDir, configDbPath } = getStoragePaths();
   console.log('[DB] Initialising database...');
-  console.log('[DB] DB_DIR:', DB_DIR, '| CONFIG_DB:', CONFIG_DB);
+  console.log('[DB] DB_DIR:', dataDir, '| CONFIG_DB:', configDbPath);
   const t0 = Date.now();
 
   // ─── Load sql.js library ───
@@ -307,7 +1124,22 @@ async function initDatabase() {
 
   // ─── Open / create config database ───
   console.log('[DB] Opening config database...');
-  configDb = _openConfig();
+  configLifecycleLease = acquireConfigLifecycleLease(configDbPath);
+  try {
+    configDb = _openConfig(configLifecycleLease);
+  } catch (error) {
+    if (error.storageUncertainConnection) {
+      enterStorageFailure(error, [error.storageUncertainConnection]);
+      throw error;
+    }
+    try {
+      releaseConfigLifecycleLease();
+    } catch (releaseError) {
+      attachSecondaryError(error, 'configLeaseReleaseError', releaseError);
+      enterStorageFailure(error);
+    }
+    throw error;
+  }
   console.log('[DB] Config database ready, schema version:', CONFIG_SCHEMA_VERSION);
 
   const t1 = Date.now();
@@ -315,13 +1147,29 @@ async function initDatabase() {
   return true;
 }
 
-function _openConfig() {
-  const db = _loadDb(CONFIG_DB);
-  db.run('PRAGMA foreign_keys = ON');
-  const wrapped = _wrapDb(db, CONFIG_DB);
-  migrateConfig(wrapped);
-  repairRecentProjectPaths(wrapped, PROJECTS_DIR);
-  return wrapped;
+function _openConfig(lease) {
+  if (!lease) throw new Error('ConfigLifecycleLease is required before opening config.db');
+  lease.assertHeld();
+  const { configDbPath, projectsDir } = getStoragePaths();
+  const store = _createAtomicStore(configDbPath, {
+    assertWriterLease: () => lease.assertHeld(),
+  });
+  const wrapped = _wrapDb(store, configDbPath);
+  try {
+    const db = store.currentConnection();
+    db.run('PRAGMA foreign_keys = ON');
+    migrateConfig(wrapped);
+    repairRecentProjectPaths(wrapped, projectsDir);
+    return wrapped;
+  } catch (error) {
+    try {
+      wrapped._discard();
+    } catch (cleanupError) {
+      attachSecondaryError(error, 'storageOpenCleanupError', cleanupError);
+      attachSecondaryError(error, 'storageUncertainConnection', wrapped);
+    }
+    throw error;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -329,6 +1177,7 @@ function _openConfig() {
 // ═══════════════════════════════════════════════════════════════
 
 function getConfigDb() {
+  assertStorageAvailable();
   if (!configDb) throw new Error('Database not initialised – call initDatabase() first');
   return configDb;
 }
@@ -399,7 +1248,12 @@ const configMigrations = [
 
 function makeVersionGetter(tableName) {
   return (db) => {
-    db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    const exists = db
+      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(tableName);
+    if (!exists) {
+      db.exec(`CREATE TABLE ${tableName} (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    }
     try {
       const row = db.prepare(`SELECT value FROM ${tableName} WHERE key = 'schema_version'`).get();
       return row ? parseInt(row.value, 10) || 0 : 0;
@@ -425,7 +1279,102 @@ function migrateConfig(db) {
 // ═══════════════════════════════════════════════════════════════
 
 const projectConnections = new Map();
+const projectOpenStates = new Map();
+const projectOpenStatesByLogicalPath = new Map();
+let recoveryDiagnosticsPlatformCapabilities = Object.freeze({
+  backend: process.platform === 'win32' ? 'win32' : 'posix',
+  exclusiveLease: null,
+  directoryFsync: null,
+  atomicReplace: null,
+  verifiedAbsentInstall: null,
+});
 const projectInstanceContext = new AsyncLocalStorage();
+const projectWriteCoordinator = createProjectWriteCoordinator({
+  canonicalizeProjectKey: canonicalDbPath,
+  lockRoot: () => path.join(getStoragePaths().dataDir, 'locks'),
+  onLeaseLost(canonicalProjectPath, error) {
+    projectConnections.get(canonicalProjectPath)?._fenceForLeaseLoss(error);
+  },
+  recoverProject(canonicalProjectPath) {
+    projectConnections.get(canonicalProjectPath)?._recoverForProjectWrite();
+  },
+});
+const projectWriteLifecycle = Object.freeze({
+  get admissionState() {
+    return projectWriteCoordinator.admissionState;
+  },
+  beginQuiesce: () => projectWriteCoordinator.beginQuiesce(),
+  cancelQuiesce: (quiesce) => projectWriteCoordinator.cancelQuiesce(quiesce),
+  drain: (quiesce) => projectWriteCoordinator.drain(quiesce),
+});
+registerProjectWriteDiagnostics(Object.freeze({
+  leaseAcquisitionCount: (projectPath) => projectWriteCoordinator.leaseAcquisitionCount(projectPath),
+}));
+
+function logicalProjectStateKey(filePath) {
+  const resolved = path.normalize(path.resolve(filePath));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function projectStateRecord(openState, reasonCode = null, recommendedAction = null) {
+  return Object.freeze({ openState, reasonCode, recommendedAction });
+}
+
+function setProjectOpenState(filePath, record) {
+  const normalized = projectStateRecord(
+    record.openState,
+    record.reasonCode ?? null,
+    record.recommendedAction ?? null,
+  );
+  const logicalKey = logicalProjectStateKey(filePath);
+  let canonicalKey = logicalKey;
+  try {
+    canonicalKey = canonicalDbPath(filePath);
+  } catch {
+    // Unsafe/unreadable projects still need a stable no-reopen record keyed by
+    // their exact registered path. The inspector remains responsible for not
+    // following that path outside the controlled project leaf.
+  }
+  projectOpenStates.set(canonicalKey, normalized);
+  projectOpenStatesByLogicalPath.set(logicalKey, normalized);
+  return normalized;
+}
+
+function getProjectOpenState(filePath) {
+  return projectOpenStatesByLogicalPath.get(logicalProjectStateKey(filePath)) || null;
+}
+
+function removeProjectOpenState(filePath) {
+  const logicalKey = logicalProjectStateKey(filePath);
+  let canonicalKey = logicalKey;
+  try {
+    canonicalKey = canonicalDbPath(filePath);
+  } catch {
+    canonicalKey = logicalKey;
+  }
+  projectOpenStates.delete(canonicalKey);
+  projectOpenStatesByLogicalPath.delete(logicalKey);
+}
+
+function recordProjectOpenFailure(filePath, error) {
+  const reasonCode = typeof error?.code === 'string' ? error.code : 'RECOVERY_REQUIRED';
+  const recommendedAction = reasonCode.startsWith('V1_PUBLICATION_')
+    ? 'recover_v1_publication'
+    : null;
+  return setProjectOpenState(filePath, {
+    openState: 'isolated',
+    reasonCode,
+    recommendedAction,
+  });
+}
+
+function isolatedProjectError(name, record) {
+  const error = new Error(`Project ${name} is isolated and cannot be opened safely`);
+  error.code = record.reasonCode || 'RECOVERY_REQUIRED';
+  error.status = 409;
+  error.recoverable = true;
+  return error;
+}
 
 function projectInstanceMismatchError(name) {
   const error = new Error(`项目"${name}"已被删除并重建，请刷新后重试`);
@@ -455,39 +1404,597 @@ function runWithProjectInstance(name, expectedInstanceId, callback) {
 }
 
 function getProjectDbPath(name) {
-  return path.join(PROJECTS_DIR, `${name}.mythpen.db`);
+  return path.join(getStoragePaths().projectsDir, `${name}.mythpen.db`);
+}
+
+function _createProjectConnection(filePath, options) {
+  const pathState = assertControlledProjectDatabasePath(filePath, {
+    allowMissing: options?.explicitCreate === true,
+  });
+  if (pathState.exists) assertMythpenProjectIdentity(pathState.filePath);
+  if (pathState.exists) {
+    const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
+    const controlDirectory = path.join(getStoragePaths().dataDir, 'control', 'sqlite', dbKey);
+    const controlStore = openControlStore(controlDirectory);
+    const evidence = inspectControlStoreEvidence(controlDirectory).events;
+    const prepared = evidence.some((event) => event.type === 'sqlite.native.activation.prepared');
+    const activated = evidence.some((event) => event.type === 'sqlite.native.activation.activated');
+    if (activated) {
+      if (!nativeActivationController) {
+        const error = new Error('Native project activation is disabled in this build');
+        error.code = 'NATIVE_ACTIVATION_DISABLED';
+        throw error;
+      }
+      const nativeStore = nativeActivationController.activate({
+        assertConfigLifecycleLease: () => configLifecycleLease.assertHeld(),
+        assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(filePath),
+        controlDirectory,
+        controlStore,
+        databasePath: filePath,
+        dbKey,
+        sqlModule: SQL,
+      });
+      return createNativeDbAdapter({
+        controlStore,
+        coordinator: projectWriteCoordinator,
+        databasePath: filePath,
+        nativeStore,
+        validateManuscriptSqlScope,
+      });
+    }
+    if (prepared) {
+      const error = new Error('Project has an unfinished native activation');
+      error.code = 'RECOVERY_REQUIRED';
+      throw error;
+    }
+  }
+  const store = _createAtomicStore(filePath, {
+    ...options,
+    assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(filePath),
+  });
+  const wrapped = _wrapDb(store, filePath, { writeCoordinator: projectWriteCoordinator });
+  try {
+    const db = store.currentConnection();
+    db.run('PRAGMA foreign_keys = ON');
+    migrateProject(wrapped);
+    wrapped._flushInProjectWrite();
+    return wrapped;
+  } catch (error) {
+    try {
+      wrapped._discard();
+    } catch (cleanupError) {
+      attachSecondaryError(error, 'storageOpenCleanupError', cleanupError);
+      attachSecondaryError(error, 'storageUncertainConnection', wrapped);
+    }
+    throw error;
+  }
 }
 
 function openProjectDb(filePath) {
-  if (projectConnections.has(filePath)) {
-    return projectConnections.get(filePath);
+  assertStorageAvailable();
+  const existing = pathExistsStrict(filePath);
+  const openState = getProjectOpenState(filePath);
+  if (existing && openState?.openState === 'isolated') {
+    throw isolatedProjectError(path.basename(filePath, PROJECT_DATABASE_SUFFIX), openState);
   }
-  const db = _loadDb(filePath);
-  db.run('PRAGMA foreign_keys = ON');
-  const wrapped = _wrapDb(db, filePath);
-  migrateProject(wrapped);
-  projectConnections.set(filePath, wrapped);
-  return wrapped;
+  const pathState = assertControlledProjectDatabasePath(filePath, { allowMissing: !existing });
+  if (pathState.exists) assertMythpenProjectIdentity(pathState.filePath);
+  const cacheKey = canonicalDbPath(filePath);
+  if (projectConnections.has(cacheKey)) {
+    return projectConnections.get(cacheKey);
+  }
+  return projectWriteCoordinator.withProjectWriteSync(filePath, () => {
+    if (projectConnections.has(cacheKey)) return projectConnections.get(cacheKey);
+    const wrapped = _createProjectConnection(filePath, {
+      explicitCreate: !pathExistsStrict(filePath),
+    });
+    projectConnections.set(cacheKey, wrapped);
+    return wrapped;
+  });
 }
 
 function closeProjectDb(filePath) {
-  if (projectConnections.has(filePath)) {
-    projectConnections.get(filePath).close();
-    projectConnections.delete(filePath);
+  const cacheKey = canonicalDbPath(filePath);
+  if (projectConnections.has(cacheKey)) {
+    projectConnections.get(cacheKey).close();
+    projectConnections.delete(cacheKey);
   }
 }
 
+async function enableNativeProject(name) {
+  if (!nativeActivationController) {
+    const error = new Error('Native project activation is disabled in this build');
+    error.code = 'NATIVE_ACTIVATION_DISABLED';
+    throw error;
+  }
+  if (typeof name !== 'string' || name.length === 0) {
+    const error = new Error('Project name is required');
+    error.code = 'INVALID_PARAMS';
+    throw error;
+  }
+  const registered = getConfigDb()
+    .prepare('SELECT name, file_path FROM recent_projects WHERE name = ?')
+    .get(name);
+  const filePath = getProjectDbPath(name);
+  if (!registered || canonicalDbPath(registered.file_path) !== canonicalDbPath(filePath)) {
+    const error = new Error(`Project ${name} is not registered`);
+    error.code = 'PROJECT_NOT_FOUND';
+    throw error;
+  }
+
+  const cacheKey = canonicalDbPath(filePath);
+  configLifecycleLease.assertHeld();
+  return projectWriteCoordinator.withProjectWriteSync(filePath, (writeContext) => {
+    writeContext.assertLease();
+    configLifecycleLease.assertHeld();
+    let cached = projectConnections.get(cacheKey) || null;
+    if (cached?.runManuscriptTransaction) {
+      return Object.freeze({
+        activated: false,
+        backend: 'native',
+        name,
+        schemaVersion: 11,
+      });
+    }
+
+    if (!cached) {
+      cached = _createProjectConnection(filePath, { explicitCreate: false });
+      projectConnections.set(cacheKey, cached);
+    }
+    const schemaVersion = getProjectVersion(cached);
+    if (schemaVersion !== PROJECT_SCHEMA_VERSION) {
+      const error = new Error(`Project ${name} is not an exact schema-${PROJECT_SCHEMA_VERSION} activation source`);
+      error.code = schemaVersion > PROJECT_SCHEMA_VERSION
+        ? 'PROJECT_SCHEMA_TOO_NEW'
+        : 'RECOVERY_REQUIRED';
+      throw error;
+    }
+
+    try {
+      cached._flushInProjectWrite();
+      cached.close();
+      projectConnections.delete(cacheKey);
+    } catch (error) {
+      projectConnections.delete(cacheKey);
+      recordProjectOpenFailure(filePath, error);
+      throw error;
+    }
+
+    const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
+    const controlDirectory = path.join(getStoragePaths().dataDir, 'control', 'sqlite', dbKey);
+    let controlStore;
+    try {
+      controlStore = openControlStore(controlDirectory);
+      const nativeStore = nativeActivationController.activate({
+        assertConfigLifecycleLease: () => configLifecycleLease.assertHeld(),
+        assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(filePath),
+        controlDirectory,
+        controlStore,
+        databasePath: filePath,
+        dbKey,
+        sqlModule: SQL,
+      });
+      const adapter = createNativeDbAdapter({
+        controlStore,
+        coordinator: projectWriteCoordinator,
+        databasePath: filePath,
+        nativeStore,
+        validateManuscriptSqlScope,
+      });
+      projectConnections.set(cacheKey, adapter);
+      setProjectOpenState(filePath, { openState: 'ready' });
+      return Object.freeze({
+        activated: true,
+        backend: 'native',
+        name,
+        schemaVersion: 11,
+      });
+    } catch (error) {
+      let nativeEvidence = true;
+      try {
+        nativeEvidence = inspectControlStoreEvidence(controlDirectory).events.some((event) => (
+          event.type === 'sqlite.native.activation.prepared'
+          || event.type === 'sqlite.native.activation.activated'
+        ));
+      } catch (inspectionError) {
+        attachSecondaryError(error, 'nativeEvidenceInspectionError', inspectionError);
+      }
+      if (nativeEvidence) recordProjectOpenFailure(filePath, error);
+      else {
+        try {
+          const restored = _createProjectConnection(filePath, { explicitCreate: false });
+          projectConnections.set(cacheKey, restored);
+        } catch (restoreError) {
+          attachSecondaryError(error, 'nativeActivationRestoreError', restoreError);
+          recordProjectOpenFailure(filePath, error);
+        }
+      }
+      throw error;
+    }
+  });
+}
+
+function startupRecoveryError(code, message, options) {
+  const error = new Error(message, options);
+  error.code = code;
+  return error;
+}
+
+const PROJECT_DATABASE_SUFFIX = '.mythpen.db';
+
+function projectDatabaseError(code, message, options) {
+  const error = new Error(message, options);
+  error.code = code;
+  return error;
+}
+
+function controlledPathCode(startup, suffix) {
+  return startup ? `STARTUP_RECOVERY_${suffix}` : `PROJECT_DATABASE_${suffix}`;
+}
+
+function assertControlledProjectDatabasePath(filePath, {
+  allowMissing = false,
+  startup = false,
+} = {}) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    throw projectDatabaseError(
+      controlledPathCode(startup, 'INVALID_PATH'),
+      'A project database path must be a non-empty string',
+    );
+  }
+  const exactPath = path.resolve(filePath);
+  const projectsDirectory = canonicalDbPath(getStoragePaths().projectsDir);
+  const physicalParent = canonicalDbPath(path.dirname(exactPath));
+  const baseName = path.basename(exactPath);
+  if (
+    physicalParent !== projectsDirectory
+    || baseName.startsWith('.')
+    || !baseName.toLowerCase().endsWith(PROJECT_DATABASE_SUFFIX)
+    || baseName.length === PROJECT_DATABASE_SUFFIX.length
+  ) {
+    throw projectDatabaseError(
+      controlledPathCode(startup, 'UNCONTROLLED_PATH'),
+      `Project database is outside the controlled projects leaf: ${exactPath}`,
+    );
+  }
+
+  let stats;
+  try {
+    stats = fs.lstatSync(exactPath, { bigint: true });
+  } catch (cause) {
+    if (cause?.code === 'ENOENT' && allowMissing) return { exists: false, filePath: exactPath };
+    throw projectDatabaseError(
+      controlledPathCode(startup, 'PATH_UNREADABLE'),
+      `Cannot inspect project database ${exactPath}`,
+      { cause },
+    );
+  }
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1n) {
+    throw projectDatabaseError(
+      controlledPathCode(startup, 'UNSAFE_PATH'),
+      `Project database is not a single-link plain file: ${exactPath}`,
+    );
+  }
+  return { exists: true, filePath: exactPath };
+}
+
+function assertMythpenProjectIdentity(filePath, { startup = false } = {}) {
+  try {
+    let bytes;
+    try {
+      bytes = fs.readFileSync(filePath);
+    } catch (cause) {
+      throw projectDatabaseError(
+        startup ? 'STARTUP_RECOVERY_PATH_UNREADABLE' : 'RECOVERY_REQUIRED',
+        `Project database cannot be read for identity preflight: ${filePath}`,
+        { cause },
+      );
+    }
+    const inspection = inspectProjectDatabaseBytes(SQL, bytes);
+    if (!inspection.isProject) {
+      throw projectDatabaseError(
+        startup ? 'STARTUP_RECOVERY_NOT_PROJECT' : 'PROJECT_DATABASE_NOT_PROJECT',
+        `SQLite file is not an identified Mythpen project database: ${filePath}`,
+      );
+    }
+    let admittedActivatedSchema = false;
+    if (
+      !startup
+      && inspection.schema === 11
+      && nativeActivationController
+    ) {
+      const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
+      const controlDirectory = path.join(getStoragePaths().dataDir, 'control', 'sqlite', dbKey);
+      try {
+        const { assertActivatedNativeEvidence } = require('./native/native-activation');
+        assertActivatedNativeEvidence({ controlDirectory, dbKey });
+        admittedActivatedSchema = true;
+      } catch {
+        admittedActivatedSchema = false;
+      }
+    }
+    if (inspection.schema > PROJECT_SCHEMA_VERSION && !admittedActivatedSchema) {
+      throw projectDatabaseError(
+        'PROJECT_SCHEMA_TOO_NEW',
+        `Project database schema is newer than this build supports: ${filePath}`,
+      );
+    }
+  } catch (cause) {
+    if (
+      cause?.code === 'STARTUP_RECOVERY_NOT_PROJECT'
+      || cause?.code === 'STARTUP_RECOVERY_PATH_UNREADABLE'
+      || cause?.code === 'PROJECT_DATABASE_NOT_PROJECT'
+      || cause?.code === 'PROJECT_SCHEMA_TOO_NEW'
+      || cause?.code === 'RECOVERY_REQUIRED'
+    ) {
+      throw cause;
+    } else {
+      throw projectDatabaseError(
+        startup ? 'STARTUP_RECOVERY_NOT_PROJECT' : 'PROJECT_DATABASE_NOT_PROJECT',
+        `SQLite file cannot be identified as a Mythpen project database: ${filePath}`,
+        { cause },
+      );
+    }
+  }
+}
+
+function recoveryControlDirectory(filePath) {
+  const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
+  return path.join(getStoragePaths().dataDir, 'control', 'sqlite', dbKey);
+}
+
+function lookupRegisteredProject(name) {
+  assertStorageAvailable();
+  if (typeof name !== 'string' || name.length === 0) return null;
+  const rows = getConfigDb()
+    .prepare('SELECT name, file_path FROM recent_projects WHERE name = ? ORDER BY id')
+    .all(name);
+  if (rows.length !== 1) return null;
+  const row = rows[0];
+  if (row.name !== name || typeof row.file_path !== 'string' || row.file_path.length === 0) {
+    return null;
+  }
+  const pathState = assertControlledProjectDatabasePath(row.file_path, { allowMissing: true });
+  return { name, filePath: pathState.filePath };
+}
+
+function getRegisteredProjectDatabaseSha256(name) {
+  const registered = lookupRegisteredProject(name);
+  if (!registered) {
+    const error = new Error(`Registered project not found: ${name}`);
+    error.code = 'PROJECT_NOT_FOUND';
+    throw error;
+  }
+  const pathState = assertControlledProjectDatabasePath(registered.filePath);
+  return createHash('sha256').update(fs.readFileSync(pathState.filePath)).digest('hex');
+}
+
+function recoverV1Publication({ filePath }) {
+  const cacheKey = canonicalDbPath(filePath);
+  const cached = projectConnections.get(cacheKey);
+  if (cached) return cached._recoverForProjectWrite();
+  const controlStore = openControlStore(recoveryControlDirectory(filePath));
+  const store = createAtomicStore({
+    assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(filePath),
+    filePath,
+    controlStore,
+    sqlModule: SQL,
+  });
+  try {
+    return store.recover();
+  } finally {
+    store.close();
+  }
+}
+
+function recoveryDiagnosticsDependencies() {
+  return {
+    canonicalizeProjectPath: canonicalDbPath,
+    getControlDirectory: recoveryControlDirectory,
+    lookupRegisteredProject,
+    platformCapabilities: recoveryDiagnosticsPlatformCapabilities,
+    recoverV1Publication,
+    sqlModule: SQL,
+    supportedSchemaVersion: PROJECT_SCHEMA_VERSION,
+    withProjectRecoveryLease: (filePath, callback) => (
+      projectWriteCoordinator.withProjectRecoveryLeaseSync(filePath, callback)
+    ),
+  };
+}
+
+function configureRecoveryDiagnosticsCapabilities(capabilities) {
+  if (!capabilities || typeof capabilities !== 'object') return;
+  recoveryDiagnosticsPlatformCapabilities = Object.freeze({
+    backend: capabilities.backend ?? recoveryDiagnosticsPlatformCapabilities.backend,
+    exclusiveLease: capabilities.exclusiveLease ?? null,
+    directoryFsync: capabilities.directoryFsync ?? null,
+    atomicReplace: capabilities.atomicReplace ?? null,
+    verifiedAbsentInstall: capabilities.verifiedAbsentInstall ?? null,
+  });
+}
+
+function inspectRegisteredProject(name) {
+  const diagnostics = inspectRegisteredProjectWithDependencies(
+    name,
+    recoveryDiagnosticsDependencies(),
+  );
+  const registered = lookupRegisteredProject(name);
+  if (registered) {
+    setProjectOpenState(registered.filePath, {
+      openState: diagnostics.state === 'ready' ? 'ready' : 'isolated',
+      reasonCode: diagnostics.reasonCode,
+      recommendedAction: diagnostics.recommendedAction,
+    });
+  }
+  return diagnostics;
+}
+
+function recoverRegisteredProject(name, request) {
+  const diagnostics = recoverRegisteredProjectWithDependencies(
+    name,
+    request,
+    recoveryDiagnosticsDependencies(),
+  );
+  const registered = lookupRegisteredProject(name);
+  if (registered) {
+    setProjectOpenState(registered.filePath, {
+      openState: 'ready',
+      reasonCode: null,
+      recommendedAction: null,
+    });
+  }
+  return diagnostics;
+}
+
+function inspectProjectDatabasesAtStartup({ maxProjects = STARTUP_RECOVERY_MAX_PROJECTS } = {}) {
+  assertStorageAvailable();
+  if (!Number.isSafeInteger(maxProjects) || maxProjects < 0) {
+    throw new TypeError('maxProjects must be a non-negative safe integer');
+  }
+  const rowLimit = maxProjects === Number.MAX_SAFE_INTEGER ? -1 : maxProjects + 1;
+  const rows = getConfigDb()
+    .prepare('SELECT id, name, file_path FROM recent_projects ORDER BY file_path, id LIMIT ?')
+    .all(rowLimit);
+  if (rows.length > maxProjects) {
+    throw startupRecoveryError(
+      'STARTUP_RECOVERY_LIMIT',
+      `Startup inspection found more than ${maxProjects} registered projects`,
+    );
+  }
+
+  projectOpenStates.clear();
+  projectOpenStatesByLogicalPath.clear();
+  for (const row of rows) {
+    if (typeof row.file_path !== 'string' || row.file_path.length === 0) {
+      throw startupRecoveryError(
+        'STARTUP_RECOVERY_INVALID_PATH',
+        'A registered project has no exact database path',
+      );
+    }
+    try {
+      const controlDirectory = recoveryControlDirectory(row.file_path);
+      const nativeEvidence = inspectControlStoreEvidence(controlDirectory).events;
+      const hasPrepared = nativeEvidence.some((event) => (
+        event.type === 'sqlite.native.activation.prepared'
+      ));
+      const hasActivated = nativeEvidence.some((event) => (
+        event.type === 'sqlite.native.activation.activated'
+      ));
+      if (nativeActivationController && hasPrepared && hasActivated) {
+        projectWriteCoordinator.withProjectRecoveryLeaseSync(row.file_path, () => {
+          const connection = _createProjectConnection(row.file_path, { explicitCreate: false });
+          connection.close();
+        });
+        setProjectOpenState(row.file_path, {
+          openState: 'ready',
+          reasonCode: null,
+          recommendedAction: null,
+        });
+        continue;
+      }
+      if (hasPrepared || hasActivated) {
+        setProjectOpenState(row.file_path, {
+          openState: 'isolated',
+          reasonCode: 'RECOVERY_REQUIRED',
+          recommendedAction: null,
+        });
+        continue;
+      }
+      const diagnostics = inspectRegisteredProject(row.name);
+      setProjectOpenState(row.file_path, {
+        openState: diagnostics.state === 'ready' ? 'ready' : 'isolated',
+        reasonCode: diagnostics.reasonCode,
+        recommendedAction: diagnostics.recommendedAction,
+      });
+    } catch (error) {
+      recordProjectOpenFailure(row.file_path, error);
+    }
+  }
+  return projectOpenStates;
+}
+
+function collectStartupRecoveryPaths({ maxProjects = STARTUP_RECOVERY_MAX_PROJECTS } = {}) {
+  assertStorageAvailable();
+  if (!Number.isSafeInteger(maxProjects) || maxProjects < 0) {
+    throw new TypeError('maxProjects must be a non-negative safe integer');
+  }
+  const config = getConfigDb();
+  const rowLimit = maxProjects === Number.MAX_SAFE_INTEGER ? -1 : maxProjects + 1;
+  const rows = config
+    .prepare('SELECT file_path FROM recent_projects ORDER BY file_path, id LIMIT ?')
+    .all(rowLimit);
+  if (rows.length > maxProjects) {
+    throw startupRecoveryError(
+      'STARTUP_RECOVERY_LIMIT',
+      `Startup recovery found more than ${maxProjects} registered projects`,
+    );
+  }
+  const paths = new Set();
+  for (const row of rows) {
+    if (typeof row.file_path !== 'string' || row.file_path.length === 0) {
+      throw startupRecoveryError(
+        'STARTUP_RECOVERY_INVALID_PATH',
+        'A registered project has no exact database path',
+      );
+    }
+    const exactPath = path.resolve(row.file_path);
+    const pathState = assertControlledProjectDatabasePath(exactPath, {
+      allowMissing: true,
+      startup: true,
+    });
+    if (!pathState.exists) continue;
+    assertMythpenProjectIdentity(pathState.filePath, { startup: true });
+    paths.add(canonicalDbPath(pathState.filePath));
+  }
+  const ordered = [...paths].sort((left, right) => (
+    left < right ? -1 : left > right ? 1 : 0
+  ));
+  if (ordered.length > maxProjects) {
+    throw startupRecoveryError(
+      'STARTUP_RECOVERY_LIMIT',
+      `Startup recovery found ${ordered.length} registered projects; limit is ${maxProjects}`,
+    );
+  }
+  return ordered;
+}
+
+function recoverProjectDatabasesAtStartup(options) {
+  const projectPaths = collectStartupRecoveryPaths(options);
+  for (const projectPath of projectPaths) {
+    const cacheKey = canonicalDbPath(projectPath);
+    if (projectConnections.has(cacheKey)) {
+      projectWriteCoordinator.withProjectWriteSync(projectPath, () => {});
+      continue;
+    }
+    projectWriteCoordinator.withProjectWriteSync(projectPath, () => {
+      const wrapped = _createProjectConnection(projectPath, { explicitCreate: false });
+      wrapped.close();
+    });
+  }
+  return projectPaths;
+}
+
 function createProjectDb(name) {
-  return openProjectDb(getProjectDbPath(name));
+  const filePath = getProjectDbPath(name);
+  const projectDb = openProjectDb(filePath);
+  setProjectOpenState(filePath, {
+    openState: 'ready',
+    reasonCode: null,
+    recommendedAction: null,
+  });
+  return projectDb;
 }
 
 function getProjectDb(name) {
   const filePath = getProjectDbPath(name);
+  const openState = getProjectOpenState(filePath);
+  if (openState?.openState === 'isolated') throw isolatedProjectError(name, openState);
+  const cacheKey = canonicalDbPath(filePath);
   // A freshly created sql.js database is cached immediately but reaches disk
   // on its scheduled flush. That live connection is the intentional project
   // instance and must remain usable during this short window.
-  if (projectConnections.has(filePath)) {
-    const projectDb = projectConnections.get(filePath);
+  if (projectConnections.has(cacheKey)) {
+    const projectDb = projectConnections.get(cacheKey);
     const context = projectInstanceContext.getStore();
     if (context?.name === name) validateProjectInstance(projectDb, name, context.expectedInstanceId);
     return projectDb;
@@ -506,6 +2013,228 @@ function getProjectDb(name) {
   const context = projectInstanceContext.getStore();
   if (context?.name === name) validateProjectInstance(projectDb, name, context.expectedInstanceId);
   return projectDb;
+}
+
+function manuscriptTransactionRequired(message = 'An active owned project transaction is required') {
+  const error = new Error(message);
+  error.code = 'MANUSCRIPT_TRANSACTION_REQUIRED';
+  return error;
+}
+
+function hasExactKeys(value, keys) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function validateManuscriptSourceEvent(event) {
+  const payloadKeys = [
+    'bodyBytes',
+    'bodySha256',
+    'chapterId',
+    'chapterNumber',
+    'expectedBodySha256',
+    'expectedDataVersion',
+    'operation',
+    'source',
+    'version',
+    'volumeId',
+  ];
+  const nullablePositiveInteger = (value) => value === null || (Number.isSafeInteger(value) && value > 0);
+  const nullableHash = (value) => value === null || /^[0-9a-f]{64}$/.test(value);
+  if (
+    !hasExactKeys(event, ['payload', 'type'])
+    || event.type !== 'manuscript.body_mutation.attempt'
+    || !hasExactKeys(event.payload, payloadKeys)
+    || event.payload.version !== 1
+    || !new Set(['replace', 'append', 'create']).has(event.payload.operation)
+    || !new Set(['rest', 'ai_tool', 'ai_continue', 'revision_accept']).has(event.payload.source)
+    || !nullablePositiveInteger(event.payload.chapterId)
+    || !nullablePositiveInteger(event.payload.chapterNumber)
+    || !nullablePositiveInteger(event.payload.volumeId)
+    || !(event.payload.expectedDataVersion === null
+      || (Number.isSafeInteger(event.payload.expectedDataVersion) && event.payload.expectedDataVersion >= 0))
+    || !nullableHash(event.payload.expectedBodySha256)
+    || !/^[0-9a-f]{64}$/.test(event.payload.bodySha256)
+    || !Number.isSafeInteger(event.payload.bodyBytes)
+    || event.payload.bodyBytes < 0
+  ) {
+    const error = new TypeError('Manuscript source event must use the exact diagnostic-only schema');
+    error.code = 'MANUSCRIPT_SOURCE_EVENT_INVALID';
+    throw error;
+  }
+  return event;
+}
+
+function assertManuscriptProjectConnection(projectName, projectDb) {
+  if (typeof projectName !== 'string' || projectName.length === 0) {
+    throw manuscriptTransactionRequired('Project identity is required for a manuscript transaction');
+  }
+  const filePath = getProjectDbPath(projectName);
+  const cacheKey = canonicalDbPath(filePath);
+  if (projectConnections.get(cacheKey) !== projectDb) {
+    throw manuscriptTransactionRequired('The manuscript transaction connection does not own this project');
+  }
+  return { cacheKey, filePath };
+}
+
+function activeManuscriptTransaction(projectName, projectDb) {
+  const { filePath } = assertManuscriptProjectConnection(projectName, projectDb);
+  const token = projectTransactionOwners.get(projectDb);
+  const store = storesByWrapper.get(projectDb);
+  if (
+    !token
+    || !store
+    || token.connection !== projectDb
+    || canonicalDbPath(token.filePath) !== canonicalDbPath(filePath)
+    || token.connectionEpoch !== store.connectionEpoch
+    || token.coordinatorOwnershipToken !== token.writeContext?.ownershipToken
+  ) {
+    throw manuscriptTransactionRequired();
+  }
+  projectWriteCoordinator.assertProjectWriteLease(filePath);
+  token.writeContext.assertLease();
+  return token;
+}
+
+function validateManuscriptClaimScope(scope) {
+  const keys = ['chapterId', 'chapterNumber', 'operation', 'source', 'volumeId'];
+  const positiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
+  if (
+    !hasExactKeys(scope, keys)
+    || !new Set(['replace', 'append', 'create']).has(scope.operation)
+    || !new Set(['rest', 'ai_tool', 'ai_continue', 'revision_accept']).has(scope.source)
+  ) {
+    throw manuscriptTransactionRequired('Manuscript authorization scope is missing or invalid');
+  }
+  if (scope.operation === 'create') {
+    if (scope.chapterId !== null || !positiveInteger(scope.chapterNumber) || !positiveInteger(scope.volumeId)) {
+      throw manuscriptTransactionRequired('Create authorization must identify one volume and chapter number');
+    }
+  } else if (!positiveInteger(scope.chapterId) || scope.chapterNumber !== null || scope.volumeId !== null) {
+    throw manuscriptTransactionRequired('Body authorization must identify one chapter');
+  }
+  return Object.freeze({ ...scope });
+}
+
+function manuscriptEventMatchesScope(event, scope) {
+  return event.payload.operation === scope.operation
+    && event.payload.source === scope.source
+    && event.payload.chapterId === scope.chapterId
+    && event.payload.chapterNumber === scope.chapterNumber
+    && event.payload.volumeId === scope.volumeId;
+}
+
+const manuscriptTransactionCapability = Object.freeze({
+  assertActive(projectName, projectDb) {
+    if (projectDb?.manuscriptTransactionCapability) {
+      return projectDb.manuscriptTransactionCapability.assertActive(projectName, projectDb);
+    }
+    activeManuscriptTransaction(projectName, projectDb);
+    return true;
+  },
+
+  claim(projectName, projectDb, scope) {
+    if (projectDb?.manuscriptTransactionCapability) {
+      return projectDb.manuscriptTransactionCapability.claim(projectName, projectDb, scope);
+    }
+    const active = activeManuscriptTransaction(projectName, projectDb);
+    const store = storesByWrapper.get(projectDb);
+    const claim = Object.freeze(Object.create(null));
+    manuscriptClaims.set(claim, {
+      active,
+      connectionEpoch: store.connectionEpoch,
+      projectDb,
+      scope: validateManuscriptClaimScope(scope),
+    });
+    return claim;
+  },
+
+  appendSourceEvent(projectName, projectDb, claim, event) {
+    if (projectDb?.manuscriptTransactionCapability) {
+      return projectDb.manuscriptTransactionCapability.appendSourceEvent(
+        projectName,
+        projectDb,
+        claim,
+        event,
+      );
+    }
+    const descriptor = manuscriptClaims.get(claim);
+    manuscriptClaims.delete(claim);
+    const active = activeManuscriptTransaction(projectName, projectDb);
+    const store = storesByWrapper.get(projectDb);
+    if (
+      !descriptor
+      || descriptor.active !== active
+      || descriptor.projectDb !== projectDb
+      || descriptor.connectionEpoch !== store.connectionEpoch
+    ) {
+      throw manuscriptTransactionRequired('Manuscript authorization is stale, consumed, or forged');
+    }
+    validateManuscriptSourceEvent(event);
+    if (!manuscriptEventMatchesScope(event, descriptor.scope)) {
+      throw manuscriptTransactionRequired('Manuscript authorization does not match the source or target');
+    }
+    if (manuscriptSqlAuthorizations.has(projectDb)) {
+      throw manuscriptTransactionRequired('A manuscript SQL authorization is already pending');
+    }
+    const controlStore = controlStoresByAtomicStore.get(store);
+    if (!controlStore) throw manuscriptTransactionRequired('The project transaction has no managed control store');
+    active.writeContext.assertLease();
+    const result = controlStore.append(event);
+    active.writeContext.assertLease();
+    manuscriptSqlAuthorizations.set(projectDb, Object.freeze({
+      active,
+      connectionEpoch: store.connectionEpoch,
+      scope: descriptor.scope,
+    }));
+    return result;
+  },
+});
+
+function runManuscriptTransaction(projectName, intent, callback) {
+  if (callback === undefined && typeof intent === 'function') {
+    callback = intent;
+    intent = null;
+  }
+  if (typeof projectName !== 'string' || projectName.length === 0) {
+    throw manuscriptTransactionRequired('Project identity is required for a manuscript transaction');
+  }
+  if (typeof callback !== 'function') throw new TypeError('Manuscript transaction callback must be a function');
+  const filePath = getProjectDbPath(projectName);
+  const cacheKey = canonicalDbPath(filePath);
+  const cached = projectConnections.get(cacheKey);
+  if (typeof cached?.runManuscriptTransaction === 'function') {
+    return cached.runManuscriptTransaction(projectName, intent, callback);
+  }
+  if (!cached) {
+    const evidence = inspectControlStoreEvidence(recoveryControlDirectory(filePath)).events;
+    if (evidence.some((event) => event.type === 'sqlite.native.activation.activated')) {
+      return getProjectDb(projectName).runManuscriptTransaction(projectName, intent, callback);
+    }
+  }
+  return projectWriteCoordinator.withProjectWriteSync(filePath, () => {
+    const projectDb = getProjectDb(projectName);
+    const result = projectDb.transaction(() => callback(projectDb))();
+    try {
+      projectDb._flushInProjectWrite();
+    } catch (error) {
+      if ((typeof error === 'object' || typeof error === 'function') && error !== null) {
+        manuscriptPersistenceErrors.add(error);
+      }
+      projectDb._settleManuscriptPublicationFailureInProjectWrite(error);
+      throw error;
+    }
+    return result;
+  });
+}
+
+function isManuscriptPersistenceError(error) {
+  return (typeof error === 'object' || typeof error === 'function')
+    && error !== null
+    && manuscriptPersistenceErrors.has(error);
 }
 
 function assertProjectInstance(name, expectedInstanceId) {
@@ -530,6 +2259,19 @@ function captureProjectInstance(name, expectedInstanceId = '') {
 // ═══════════════════════════════════════════════════════════════
 // Project DB migrations
 // ═══════════════════════════════════════════════════════════════
+
+function normalizeLegacyChapterContent(db) {
+  const chapterColumns = new Set(
+    db.prepare('PRAGMA table_info(chapters)').all().map((column) => column.name),
+  );
+  if (!chapterColumns.has('content')) return;
+  projectMigrationBodyWrites.add(db);
+  try {
+    db.prepare("UPDATE chapters SET content = '' WHERE content IS NULL").run();
+  } finally {
+    projectMigrationBodyWrites.delete(db);
+  }
+}
 
 const projectMigrations = [
   // v0 → v1: initial schema
@@ -875,14 +2617,7 @@ const projectMigrations = [
   // v9 → v10: legacy/imported chapters could contain SQL NULL despite the
   // schema default. Revisions use an empty string as the canonical blank text,
   // so normalize persisted data before optimistic compare-and-swap operations.
-  (db) => {
-    const chapterColumns = new Set(
-      db.prepare('PRAGMA table_info(chapters)').all().map((column) => column.name),
-    );
-    if (chapterColumns.has('content')) {
-      db.prepare("UPDATE chapters SET content = '' WHERE content IS NULL").run();
-    }
-  },
+  normalizeLegacyChapterContent,
 ];
 
 const getProjectVersion = makeVersionGetter('project_meta');
@@ -947,12 +2682,23 @@ function projectTransaction(projectName, fn) {
 
 function updateProjectWordCount(projectDb, updatedAt = new Date().toISOString()) {
   const total = projectDb.prepare('SELECT SUM(word_count) as total FROM chapters').get()?.total || 0;
-  projectDb
-    .prepare("INSERT INTO project_meta (key, value) VALUES ('word_count', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-    .run(String(total));
-  projectDb
-    .prepare("INSERT INTO project_meta (key, value) VALUES ('updated_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+  const wordCount = String(total);
+  const wordCountUpdate = projectDb
+    .prepare("UPDATE project_meta SET value = ? WHERE key = 'word_count'")
+    .run(wordCount);
+  if (wordCountUpdate.changes === 0) {
+    projectDb
+      .prepare("INSERT INTO project_meta (key, value) VALUES ('word_count', ?)")
+      .run(wordCount);
+  }
+  const updatedAtUpdate = projectDb
+    .prepare("UPDATE project_meta SET value = ? WHERE key = 'updated_at'")
     .run(updatedAt);
+  if (updatedAtUpdate.changes === 0) {
+    projectDb
+      .prepare("INSERT INTO project_meta (key, value) VALUES ('updated_at', ?)")
+      .run(updatedAt);
+  }
   return total;
 }
 
@@ -962,12 +2708,63 @@ function recalculateWordCount(projectName) {
 }
 
 function flushAllDatabases() {
+  assertStorageAvailable();
   configDb?.flush();
   for (const projectDb of projectConnections.values()) projectDb.flush();
 }
 
+function closeAllDatabases() {
+  assertStorageAvailable();
+  const connections = [...projectConnections.values()];
+  const closedConnections = new Set();
+  let primaryError = null;
+  try {
+    for (const projectDb of connections) {
+      projectDb.close();
+      closedConnections.add(projectDb);
+    }
+    if (configDb) {
+      configDb.close();
+      closedConnections.add(configDb);
+    }
+  } catch (error) {
+    primaryError = error;
+  }
+
+  if (primaryError) {
+    const remaining = [
+      ...connections.filter((connection) => !closedConnections.has(connection)),
+      configDb && !closedConnections.has(configDb) ? configDb : null,
+    ];
+    const cleanup = discardConnections(remaining);
+    if (cleanup.errors.length > 0) {
+      attachSecondaryError(primaryError, 'storageCleanupErrors', cleanup.errors);
+    }
+    projectConnections.clear();
+    configDb = null;
+    if (cleanup.uncertainConnections.length === 0) {
+      try {
+        releaseConfigLifecycleLease();
+      } catch (releaseError) {
+        attachSecondaryError(primaryError, 'configLeaseReleaseError', releaseError);
+      }
+    }
+    enterStorageFailure(primaryError, cleanup.uncertainConnections);
+    throw primaryError;
+  }
+
+  projectConnections.clear();
+  configDb = null;
+  try {
+    releaseConfigLifecycleLease();
+  } catch (error) {
+    enterStorageFailure(error);
+    throw error;
+  }
+}
+
 function getCoverDir(projectName) {
-  return path.join(PROJECTS_DIR, projectName);
+  return path.join(getStoragePaths().projectsDir, projectName);
 }
 
 function findCoverPath(projectName) {
@@ -985,12 +2782,25 @@ const EXT_TO_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', w
 
 module.exports = {
   initDatabase,
+  installNativeActivationController,
+  installFixtureNativeActivationController: installNativeActivationController,
   getConfigDb,
   createProjectDb,
+  enableNativeProject,
   getProjectDb,
   getProjectDbPath,
   openProjectDb,
   closeProjectDb,
+  recoverProjectDatabasesAtStartup,
+  inspectProjectDatabasesAtStartup,
+  inspectRegisteredProject,
+  recoverRegisteredProject,
+  getRegisteredProjectDatabaseSha256,
+  configureRecoveryDiagnosticsCapabilities,
+  getProjectOpenState,
+  removeProjectOpenState,
+  recordProjectOpenFailure,
+  projectOpenStates,
   assertProjectInstance,
   captureProjectInstance,
   runWithProjectInstance,
@@ -1001,11 +2811,18 @@ module.exports = {
   projectGet,
   projectExecute,
   projectTransaction,
+  runManuscriptTransaction,
+  isManuscriptPersistenceError,
+  manuscriptTransactionCapability,
   recalculateWordCount,
   updateProjectWordCount,
   flushAllDatabases,
-  getDataDir: () => DB_DIR,
-  getExportDir: () => EXPORT_DIR,
+  closeAllDatabases,
+  getProjectWriteLifecycle: () => projectWriteLifecycle,
+  configureStorage,
+  getStoragePaths,
+  getDataDir: () => getStoragePaths().dataDir,
+  getExportDir: () => getStoragePaths().exportDir,
   getCoverDir,
   findCoverPath,
   MIME_TO_EXT,

@@ -1,26 +1,14 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const test = require('node:test');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 test('AI world tools share their category contract and preserve complete CRUD behavior', async (t) => {
   const { parseWorldTags } = require('../world-tags');
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-world-tools-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const { executeTool, TOOLS } = require('../tools');
   const project = 'world-tools';
-
-  t.after(async () => {
-    db.closeProjectDb(db.getProjectDbPath(project));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
-  });
 
   await db.initDatabase();
   const projectDb = db.createProjectDb(project);

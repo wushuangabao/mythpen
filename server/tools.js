@@ -3,6 +3,7 @@ const CHARACTER_ROLES = new Set(['major', 'minor', 'extra']);
 const { normalizeCharacterName } = require('./character-validation');
 const { clampTimelineImportance } = require('./timeline-importance');
 const { orderTimelineEvents } = require('./timeline-order');
+const { createChapter, writeChapterBody } = require('./manuscript-service');
 const { parseWorldTags, serializeWorldTags } = require('./world-tags');
 const {
   WORLD_ENTRY_CATEGORIES,
@@ -747,6 +748,93 @@ const { randomUUID } = require('crypto');
 
 function executeTool(projectName, toolName, args) {
   const db = require('./db');
+
+  const bodyToolIdentity = (identity = {}) => {
+    const provided = (value) => value !== undefined && value !== null && value !== '';
+    const parsedPositive = (value) => {
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    };
+    const hasId = provided(identity.chapter_id);
+    const hasNumber = provided(identity.chapter_num);
+    const hasVolume = provided(identity.volume_id);
+    if (!hasId && !hasNumber) {
+      return { error: '必须提供 chapter_id 或 chapter_num', code: 'INVALID_CHAPTER_IDENTITY' };
+    }
+    const chapterId = hasId ? parsedPositive(identity.chapter_id) : null;
+    const chapterNumber = hasNumber ? parsedPositive(identity.chapter_num) : null;
+    const volumeId = hasVolume ? parsedPositive(identity.volume_id) : null;
+    if ((hasId && !chapterId) || (hasNumber && !chapterNumber) || (hasVolume && !volumeId)) {
+      return { error: '章节身份无效', code: 'INVALID_CHAPTER_IDENTITY' };
+    }
+    return { identity: { chapterId, chapterNumber, volumeId } };
+  };
+  const bodyToolIdentityError = (identityError) => ({
+    error: identityError.code === 'AMBIGUOUS_CHAPTER'
+      ? '多个卷中存在相同章节编号，请提供 chapter_id 或 volume_id'
+      : '章节身份不存在或不匹配',
+    code: identityError.code,
+  });
+
+  if (toolName === 'create_chapter') {
+    const created = createChapter({
+      projectName,
+      source: 'ai_tool',
+      fields: {
+        volume_id: args.volume_id,
+        chapter_num: args.chapter_num,
+        title: args.title,
+        outline: args.outline,
+        content: args.content,
+        cognitive_frame: args.cognitive_frame,
+        emotional_anchor: args.emotional_anchor,
+        world_texture: args.world_texture,
+        concrete_mystery: args.concrete_mystery,
+        interpersonal_tension: args.interpersonal_tension,
+      },
+    });
+    return {
+      created: true,
+      chapter_id: created.chapterId,
+      volume_id: created.volumeId,
+      chapter_num: created.chapterNumber,
+      title: args.title,
+    };
+  }
+
+  if (toolName === 'update_chapter' && args.content !== undefined) {
+    const resolvedIdentity = bodyToolIdentity(args);
+    if (resolvedIdentity.error) return resolvedIdentity;
+    const {
+      chapter_id: _chapterId,
+      chapter_num: _chapterNumber,
+      volume_id: _volumeId,
+      ...fields
+    } = args;
+    const allowed = ['title', 'content', 'outline', 'status', 'summary', 'cognitive_frame', 'emotional_anchor', 'world_texture', 'concrete_mystery', 'interpersonal_tension'];
+    const changedFields = Object.keys(fields).filter((key) => allowed.includes(key));
+    const patch = {};
+    for (const key of allowed) {
+      if (key !== 'content' && fields[key] !== undefined) patch[key] = fields[key];
+    }
+    const updated = writeChapterBody({
+      projectName,
+      identity: resolvedIdentity.identity,
+      content: String(fields.content),
+      source: 'ai_tool',
+      ...patch,
+    });
+    if (updated.identityError) return bodyToolIdentityError(updated.identityError);
+    if (updated.missing) return { error: '章节不存在', code: 'CHAPTER_NOT_FOUND' };
+    return {
+      updated: true,
+      chapter_id: updated.chapter.id,
+      volume_id: updated.chapter.volume_id,
+      chapter_num: updated.chapter.num,
+      changed_fields: changedFields,
+    };
+  }
+
   const pdb = db.getProjectDb(projectName);
 
   // ─── Shared helpers ───
@@ -857,25 +945,29 @@ function executeTool(projectName, toolName, args) {
       return resolved.chapter;
     }
     case 'create_chapter': {
-      const volId = args.volume_id || 1;
-      let num;
-      if (args.chapter_num !== undefined) {
-        num = args.chapter_num;
-      } else {
-        const max = pdb.prepare('SELECT MAX(num) as mx FROM chapters WHERE volume_id = ?').get(volId);
-        num = (max?.mx || 0) + 1;
-      }
-      const created = pdb.transaction(() => {
-        pdb.prepare(`INSERT INTO chapters (volume_id, num, title, outline, content, word_count, status, cognitive_frame, emotional_anchor, world_texture, concrete_mystery, interpersonal_tension, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-          .run(volId, num, args.title, args.outline || '', args.content || '',
-            args.content ? String(args.content).replace(/\s/g, '').length : 0,
-            args.cognitive_frame || '', args.emotional_anchor || '', args.world_texture || '',
-            args.concrete_mystery || '', args.interpersonal_tension || '');
-        db.updateProjectWordCount(pdb);
-        return pdb.prepare('SELECT id, volume_id, num FROM chapters WHERE volume_id = ? AND num = ?').get(volId, num);
-      })();
-      return { created: true, chapter_id: created.id, volume_id: created.volume_id, chapter_num: created.num, title: args.title };
+      const created = createChapter({
+        projectName,
+        source: 'ai_tool',
+        fields: {
+          volume_id: args.volume_id,
+          chapter_num: args.chapter_num,
+          title: args.title,
+          outline: args.outline,
+          content: args.content,
+          cognitive_frame: args.cognitive_frame,
+          emotional_anchor: args.emotional_anchor,
+          world_texture: args.world_texture,
+          concrete_mystery: args.concrete_mystery,
+          interpersonal_tension: args.interpersonal_tension,
+        },
+      });
+      return {
+        created: true,
+        chapter_id: created.chapterId,
+        volume_id: created.volumeId,
+        chapter_num: created.chapterNumber,
+        title: args.title,
+      };
     }
     case 'update_chapter': {
       const resolved = resolveChapter(args);
@@ -883,24 +975,58 @@ function executeTool(projectName, toolName, args) {
       const chapter = resolved.chapter;
       const { chapter_id: _chapterId, chapter_num: _chapterNum, volume_id: _volumeId, ...fields } = args;
       const allowed = ['title', 'content', 'outline', 'status', 'summary', 'cognitive_frame', 'emotional_anchor', 'world_texture', 'concrete_mystery', 'interpersonal_tension'];
-      const updates = [];
-      const params = [];
-      for (const key of allowed) {
-        if (fields[key] !== undefined) {
-          updates.push(`${key} = ?`);
-          params.push(fields[key]);
-        }
-      }
-      if (updates.length === 0) return { error: '没有要更新的字段' };
+      const changedFields = Object.keys(fields).filter((key) => allowed.includes(key));
+      if (changedFields.length === 0) return { error: '没有要更新的字段' };
+
       if (fields.content !== undefined) {
-        const wc = String(fields.content).replace(/\s/g, '').length;
-        updates.push('word_count = ?');
-        params.push(wc);
+        const patch = {};
+        for (const key of allowed) {
+          if (key !== 'content' && fields[key] !== undefined) patch[key] = fields[key];
+        }
+        const updated = writeChapterBody({
+          projectName,
+          chapterId: chapter.id,
+          content: String(fields.content),
+          source: 'ai_tool',
+          ...patch,
+        });
+        if (updated.missing) {
+          return { error: `章节 ID ${chapter.id} 不存在`, code: 'CHAPTER_NOT_FOUND' };
+        }
+        return {
+          updated: true,
+          chapter_id: chapter.id,
+          volume_id: chapter.volume_id,
+          chapter_num: chapter.num,
+          changed_fields: changedFields,
+        };
       }
-      updates.push("updated_at = datetime('now')");
-      params.push(chapter.id);
+
       pdb.transaction(() => {
-        pdb.prepare(`UPDATE chapters SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+        const fieldValue = (key) => [fields[key] === undefined ? 0 : 1, fields[key] ?? null];
+        pdb.prepare(`UPDATE chapters SET
+          title = CASE WHEN ? = 1 THEN ? ELSE title END,
+          outline = CASE WHEN ? = 1 THEN ? ELSE outline END,
+          status = CASE WHEN ? = 1 THEN ? ELSE status END,
+          summary = CASE WHEN ? = 1 THEN ? ELSE summary END,
+          cognitive_frame = CASE WHEN ? = 1 THEN ? ELSE cognitive_frame END,
+          emotional_anchor = CASE WHEN ? = 1 THEN ? ELSE emotional_anchor END,
+          world_texture = CASE WHEN ? = 1 THEN ? ELSE world_texture END,
+          concrete_mystery = CASE WHEN ? = 1 THEN ? ELSE concrete_mystery END,
+          interpersonal_tension = CASE WHEN ? = 1 THEN ? ELSE interpersonal_tension END,
+          updated_at = datetime('now')
+          WHERE id = ?`).run(
+          ...fieldValue('title'),
+          ...fieldValue('outline'),
+          ...fieldValue('status'),
+          ...fieldValue('summary'),
+          ...fieldValue('cognitive_frame'),
+          ...fieldValue('emotional_anchor'),
+          ...fieldValue('world_texture'),
+          ...fieldValue('concrete_mystery'),
+          ...fieldValue('interpersonal_tension'),
+          chapter.id,
+        );
         db.updateProjectWordCount(pdb);
       })();
       return {
@@ -908,7 +1034,7 @@ function executeTool(projectName, toolName, args) {
         chapter_id: chapter.id,
         volume_id: chapter.volume_id,
         chapter_num: chapter.num,
-        changed_fields: Object.keys(fields).filter(k => allowed.includes(k)),
+        changed_fields: changedFields,
       };
     }
     case 'delete_chapter': {

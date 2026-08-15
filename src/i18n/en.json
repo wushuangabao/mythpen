@@ -202,6 +202,51 @@
     },
     "createFailed": "Create failed"
   },
+  "recovery": {
+    "title": "Project recovery check required",
+    "description": "To protect the available evidence, Mythpen has blocked the editor and ordinary project requests.",
+    "currentProject": "Project: {project}",
+    "isolated": "Safely isolated",
+    "refresh": "Refresh diagnostics",
+    "recover": "Try automatic recovery",
+    "export": "Export diagnostics",
+    "back": "Back to project list",
+    "protect": "Do not delete, overwrite, or move this project's files. Doing so may destroy recoverable evidence.",
+    "exportedFilename": "Diagnostics exported: {filename}",
+    "deleteBlocked": "An isolated project cannot be deleted here. Export diagnostics first.",
+    "pending": {
+      "refresh": "Refreshing diagnostics…",
+      "recover": "Recovering and verifying the project safely…",
+      "export": "Exporting diagnostics…"
+    },
+    "reason": {
+      "ready": "Diagnostics report that the project is ready, but the project list must also be verified before entry.",
+      "forwardRecoverable": "A uniquely decidable incomplete publication can be recovered by completing the publication.",
+      "rollbackRecoverable": "A uniquely decidable incomplete publication can be recovered by rolling it back.",
+      "recoveryRequired": "The current evidence does not have one automatic safe outcome and needs further inspection.",
+      "schemaTooNew": "This project was created by a newer version. Open it with a Mythpen build that supports its database version.",
+      "notProjectDatabase": "The registered file is not a recognized Mythpen project database.",
+      "identityRebind": "The file identity at the registered path changed. This build will not take it over automatically.",
+      "durabilityUnsupported": "This platform or storage location does not meet the safe recovery requirements.",
+      "storageUnavailable": "The storage resource is in an uncertain state and cannot be opened safely yet.",
+      "busy": "The project or configuration is in use by another process. Refresh again later.",
+      "stale": "The evidence changed after diagnostics were read. Refresh diagnostics before retrying.",
+      "activationDisabled": "This build does not allow that recovery action.",
+      "generic": "The project cannot be opened safely and needs inspection or recovery."
+    },
+    "error": {
+      "busy": "The project is currently in use, so this operation was not started.",
+      "stale": "The evidence changed. Mythpen will not retry with the old snapshot; refresh manually.",
+      "recoveryRequired": "The two safety checks did not both pass, so the project remains isolated.",
+      "schemaTooNew": "This Mythpen version does not support the project's database version.",
+      "notProjectDatabase": "The file is not a recognized Mythpen project database.",
+      "identityRebind": "The file identity needs a separate confirmation flow that is unavailable in this build.",
+      "durabilityUnsupported": "This platform or storage location cannot perform this operation safely.",
+      "storageUnavailable": "Storage is temporarily unavailable, so the project remains isolated.",
+      "unavailable": "This operation is unavailable in the current build.",
+      "generic": "The operation failed and the evidence was preserved. Refresh diagnostics or export a diagnostics bundle."
+    }
+  },
   "settings": {
     "title": "Settings",
     "uiLanguage": "UI Language",
@@ -386,6 +431,22 @@
     "starting": "Starting",
     "retry": "Retry",
     "quit": "Quit"
+  },
+  "shutdown": {
+    "title": "Exiting safely",
+    "saving": "Stopping new writes and waiting for accepted saves to finish.",
+    "closing": "Database resources are closing. Exit can no longer be cancelled.",
+    "softDeadline": "Safe exit is taking longer than expected. Continue waiting, cancel exit, or explicitly choose emergency exit.",
+    "waitingForChild": "Saving is complete. Waiting for the service process to exit normally.",
+    "failed": "Safe exit could not complete ({code}). The recovery evidence will not be overwritten.",
+    "continueWaiting": "Continue waiting",
+    "waiting": "Waiting…",
+    "cancelExit": "Cancel exit",
+    "cancelling": "Cancelling…",
+    "emergencyExit": "Emergency exit",
+    "emergencyWarning": "Emergency exit force-stops the service process owned by this app. Unfinished work may require recovery on the next start. Use it only when you cannot keep waiting.",
+    "back": "Back",
+    "confirmEmergency": "Confirm emergency exit"
   },
   "dashboard": {
     "advancePhase": "Advance to next phase",

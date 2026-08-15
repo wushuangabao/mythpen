@@ -1,8 +1,7 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const test = require('node:test');
+const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -11,9 +10,7 @@ async function startServer(app) {
 }
 
 test('text exports keep duplicate chapter numbers grouped in volume order', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-export-order-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -23,11 +20,6 @@ test('text exports keep duplicate chapter numbers grouped in volume order', asyn
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(db.getProjectDbPath(project));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();
@@ -53,10 +45,12 @@ test('text exports keep duplicate chapter numbers grouped in volume order', asyn
   );
   // Deliberately insert the second volume first so row/id order cannot mask an
   // ORDER BY num regression.
-  insertChapter.run(2, 1, 'V2C1', 'second volume one');
-  insertChapter.run(1, 2, 'V1C2', 'first volume two');
-  insertChapter.run(1, 1, 'V1C1', 'first volume one');
-  insertChapter.run(2, 2, 'V2C2', 'second volume two');
+  withRawManuscriptSetup(() => {
+    insertChapter.run(2, 1, 'V2C1', 'second volume one');
+    insertChapter.run(1, 2, 'V1C2', 'first volume two');
+    insertChapter.run(1, 1, 'V1C1', 'first volume one');
+    insertChapter.run(2, 2, 'V2C2', 'second volume two');
+  });
 
   const response = await fetch(`${baseUrl}/${project}/export?format=md&download=1`, {
     headers: { 'X-Mythpen-Project-Instance': created.instanceId },

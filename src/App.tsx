@@ -2,7 +2,10 @@ import { Fragment, useEffect } from 'react'
 import { AIPanel } from '@/components/AIPanel'
 import { BottomStatusbar } from '@/components/BottomStatusbar'
 import { NewProjectDialog } from '@/components/NewProjectDialog'
+import { RecoveryNotice } from '@/components/RecoveryNotice'
+import { ServerStatusGate } from '@/components/ServerStatusGate'
 import { SettingsDrawer } from '@/components/SettingsDrawer'
+import { ShutdownDialog } from '@/components/ShutdownDialog'
 import { Sidebar } from '@/components/Sidebar'
 import { Titlebar } from '@/components/Titlebar'
 import { ToastContainer } from '@/components/ToastContainer'
@@ -45,8 +48,9 @@ const PAGES: Record<string, React.ReactNode> = {
   'page-about': <About />,
 }
 
-function App() {
+function WorkspaceApp() {
   const showProjectList = useProjectStore((s) => s.showProjectList)
+  const recoveryTarget = useProjectStore((s) => s.recoveryTarget)
   const activePage = useSidebarStore((s) => s.activePage)
   const currentProject = useProjectStore((s) => s.currentProject)
   const currentProjectInstanceId = useProjectStore((state) => {
@@ -71,6 +75,7 @@ function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'R') {
         e.preventDefault()
+        if (recoveryTarget) return
         refreshAllData(currentProject || undefined).then(() => {
           showToast(t('common.dataRefreshed'), 'success', 3000)
         })
@@ -78,14 +83,14 @@ function App() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentProject, showToast])
+  }, [currentProject, recoveryTarget, showToast])
 
   // Reload chapters when project changes
   useEffect(() => {
-    if (currentProject && currentProjectInstanceId) {
+    if (!recoveryTarget && currentProject && currentProjectInstanceId) {
       loadChapters(currentProject)
     }
-  }, [currentProject, currentProjectInstanceId, loadChapters])
+  }, [currentProject, currentProjectInstanceId, loadChapters, recoveryTarget])
 
   // Restore right panel width from localStorage
   useEffect(() => {
@@ -99,6 +104,8 @@ function App() {
       <div className="flex flex-1 min-h-0">
         {showProjectList ? (
           <ProjectList />
+        ) : recoveryTarget ? (
+          <RecoveryNotice key={recoveryTarget} project={recoveryTarget} />
         ) : (
           <Fragment key={JSON.stringify([currentProject, currentProjectInstanceId])}>
             <Sidebar />
@@ -123,7 +130,7 @@ function App() {
           </Fragment>
         )}
       </div>
-      <BottomStatusbar />
+      {!recoveryTarget && <BottomStatusbar />}
       <NewProjectDialog />
       <SettingsDrawer />
       <ToastContainer toasts={toasts} />
@@ -323,6 +330,17 @@ function App() {
           to { transform: rotate(360deg); }
         }
       `}</style>
+    </>
+  )
+}
+
+function App() {
+  return (
+    <>
+      <ServerStatusGate>
+        <WorkspaceApp />
+      </ServerStatusGate>
+      <ShutdownDialog />
     </>
   )
 }

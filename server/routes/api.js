@@ -4,7 +4,12 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const db = require('../db');
-const { publishGeneratedProjectFile } = require('../project-export');
+const { sendJsonError } = require('../json-error-middleware');
+const { writeChapterBody } = require('../manuscript-service');
+const {
+  publishGeneratedProjectFile,
+  publishOpaqueDiagnosticsExport,
+} = require('../project-export');
 const { readRecentProject } = require('../recent-projects');
 const { normalizeCharacterName } = require('../character-validation');
 const { clampTimelineImportance } = require('../timeline-importance');
@@ -21,6 +26,34 @@ const {
 const CHARACTER_ROLES = new Set(['major', 'minor', 'extra']);
 const PROJECT_INSTANCE_HEADER = 'X-Mythpen-Project-Instance';
 const COVER_FILE_NAMES = ['cover.png', 'cover.jpg', 'cover.jpeg', 'cover.webp', 'cover.gif'];
+const RECOVERY_ACTIONS = new Set([
+  'recover_transaction',
+  'recover_v1_publication',
+  'adopt_same_path_identity',
+]);
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+function isPlainJsonObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactKeys(value, expectedKeys) {
+  if (!isPlainJsonObject(value)) return false;
+  const actualKeys = Object.keys(value).sort();
+  const sortedExpected = [...expectedKeys].sort();
+  return actualKeys.length === sortedExpected.length
+    && actualKeys.every((key, index) => key === sortedExpected[index]);
+}
+
+function hasEmptyQuery(req) {
+  return req.query === undefined || Object.keys(req.query).length === 0;
+}
+
+function invalidDiagnosticsParams(res) {
+  return sendJsonError(res, 'INVALID_PARAMS');
+}
 
 function project(name) {
   // The :project router guard has already verified this database. Keep the
@@ -130,14 +163,19 @@ function retireStagedProjectCoverFiles(projectName, stagedFiles) {
 router.param('project', (req, res, next, name) => {
   const expectedInstanceId = req.get(PROJECT_INSTANCE_HEADER) || '';
   return db.runWithProjectInstance(name, expectedInstanceId, () => {
+    if (
+      req.method === 'PUT'
+      && Object.prototype.hasOwnProperty.call(req.body || {}, 'content')
+      && /\/chapters\/[^/]+\/?$/.test(req.path)
+    ) {
+      return next();
+    }
     try {
       db.getProjectDb(name);
       next();
     } catch (error) {
       if (error?.code === 'PROJECT_NOT_FOUND' || error?.code === 'PROJECT_INSTANCE_MISMATCH') {
-        return res.status(error.status).json({
-          error: { code: error.code, message: error.message, recoverable: true },
-        });
+        return sendJsonError(res, error.code);
       }
       next(error);
     }
@@ -195,7 +233,11 @@ function listTimelineEvents(projectName) {
 
 router.get('/projects', (req, res) => {
   const rows = db.dbQuery('SELECT * FROM recent_projects ORDER BY last_opened DESC');
-  const projects = rows.map((row) => readRecentProject(row, { openProjectDb: db.openProjectDb }));
+  const projects = rows.map((row) => readRecentProject(row, {
+    getProjectOpenState: db.getProjectOpenState,
+    openProjectDb: db.openProjectDb,
+    recordProjectOpenFailure: db.recordProjectOpenFailure,
+  }));
   res.json(projects);
 });
 
@@ -209,7 +251,7 @@ router.post('/projects', (req, res) => {
   }
 
   // Create new project DB
-  const pdb = db.openProjectDb(filePath);
+  const pdb = db.createProjectDb(name);
   const metaInsert = pdb.prepare('INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)');
   const meta = { name, description: '', mode, language, version: '1', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), word_count: '0', author_name: '佚名', workflow_phase: 'idea' };
   for (const [k, v] of Object.entries(meta)) metaInsert.run(k, v);
@@ -237,6 +279,74 @@ router.post('/projects', (req, res) => {
   res.json({ name, filePath, mode, language, genres, instanceId });
 });
 
+router.get('/testing/native-fixture', (req, res, next) => {
+  if (!hasEmptyQuery(req)) return invalidDiagnosticsParams(res);
+  try {
+    const { getFixtureNativeActivationInfo } = require('../native/native-activation-controller');
+    return res.json(getFixtureNativeActivationInfo());
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post('/projects/by-name/:name/durability/native', async (req, res, next) => {
+  if (!hasEmptyQuery(req) || !hasExactKeys(req.body, [])) {
+    return invalidDiagnosticsParams(res);
+  }
+  try {
+    db.assertProjectInstance(req.params.name, req.get(PROJECT_INSTANCE_HEADER) || '');
+    return res.json(await db.enableNativeProject(req.params.name));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get('/projects/by-name/:name/diagnostics', (req, res, next) => {
+  if (req.body !== undefined || !hasEmptyQuery(req)) {
+    return invalidDiagnosticsParams(res);
+  }
+  try {
+    return res.json(db.inspectRegisteredProject(req.params.name));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post('/projects/by-name/:name/diagnostics/recover', (req, res, next) => {
+  if (
+    !hasEmptyQuery(req)
+    || !hasExactKeys(req.body, ['action', 'snapshot'])
+    || typeof req.body.action !== 'string'
+    || typeof req.body.snapshot !== 'string'
+    || !RECOVERY_ACTIONS.has(req.body.action)
+    || !SHA256_PATTERN.test(req.body.snapshot)
+  ) {
+    return invalidDiagnosticsParams(res);
+  }
+  try {
+    return res.json(db.recoverRegisteredProject(req.params.name, req.body));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post('/projects/by-name/:name/diagnostics/export', (req, res, next) => {
+  if (!hasEmptyQuery(req) || !hasExactKeys(req.body, [])) {
+    return invalidDiagnosticsParams(res);
+  }
+  try {
+    const diagnostics = db.inspectRegisteredProject(req.params.name);
+    const currentDatabaseSha256 = db.getRegisteredProjectDatabaseSha256(req.params.name);
+    return res.json(publishOpaqueDiagnosticsExport({
+      exportDir: db.getExportDir(),
+      diagnostics,
+      currentDatabaseSha256,
+    }));
+  } catch (error) {
+    return next(error);
+  }
+});
+
 function sendProjectMetadata(req, res, next) {
   const { name } = req.params;
   const expectedInstanceId = req.get(PROJECT_INSTANCE_HEADER) || '';
@@ -249,9 +359,7 @@ function sendProjectMetadata(req, res, next) {
       res.json({ ...meta, genres, filePath: db.getProjectDbPath(name) });
     } catch (error) {
       if (error?.code === 'PROJECT_NOT_FOUND' || error?.code === 'PROJECT_INSTANCE_MISMATCH') {
-        return res.status(error.status).json({
-          error: { code: error.code, message: error.message, recoverable: true },
-        });
+        return sendJsonError(res, error.code);
       }
       next(error);
     }
@@ -299,9 +407,7 @@ function deleteProject(req, res) {
     stagedCoverFiles = stageProjectCoverFiles(name);
   } catch (error) {
     if (error?.code === 'PROJECT_INSTANCE_MISMATCH') {
-      return res.status(error.status).json({
-        error: { code: error.code, message: error.message, recoverable: true },
-      });
+      return sendJsonError(res, error.code);
     }
     console.error(`[Project Delete] Failed to prepare "${filePath}" for deletion:`, error);
     return res.status(500).json({
@@ -336,6 +442,7 @@ function deleteProject(req, res) {
   retireStagedProjectCoverFiles(name, stagedCoverFiles);
   db.dbExecute('DELETE FROM recent_projects WHERE name = ?', [name]);
   db.getConfigDb().flush();
+  db.removeProjectOpenState(filePath);
   res.json({ success: true });
 }
 
@@ -378,7 +485,7 @@ router.get('/:project/sidebar-items', (req, res) => {
     });
     res.json(filtered);
   } catch (e) {
-    res.status(500).json({ error: { message: e.message } });
+    sendJsonError(res, 'INTERNAL_ERROR');
   }
 });
 
@@ -492,6 +599,57 @@ router.put('/:project/chapters/:num', (req, res) => {
     });
   }
 
+  if (content !== undefined) {
+    const chapterId = requestedChapterId === undefined ? null : Number(requestedChapterId);
+    if (requestedChapterId !== undefined && (!Number.isInteger(chapterId) || chapterId < 1)) {
+      return res.status(400).json({
+        error: { code: 'INVALID_PARAMS', message: '章节标识无效', recoverable: true },
+      });
+    }
+    const updateResult = writeChapterBody({
+      projectName,
+      identity: { chapterId, chapterNumber: chapterNum, volumeId: null },
+      content,
+      expectedDataVersion,
+      source: 'rest',
+      title,
+      outline,
+      status,
+      cognitive_frame,
+      emotional_anchor,
+      world_texture,
+      concrete_mystery,
+      interpersonal_tension,
+    });
+    if (updateResult.identityError?.code === 'CHAPTER_IDENTITY_MISMATCH') {
+      return res.status(409).json({
+        error: { code: 'CHAPTER_IDENTITY_MISMATCH', message: '章节 ID 与 URL 章节编号不匹配', recoverable: true },
+      });
+    }
+    if (updateResult.identityError?.code === 'AMBIGUOUS_CHAPTER') {
+      return res.status(409).json({
+        error: { code: 'AMBIGUOUS_CHAPTER', message: '多个卷中存在相同章节编号，请提供章节标识', recoverable: true },
+      });
+    }
+    if (updateResult.identityError?.code === 'CHAPTER_NOT_FOUND' || updateResult.missing) {
+      return res.status(404).json({
+        error: { code: 'DB_NOT_FOUND', message: `章节 ${num} 不存在`, recoverable: true },
+      });
+    }
+    if (updateResult.changes === 0 && updateResult.conflict) {
+      return res.status(409).json({
+        error: {
+          code: 'CHAPTER_VERSION_CONFLICT',
+          message: '章节已在其他窗口更新；本地草稿已保留，请处理冲突后重试',
+          recoverable: true,
+        },
+        chapter: updateResult.current,
+        current_data_version: updateResult.current.data_version,
+      });
+    }
+    return res.json(updateResult.chapter);
+  }
+
   let targetChapter;
   if (requestedChapterId !== undefined) {
     const chapterId = Number(requestedChapterId);
@@ -525,10 +683,42 @@ router.put('/:project/chapters/:num', (req, res) => {
     return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${num} 不存在`, recoverable: true } });
   }
 
+  if (content !== undefined) {
+    const updateResult = writeChapterBody({
+      projectName,
+      chapterId: targetChapter.id,
+      content,
+      expectedDataVersion,
+      source: 'rest',
+      title,
+      outline,
+      status,
+      cognitive_frame,
+      emotional_anchor,
+      world_texture,
+      concrete_mystery,
+      interpersonal_tension,
+    });
+    if (updateResult.changes === 0) {
+      if (updateResult.conflict) {
+        return res.status(409).json({
+          error: {
+            code: 'CHAPTER_VERSION_CONFLICT',
+            message: '章节已在其他窗口更新；本地草稿已保留，请人工处理冲突后再重试',
+            recoverable: true,
+          },
+          chapter: updateResult.current,
+          current_data_version: updateResult.current.data_version,
+        });
+      }
+      return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${num} 不存在`, recoverable: true } });
+    }
+    return res.json(updateResult.chapter);
+  }
+
   const fields = [];
   const params = [];
   if (title !== undefined) { fields.push('title = ?'); params.push(title); }
-  if (content !== undefined) { fields.push('content = ?'); params.push(content); }
   if (outline !== undefined) { fields.push('outline = ?'); params.push(outline); }
   if (status !== undefined) { fields.push('status = ?'); params.push(status); }
   if (cognitive_frame !== undefined) { fields.push('cognitive_frame = ?'); params.push(cognitive_frame); }
@@ -536,13 +726,6 @@ router.put('/:project/chapters/:num', (req, res) => {
   if (world_texture !== undefined) { fields.push('world_texture = ?'); params.push(world_texture); }
   if (concrete_mystery !== undefined) { fields.push('concrete_mystery = ?'); params.push(concrete_mystery); }
   if (interpersonal_tension !== undefined) { fields.push('interpersonal_tension = ?'); params.push(interpersonal_tension); }
-
-  if (content !== undefined) {
-    // Update word count for Chinese text
-    const wc = content.replace(/\s/g, '').length;
-    fields.push('word_count = ?');
-    params.push(wc);
-  }
 
   fields.push("updated_at = datetime('now')");
   params.push(targetChapter.id);
@@ -772,8 +955,8 @@ router.post('/:project/volumes', (req, res) => {
 
 router.put('/:project/volumes/:id', (req, res) => {
   const changes = updateRecord(project(req.params.project), 'volumes', req.params.id, req.body, ['title', 'summary'], false);
-  if (changes === null) return res.status(400).json({ error: { message: '没有要更新的字段' } });
-  if (changes === 0) return res.status(404).json({ error: { message: '卷不存在' } });
+  if (changes === null) return sendJsonError(res, 'INVALID_PARAMS', '没有要更新的字段');
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '卷不存在');
   res.json({ success: true });
 });
 
@@ -786,7 +969,7 @@ router.delete('/:project/volumes/:id', (req, res) => {
     if (deleted > 0) db.updateProjectWordCount(projectDb);
     return deleted;
   })();
-  if (changes === 0) return res.status(404).json({ error: { message: '卷不存在' } });
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '卷不存在');
   res.json({ success: true });
 });
 
@@ -889,7 +1072,7 @@ router.put('/:project/characters/:id', (req, res) => {
 
 router.delete('/:project/characters/:id', (req, res) => {
   const changes = db.projectExecute(project(req.params.project), 'DELETE FROM characters WHERE id = ?', [req.params.id]);
-  if (changes === 0) return res.status(404).json({ error: { message: '角色不存在' } });
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '角色不存在');
   res.json({ success: true });
 });
 
@@ -926,14 +1109,14 @@ router.put('/:project/world/:id', (req, res) => {
   }
   if (data.tags !== undefined) data.tags = serializeWorldTags(data.tags);
   const changes = updateRecord(project(req.params.project), 'world_entries', req.params.id, data, ['category', 'name', 'description', 'tags'], true);
-  if (changes === null) return res.status(400).json({ error: { message: '没有要更新的字段' } });
-  if (changes === 0) return res.status(404).json({ error: { message: '条目不存在' } });
+  if (changes === null) return sendJsonError(res, 'INVALID_PARAMS', '没有要更新的字段');
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '条目不存在');
   res.json({ success: true });
 });
 
 router.delete('/:project/world/:id', (req, res) => {
   const changes = db.projectExecute(project(req.params.project), 'DELETE FROM world_entries WHERE id = ?', [req.params.id]);
-  if (changes === 0) return res.status(404).json({ error: { message: '条目不存在' } });
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '条目不存在');
   res.json({ success: true });
 });
 
@@ -958,7 +1141,7 @@ router.post('/:project/science', (req, res) => {
 
 router.delete('/:project/science/:id', (req, res) => {
   const changes = db.projectExecute(project(req.params.project), 'DELETE FROM science_entries WHERE id = ?', [req.params.id]);
-  if (changes === 0) return res.status(404).json({ error: { message: '条目不存在' } });
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '条目不存在');
   res.json({ success: true });
 });
 
@@ -1007,14 +1190,14 @@ router.post('/:project/relations', (req, res) => {
 
 router.put('/:project/relations/:id', (req, res) => {
   const changes = updateRecord(project(req.params.project), 'character_relations', req.params.id, req.body, ['relation_type', 'description', 'intensity'], false);
-  if (changes === null) return res.status(400).json({ error: { message: '没有要更新的字段' } });
-  if (changes === 0) return res.status(404).json({ error: { message: '关系不存在' } });
+  if (changes === null) return sendJsonError(res, 'INVALID_PARAMS', '没有要更新的字段');
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '关系不存在');
   res.json({ success: true });
 });
 
 router.delete('/:project/relations/:id', (req, res) => {
   const changes = db.projectExecute(project(req.params.project), 'DELETE FROM character_relations WHERE id = ?', [req.params.id]);
-  if (changes === 0) return res.status(404).json({ error: { message: '关系不存在' } });
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '关系不存在');
   res.json({ success: true });
 });
 
@@ -1039,14 +1222,14 @@ router.post('/:project/memories', (req, res) => {
 
 router.put('/:project/memories/:id', (req, res) => {
   const changes = updateRecord(project(req.params.project), 'memories', req.params.id, req.body, ['category', 'content'], false);
-  if (changes === null) return res.status(400).json({ error: { message: '没有要更新的字段' } });
-  if (changes === 0) return res.status(404).json({ error: { message: '记忆不存在' } });
+  if (changes === null) return sendJsonError(res, 'INVALID_PARAMS', '没有要更新的字段');
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '记忆不存在');
   res.json({ success: true });
 });
 
 router.delete('/:project/memories/:id', (req, res) => {
   const changes = db.projectExecute(project(req.params.project), 'DELETE FROM memories WHERE id = ?', [req.params.id]);
-  if (changes === 0) return res.status(404).json({ error: { message: '记忆不存在' } });
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '记忆不存在');
   res.json({ success: true });
 });
 
@@ -1054,7 +1237,7 @@ router.delete('/:project/memories/:id', (req, res) => {
 router.post('/:project/memories/search', (req, res) => {
   const pn = project(req.params.project);
   const { query } = req.body || {};
-  if (!query) return res.status(400).json({ error: { message: '缺少搜索关键词' } });
+  if (!query) return sendJsonError(res, 'INVALID_PARAMS', '缺少搜索关键词');
   const rows = db.projectQuery(pn,
     "SELECT * FROM memories WHERE content LIKE ? ORDER BY created_at DESC LIMIT 20",
     [`%${query}%`]
@@ -1125,14 +1308,14 @@ router.put('/:project/timeline/:id', (req, res) => {
   const body = { ...(req.body || {}) };
   if (body.importance !== undefined) body.importance = clampTimelineImportance(body.importance);
   const changes = updateRecord(project(req.params.project), 'timeline_events', req.params.id, body, ['year', 'title', 'description', 'importance'], false);
-  if (changes === null) return res.status(400).json({ error: { message: '没有要更新的字段' } });
-  if (changes === 0) return res.status(404).json({ error: { message: '事件不存在' } });
+  if (changes === null) return sendJsonError(res, 'INVALID_PARAMS', '没有要更新的字段');
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '事件不存在');
   res.json({ success: true });
 });
 
 router.delete('/:project/timeline/:id', (req, res) => {
   const changes = db.projectExecute(project(req.params.project), 'DELETE FROM timeline_events WHERE id = ?', [req.params.id]);
-  if (changes === 0) return res.status(404).json({ error: { message: '事件不存在' } });
+  if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '事件不存在');
   res.json({ success: true });
 });
 
@@ -1193,7 +1376,7 @@ router.put('/:project/workflow/phase', (req, res) => {
   const { phase } = req.body || {};
   const valid = ['idea', 'setting', 'outline', 'writing', 'review', 'consistency', 'export'];
   if (!phase || !valid.includes(phase)) {
-    return res.status(400).json({ error: { message: `Invalid phase. Must be one of: ${valid.join(', ')}` } });
+    return sendJsonError(res, 'INVALID_PARAMS', `Invalid phase. Must be one of: ${valid.join(', ')}`);
   }
   db.projectExecute(project(req.params.project),
     "INSERT OR REPLACE INTO project_meta (key, value) VALUES ('workflow_phase', ?)", [phase]
@@ -1269,7 +1452,7 @@ router.put('/:project/target-words', (req, res) => {
   const pn = project(req.params.project);
   const { targetWords } = req.body;
   if (typeof targetWords !== 'number' || targetWords < 1000) {
-    return res.status(400).json({ error: { message: 'targetWords must be a number ≥ 1000' } });
+    return sendJsonError(res, 'INVALID_PARAMS', 'targetWords must be a number ≥ 1000');
   }
   db.projectExecute(pn,
     "INSERT OR REPLACE INTO project_meta (key, value) VALUES ('target_words', ?)", [String(targetWords)]
@@ -1302,7 +1485,7 @@ router.get('/:project/tokens', (req, res) => {
 router.post('/:project/cover', (req, res) => {
   const pn = project(req.params.project);
   const { data, mime } = req.body || {};
-  if (!data) return res.status(400).json({ error: { message: '缺少图片数据' } });
+  if (!data) return sendJsonError(res, 'INVALID_PARAMS', '缺少图片数据');
   const ext = db.MIME_TO_EXT[mime || 'image/png'] || 'png';
   const coverFileName = `cover.${ext}`;
   let stagedFiles = [];
@@ -1358,7 +1541,7 @@ router.get('/:project/cover', (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=31536000');
     return res.end(fs.readFileSync(coverPath));
   }
-  res.status(404).json({ error: { message: '未上传封面' } });
+  sendJsonError(res, 'DB_NOT_FOUND', '未上传封面');
 });
 
 router.delete('/:project/cover', (req, res) => {
@@ -1366,7 +1549,7 @@ router.delete('/:project/cover', (req, res) => {
   let stagedFiles = [];
   try {
     stagedFiles = stageProjectCoverFiles(pn);
-    if (stagedFiles.length === 0) return res.status(404).json({ error: { message: '未上传封面' } });
+    if (stagedFiles.length === 0) return sendJsonError(res, 'DB_NOT_FOUND', '未上传封面');
     const projectDb = db.getProjectDb(pn);
     projectDb.transaction(() => {
       projectDb.prepare("DELETE FROM project_meta WHERE key IN ('cover_mime', 'cover_ext')").run();
@@ -1491,9 +1674,7 @@ router.get('/:project/export', async (req, res) => {
       });
     } catch (error) {
       if (error?.code === 'PROJECT_NOT_FOUND' || error?.code === 'PROJECT_INSTANCE_MISMATCH') {
-        return res.status(error.status).json({
-          error: { code: error.code, message: error.message, recoverable: true },
-        });
+        return sendJsonError(res, error.code);
       }
       throw error;
     }
@@ -1659,7 +1840,7 @@ router.post('/:project/chat/sessions', (req, res) => {
 
 router.put('/:project/chat/sessions/:id', (req, res) => {
   const { title } = req.body || {};
-  if (!title) return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: 'title is required' } });
+  if (!title) return sendJsonError(res, 'INVALID_PARAMS', 'title is required');
   db.projectExecute(project(req.params.project),
     "UPDATE chat_sessions SET title = ?, updated_at = datetime('now') WHERE id = ?",
     [title, req.params.id]

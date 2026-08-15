@@ -1,6 +1,7 @@
 import { Bot, Download, Eye, EyeOff, Globe, Palette, Pen, RotateCw, SwatchBook, X, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { useT } from '@/hooks/useT'
+import { backendFetch } from '@/lib/backendRuntime'
 import { refreshAllData } from '@/lib/dataEvents'
 import { useEditorStore } from '@/stores/useEditorStore'
 import { useSettingsStore } from '@/stores/useSettingsStore'
@@ -50,7 +51,7 @@ export function SettingsDrawer() {
     setTestError('')
     const start = Date.now()
     try {
-      const res = await fetch('/api/ai/chat', {
+      const res = await backendFetch('/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

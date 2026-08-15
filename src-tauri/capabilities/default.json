@@ -7,15 +7,6 @@
   ],
   "permissions": [
     "core:default",
-    "shell:allow-open",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "mythpen-server",
-          "sidecar": true
-        }
-      ]
-    }
+    "shell:allow-open"
   ]
 }

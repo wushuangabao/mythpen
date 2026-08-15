@@ -3,16 +3,19 @@
 // Auto-detects provider from model name.
 
 const Anthropic = require('@anthropic-ai/sdk');
-const { resolveStoragePaths } = require('./storage-paths');
 const { logAiDebug } = require('./debug-logger');
 const {
   createRequestParameterConfigLoader,
   resolveRequestBody,
 } = require('./ai-request-parameters');
+const { isManuscriptPersistenceError } = require('./manuscript-service');
 
-const defaultRequestParameterLoader = createRequestParameterConfigLoader({
-  configPath: resolveStoragePaths().aiRequestParametersPath,
-});
+function createDefaultRequestParameterLoader() {
+  const { getStoragePaths } = require('./db');
+  return createRequestParameterConfigLoader({
+    configPath: getStoragePaths().aiRequestParametersPath,
+  });
+}
 
 // ─── Provider detection ───
 // apiType takes priority; fallback to model name heuristic
@@ -154,6 +157,7 @@ async function executeToolCallsWithAbort(toolCalls, streamContext, execute, call
     try {
       result = execute(toolCall);
     } catch (error) {
+      if (isManuscriptPersistenceError(error)) throw error;
       result = { error: error.message };
     }
 
@@ -530,7 +534,7 @@ class ClaudeProvider {
 
 function createAIAdapter(model, apiConfig, apiType, options = {}) {
   const provider = detectProvider(model, apiType);
-  const requestParameterLoader = options.requestParameterLoader || defaultRequestParameterLoader;
+  const requestParameterLoader = options.requestParameterLoader || createDefaultRequestParameterLoader();
   const requestParameterConfig = requestParameterLoader.getSnapshot();
   console.log(`[AI Adapter] Using ${provider} provider for model "${model}" (apiType: ${apiType || 'auto'})`);
 

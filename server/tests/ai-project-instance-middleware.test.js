@@ -1,8 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const test = require('node:test');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -11,9 +10,7 @@ async function startServer(app) {
 }
 
 test('headerless AI requests retain the project incarnation captured at request start', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-ai-project-instance-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -29,11 +26,6 @@ test('headerless AI requests retain the project incarnation captured at request 
   t.after(async () => {
     releaseWrite();
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(projectPath);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();

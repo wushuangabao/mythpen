@@ -1,8 +1,6 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const test = require('node:test');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -19,10 +17,10 @@ async function callApi(baseUrl, pathName, options = {}) {
   return { status: response.status, body: await response.json() };
 }
 
-test('project-data routes remain reachable when the project is named projects', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-project-route-collision-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+test('project-data routes remain reachable when the project is named projects', {
+  timeout: 15_000,
+}, async (t) => {
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -31,13 +29,6 @@ test('project-data routes remain reachable when the project is named projects', 
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    for (const projectName of ['projects', 'chapters', 'cover', 'target-words']) {
-      db.closeProjectDb(db.getProjectDbPath(projectName));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();
@@ -118,4 +109,89 @@ test('project-data routes remain reachable when the project is named projects', 
     headers: { 'X-Mythpen-Project-Instance': projectsProject.body.instanceId },
   });
   assert.equal(deletedProjectsProject.status, 200);
+});
+
+test('reserved project names reach fixed diagnostics routes without the project param guard', {
+  timeout: 15_000,
+}, async (t) => {
+  withIsolatedDataDir(t);
+
+  const db = require('../db');
+  const express = require('express');
+  const apiRouter = require('../routes/api');
+  const {
+    jsonErrorMiddleware,
+    jsonNotFoundMiddleware,
+  } = require('../json-error-middleware');
+  let server;
+  const originalRunWithProjectInstance = db.runWithProjectInstance;
+  let projectParamCalls = 0;
+
+  t.after(async () => {
+    db.runWithProjectInstance = originalRunWithProjectInstance;
+    if (server) await new Promise((resolve) => server.close(resolve));
+  });
+
+  await db.initDatabase();
+  const app = express();
+  app.use(express.json());
+  app.use('/api', apiRouter);
+  app.use(jsonNotFoundMiddleware);
+  app.use(jsonErrorMiddleware);
+  server = await startServer(app);
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}/api`;
+  const reservedNames = [
+    'projects',
+    'chapters',
+    'cover',
+    'target-words',
+    'diagnostics',
+    'recover',
+    'export',
+  ];
+
+  for (const name of reservedNames) {
+    const created = await callApi(baseUrl, '/projects', {
+      method: 'POST',
+      body: { name },
+    });
+    assert.equal(created.status, 200, name);
+  }
+  db.runWithProjectInstance = (...args) => {
+    projectParamCalls += 1;
+    return originalRunWithProjectInstance(...args);
+  };
+
+  for (const name of reservedNames) {
+    const diagnostics = await callApi(
+      baseUrl,
+      `/projects/by-name/${name}/diagnostics`,
+    );
+    assert.equal(diagnostics.status, 200, `${name} GET diagnostics`);
+    assert.equal(diagnostics.body.state, 'ready');
+
+    const recover = await callApi(
+      baseUrl,
+      `/projects/by-name/${name}/diagnostics/recover`,
+      {
+        method: 'POST',
+        body: {
+          action: 'recover_transaction',
+          snapshot: diagnostics.body.snapshot,
+        },
+      },
+    );
+    assert.equal(recover.status, 409, `${name} POST recover`);
+    assert.equal(recover.body.error.code, 'NATIVE_ACTIVATION_DISABLED');
+
+    const exported = await callApi(
+      baseUrl,
+      `/projects/by-name/${name}/diagnostics/export`,
+      { method: 'POST', body: {} },
+    );
+    assert.equal(exported.status, 200, `${name} POST export`);
+    assert.deepEqual(Object.keys(exported.body), ['filename']);
+  }
+  assert.equal(projectParamCalls, 0);
 });

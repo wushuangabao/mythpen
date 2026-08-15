@@ -1,8 +1,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const test = require('node:test');
+const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -37,9 +37,7 @@ async function callJson(baseUrl, pathName, options = {}) {
 }
 
 test('every chapter-count mutation commits aggregate metadata to disk atomically', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-word-count-durability-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  const { dataDir } = withIsolatedDataDir(t);
 
   const initSqlJs = require('sql.js');
   const { getWasmBinary } = require('../wasm-binary');
@@ -54,22 +52,17 @@ test('every chapter-count mutation commits aggregate metadata to disk atomically
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(projectPath);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();
   const projectDb = db.createProjectDb(project);
-  projectDb.transaction(() => {
+  withRawManuscriptSetup(() => projectDb.transaction(() => {
     projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'REST volume')").run();
     projectDb.prepare(`INSERT INTO chapters
       (id, volume_id, num, title, content, word_count, status)
       VALUES (1, 1, 1, 'REST chapter', 'old', 3, 'writing')`).run();
     db.updateProjectWordCount(projectDb);
-  })();
+  })());
 
   const app = express();
   app.use(express.json());
@@ -94,13 +87,13 @@ test('every chapter-count mutation commits aggregate metadata to disk atomically
   assert.equal(deleted.status, 200);
   assert.deepEqual(readDiskSnapshot(SQL, projectPath), { chapters: [], wordCount: '0' });
 
-  projectDb.transaction(() => {
+  withRawManuscriptSetup(() => projectDb.transaction(() => {
     projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (2, 2, 'Deleted REST volume')").run();
     projectDb.prepare(`INSERT INTO chapters
       (id, volume_id, num, title, content, word_count, status)
       VALUES (2, 2, 1, 'Deleted with volume', 'four', 4, 'writing')`).run();
     db.updateProjectWordCount(projectDb);
-  })();
+  })());
   const deletedVolume = await callJson(baseUrl, `/${project}/volumes/2`, { method: 'DELETE' });
   assert.equal(deletedVolume.status, 200);
   assert.deepEqual(readDiskSnapshot(SQL, projectPath), { chapters: [], wordCount: '0' });

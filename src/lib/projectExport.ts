@@ -1,4 +1,5 @@
-import { ApiError, apiUrl } from './api.ts'
+import { ApiError } from './api.ts'
+import { backendFetch } from './backendRuntime.ts'
 import { getProjectInstanceHeaders, getProjectInstanceId, isCurrentProjectInstance } from './projectInstanceRegistry.ts'
 import { runProjectRequest } from './projectRequestGate.ts'
 
@@ -56,7 +57,7 @@ async function fetchProjectFile(
   path: string,
 ): Promise<{ response: Response; scope: ProjectFileScope }> {
   const scope = createProjectFileScope(project)
-  const response = await fetch(apiUrl(path), {
+  const response = await backendFetch(path, {
     cache: 'no-store',
     headers: getProjectInstanceHeaders(project),
   })

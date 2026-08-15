@@ -1,9 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { useT } from '@/hooks/useT'
-
-const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-const API_BASE = isTauri ? 'http://127.0.0.1:3001/api' : '/api'
-const HEALTH_URL = `${API_BASE}/health`
+import { backendFetch } from '@/lib/backendRuntime'
 
 const MAX_RETRIES = 20
 
@@ -26,7 +23,7 @@ export function ServerStatusGate({ children }: Props) {
 
     const check = async () => {
       try {
-        const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(3000) })
+        const res = await backendFetch('/health', { signal: AbortSignal.timeout(3000) })
         if (cancelled) return
         if (res.ok) {
           setStatus('ready')

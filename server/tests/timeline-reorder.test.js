@@ -1,8 +1,6 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const test = require('node:test');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -20,9 +18,7 @@ async function callApi(baseUrl, pathName, options = {}) {
 }
 
 test('automatic and manual timeline order are persisted and used by AI list queries', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-timeline-reorder-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -33,12 +29,6 @@ test('automatic and manual timeline order are persisted and used by AI list quer
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(db.getProjectDbPath(project));
-    // The config DB batches its initial schema flush for 250 ms.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();

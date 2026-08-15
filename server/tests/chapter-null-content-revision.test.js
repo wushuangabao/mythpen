@@ -1,13 +1,12 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 test('NULL chapter content migrates and participates in revision CAS as canonical blank text', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-null-chapter-content-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  const { dataDir } = withIsolatedDataDir(t);
   const legacyProject = 'legacy-null-content';
   const runtimeProject = 'runtime-null-content';
   const legacyPath = path.join(dataDir, 'projects', `${legacyProject}.mythpen.db`);
@@ -28,15 +27,6 @@ test('NULL chapter content migrates and participates in revision CAS as canonica
 
   const db = require('../db');
   const { applyRevision, createPendingRevision, getActiveRevision } = require('../chapter-revisions');
-  t.after(async () => {
-    db.closeProjectDb(db.getProjectDbPath(legacyProject));
-    db.closeProjectDb(db.getProjectDbPath(runtimeProject));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
-  });
-
   await db.initDatabase();
   const migratedDb = db.getProjectDb(legacyProject);
   assert.equal(
@@ -47,9 +37,9 @@ test('NULL chapter content migrates and participates in revision CAS as canonica
 
   const projectDb = db.createProjectDb(runtimeProject);
   projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
-  projectDb.prepare(`INSERT INTO chapters
+  withRawManuscriptSetup(() => projectDb.prepare(`INSERT INTO chapters
     (id, volume_id, num, title, content, word_count, status)
-    VALUES (1, 1, 1, 'Blank chapter', NULL, 0, 'writing')`).run();
+    VALUES (1, 1, 1, 'Blank chapter', NULL, 0, 'writing')`).run());
 
   const created = createPendingRevision(runtimeProject, 1, '', 'Polished blank chapter');
   assert.equal(created.rebased, false);

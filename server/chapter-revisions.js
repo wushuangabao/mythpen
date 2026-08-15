@@ -1,4 +1,5 @@
 const db = require('./db');
+const { internals: manuscriptInternals } = require('./manuscript-service');
 
 const DECISIONS = new Set(['accepted', 'rejected']);
 const CHAPTER_STATUSES = new Set(['pending', 'writing', 'review', 'accepted']);
@@ -199,8 +200,7 @@ function applyRevision(projectName, revisionId, action, content, expectedBaseCon
   if (typeof expectedBaseContent !== 'string') return { invalid: true };
   if (action === 'finalize' && !isDecisionMap(expectedDecisions)) return { invalid: true };
 
-  const projectDb = db.getProjectDb(projectName);
-  const result = projectDb.transaction(() => {
+  const applyInTransaction = (projectDb) => {
     const revision = getPendingRevision(projectDb, revisionId);
     if (!revision) return { missing: true };
 
@@ -246,10 +246,15 @@ function applyRevision(projectName, revisionId, action, content, expectedBaseCon
 
     const nextContent = action === 'accept-all' ? revision.proposed_content : content;
     if (typeof nextContent !== 'string') return { invalid: true };
-    const wordCount = nextContent.replace(/\s/g, '').length;
-    const updated = projectDb
-      .prepare("UPDATE chapters SET content = ?, word_count = ?, status = 'accepted', updated_at = datetime('now') WHERE id = ? AND COALESCE(content, '') = ?")
-      .run(nextContent, wordCount, revision.chapter_id, revision.base_content ?? '');
+    const updated = manuscriptInternals.writeChapterBodyInTransaction({
+      projectName,
+      projectDb,
+      chapterId: revision.chapter_id,
+      content: nextContent,
+      expectedBodyContent: revision.base_content ?? '',
+      source: 'revision_accept',
+      status: 'accepted',
+    });
     if (updated.changes === 0) {
       const latestRevision = getPendingRevision(projectDb, revisionId);
       if (!latestRevision) return { missing: true };
@@ -259,18 +264,20 @@ function applyRevision(projectName, revisionId, action, content, expectedBaseCon
     projectDb
       .prepare("UPDATE chapter_revisions SET status = 'accepted', updated_at = datetime('now'), resolved_at = datetime('now') WHERE id = ?")
       .run(revisionId);
-    db.updateProjectWordCount(projectDb);
-    const persistedChapter = projectDb
-      .prepare('SELECT data_version FROM chapters WHERE id = ?')
-      .get(revision.chapter_id);
     return {
       accepted: true,
       chapterId: revision.chapter_id,
-      content: nextContent,
-      wordCount,
-      dataVersion: persistedChapter?.data_version,
+      content: updated.content,
+      wordCount: updated.wordCount,
+      dataVersion: updated.dataVersion,
     };
-  })();
+  };
+  const result = action === 'reject-all'
+    ? (() => {
+      const projectDb = db.getProjectDb(projectName);
+      return projectDb.transaction(() => applyInTransaction(projectDb))();
+    })()
+    : db.runManuscriptTransaction(projectName, applyInTransaction);
   return result;
 }
 

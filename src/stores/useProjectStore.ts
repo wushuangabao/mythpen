@@ -17,6 +17,12 @@ import {
   rememberProjectInstance,
   replaceProjectInstances,
 } from '@/lib/projectInstanceRegistry'
+import {
+  chooseProjectAfterList,
+  normalizeProjectOpenFields,
+  projectSelectionTransition,
+  selectReadyFallback,
+} from '@/lib/projectRecovery'
 import { createRequestCommitTracker } from '@/lib/requestCommitTracker'
 import { retireProjectRevisionMutations } from '@/lib/revisionMutationReconciliation'
 import { discardProjectTitleSaves, retireStaleProjectTitleSaves } from '@/lib/titleSaveQueue'
@@ -27,18 +33,24 @@ import type { WorkflowPhase } from '@/types'
 
 type ProjectSummary = ProjectSummaryRecord
 
+interface ProjectListLoadOptions {
+  shouldCommit?: () => boolean
+}
+
 interface ProjectState {
   currentProject: string | null
+  recoveryTarget: string | null
   projects: ProjectSummary[]
   showProjectList: boolean
   loading: boolean
   error: string | null
   workflowPhase: WorkflowPhase
   setCurrentProject: (name: string | null) => void
+  completeRecoveredProject: (name: string) => void
   toggleProjectList: () => void
   showProjectListFn: () => void
   hideProjectList: () => void
-  loadProjects: () => Promise<void>
+  loadProjects: (options?: ProjectListLoadOptions) => Promise<void>
   loadPhase: (project: string) => Promise<void>
   setPhase: (project: string, phase: WorkflowPhase) => Promise<void>
   createProject: (name: string, opts?: { mode?: string; language?: string; genres?: string[] }) => Promise<void>
@@ -64,6 +76,7 @@ function retireProjectInstanceState(change: ProjectInstanceChange): void {
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
   currentProject: null,
+  recoveryTarget: null,
   projects: [],
   showProjectList: false,
   loading: false,
@@ -71,49 +84,89 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   workflowPhase: 'idea',
 
   setCurrentProject: (name) => {
+    if (name === null) {
+      const previousProject = get().currentProject
+      if (previousProject) retireAgentProjectState(previousProject)
+      localStorage.setItem('mythpen-current-project', '')
+      phaseRequests.activate('')
+      set({ currentProject: null, recoveryTarget: null, showProjectList: false })
+      useChapterStore.getState().activateProject(null)
+      return
+    }
+
+    const project = get().projects.find((candidate) => candidate.name === name) ?? { name }
+    const transition = projectSelectionTransition(project, get().currentProject)
+    if (!transition.activateWorkspace) {
+      set({ recoveryTarget: transition.recoveryTarget, showProjectList: false })
+      return
+    }
+
     const previousProject = get().currentProject
     if (previousProject !== name && previousProject) retireAgentProjectState(previousProject)
-    localStorage.setItem('mythpen-current-project', name || '')
+    localStorage.setItem('mythpen-current-project', name)
     // A key change advances the request epoch. In particular, A -> B -> A
     // cannot revive a phase response from the previous A activation.
     phaseRequests.activate(name || '')
-    set({ currentProject: name, showProjectList: false })
+    set({ currentProject: name, recoveryTarget: null, showProjectList: false })
     useChapterStore.getState().activateProject(name)
   },
 
-  toggleProjectList: () => set((s) => ({ showProjectList: !s.showProjectList })),
-  showProjectListFn: () => set({ showProjectList: true }),
+  completeRecoveredProject: (name) => {
+    if (get().recoveryTarget !== name) return
+    const project = get().projects.find((candidate) => candidate.name === name)
+    if (!project || normalizeProjectOpenFields(project).openState !== 'ready') return
+    get().setCurrentProject(name)
+  },
+
+  toggleProjectList: () =>
+    set((state) =>
+      state.showProjectList ? { showProjectList: false } : { showProjectList: true, recoveryTarget: null },
+    ),
+  showProjectListFn: () => set({ showProjectList: true, recoveryTarget: null }),
   hideProjectList: () => set({ showProjectList: false }),
 
-  loadProjects: async () => {
+  loadProjects: async (options = {}) => {
     const projectListRequest = projectListRequests.start('projects')
     if (!projectListRequest) return
     set({ loading: true, error: null })
     try {
-      const listedProjects = await projectsApi.list()
+      const listedProjects = (await projectsApi.list()) as ProjectSummary[]
+      if (options.shouldCommit && !options.shouldCommit()) {
+        if (projectListRequests.isLatest(projectListRequest)) set({ loading: false })
+        return
+      }
       if (!projectListRequests.claimSuccess(projectListRequest)) return
-      const instanceChanges = replaceProjectInstances(listedProjects)
+      const normalizedProjects = listedProjects.map((project) => ({
+        ...project,
+        ...normalizeProjectOpenFields(project),
+      }))
+      const readyProjects = normalizedProjects.filter((project) => project.openState === 'ready')
+      const instanceChanges = replaceProjectInstances(readyProjects)
       for (const change of instanceChanges) {
         retireProjectInstanceState(change)
       }
-      const projects = listedProjects.map((project: ProjectSummary) => ({
+      const projects = normalizedProjects.map((project) => ({
         ...project,
-        // A temporarily unreadable fallback row can omit the token. Mirror the
-        // registry's fail-closed last-known value into reactive UI state.
-        instanceId: project.instanceId || getProjectInstanceId(project.name),
+        instanceId:
+          project.openState === 'ready' ? project.instanceId || getProjectInstanceId(project.name) : undefined,
       }))
-      // Restore last selected project
       const saved = localStorage.getItem('mythpen-current-project')
-      const currentProject = projects.find((p: any) => p.name === saved) ? saved : projects[0]?.name || null
-      const previousProject = get().currentProject
+      const previousState = get()
+      const currentProject = chooseProjectAfterList(projects, {
+        savedProject: saved,
+        currentProject: previousState.currentProject,
+        recoveryTarget: previousState.recoveryTarget,
+      })
+      const previousProject = previousState.currentProject
       if (previousProject !== currentProject && previousProject) retireAgentProjectState(previousProject)
-      // No projects → show the project list (new user / all deleted)
-      const showProjectList = projects.length === 0
-      phaseRequests.activate(currentProject || '')
+      if (previousProject !== currentProject) {
+        phaseRequests.activate(currentProject || '')
+        useChapterStore.getState().activateProject(currentProject)
+      }
+      const showProjectList = previousState.recoveryTarget ? false : currentProject === null
       set({ projects, currentProject, showProjectList, loading: false })
-      useChapterStore.getState().activateProject(currentProject)
-      // Load phase for the current project
-      if (currentProject) {
+
+      if (currentProject && !previousState.recoveryTarget) {
         const phaseRequest = phaseRequests.start(currentProject)
         if (!phaseRequest) return
         try {
@@ -128,14 +181,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         }
       }
     } catch (err) {
+      if (options.shouldCommit && !options.shouldCommit()) {
+        if (projectListRequests.isLatest(projectListRequest)) set({ loading: false })
+        return
+      }
       if (projectListRequests.isLatest(projectListRequest)) {
-        set({ error: (err as any).message, loading: false, showProjectList: true })
+        set({
+          error: (err as any).message,
+          loading: false,
+          showProjectList: get().recoveryTarget ? false : true,
+        })
       }
     }
   },
 
   loadPhase: async (project) => {
-    if (get().currentProject !== project) return
+    const state = get()
+    if (
+      state.currentProject !== project ||
+      state.recoveryTarget ||
+      normalizeProjectOpenFields(state.projects.find((candidate) => candidate.name === project) ?? {}).openState !==
+        'ready'
+    )
+      return
     phaseRequests.activate(project)
     const request = phaseRequests.start(project)
     if (!request) return
@@ -150,9 +218,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   setPhase: async (project, phase) => {
-    const isActiveProject = get().currentProject === project
-    if (isActiveProject) phaseRequests.activate(project)
-    const request = isActiveProject ? phaseRequests.start(project) : null
+    const state = get()
+    const isActiveProject =
+      state.currentProject === project &&
+      !state.recoveryTarget &&
+      normalizeProjectOpenFields(state.projects.find((candidate) => candidate.name === project) ?? {}).openState ===
+        'ready'
+    if (!isActiveProject) return
+    phaseRequests.activate(project)
+    const request = phaseRequests.start(project)
     try {
       await projectsApi.setPhase(project, phase)
       if (request && get().currentProject === project && phaseRequests.claimSuccess(request)) {
@@ -192,9 +266,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
       // 3. Reload project list & set current
       await useProjectStore.getState().loadProjects()
-      phaseRequests.activate(name)
-      set({ currentProject: name, showProjectList: false, loading: false, error: null, workflowPhase: 'idea' })
-      useChapterStore.getState().activateProject(name)
+      useProjectStore.getState().setCurrentProject(name)
+      if (get().currentProject !== name || get().recoveryTarget) {
+        set({ loading: false })
+        return
+      }
+      set({ loading: false, error: null, workflowPhase: 'idea' })
 
       // 4. Load chapters into sidebar & navigate to Writing page
       await useChapterStore.getState().loadChapters(name)
@@ -206,6 +283,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   deleteProject: async (name) => {
+    const project = get().projects.find((candidate) => candidate.name === name)
+    if (!project || normalizeProjectOpenFields(project).openState !== 'ready') {
+      set({ error: t('recovery.deleteBlocked'), loading: false })
+      return
+    }
     const expectedInstanceId = getProjectInstanceId(name)
     if (!expectedInstanceId) {
       set({ error: '项目实例尚未加载，已取消删除', loading: false })
@@ -247,19 +329,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       // project. Its cached list is still the safest fallback for every other
       // project, but the deleted entry itself must disappear synchronously.
       const transition = removeDeletedProject(get().projects, get().currentProject, name)
+      const fallbackProject = transition.deletedCurrentProject
+        ? selectReadyFallback(transition.projects)
+        : transition.currentProject
       if (transition.deletedCurrentProject) {
         retireAgentProjectState(name, expectedInstanceId)
-        localStorage.setItem('mythpen-current-project', transition.currentProject || '')
-        phaseRequests.activate(transition.currentProject || '')
+        localStorage.setItem('mythpen-current-project', fallbackProject || '')
+        phaseRequests.activate(fallbackProject || '')
       }
       set((state) => ({
         projects: transition.projects,
-        currentProject: transition.currentProject,
-        showProjectList: transition.projects.length === 0 ? true : state.showProjectList,
+        currentProject: fallbackProject,
+        showProjectList:
+          transition.deletedCurrentProject && !fallbackProject && !state.recoveryTarget ? true : state.showProjectList,
         workflowPhase: transition.deletedCurrentProject ? 'idea' : state.workflowPhase,
       }))
       if (transition.deletedCurrentProject) {
-        useChapterStore.getState().activateProject(transition.currentProject)
+        useChapterStore.getState().activateProject(fallbackProject)
       }
 
       await useProjectStore.getState().loadProjects()

@@ -1,8 +1,13 @@
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { openControlStore } = require('../control-store');
+const { canonicalDatabasePath } = require('../sqljs-atomic-store');
+const { FAULT_POINTS, withFaults } = require('../testing/fault-injection');
+const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -19,10 +24,14 @@ async function callApi(baseUrl, pathName, options = {}) {
   return { status: response.status, body: await response.json() };
 }
 
+function projectControlStore(database, projectName) {
+  const filePath = database.getProjectDbPath(projectName);
+  const dbKey = createHash('sha256').update(canonicalDatabasePath(filePath)).digest('hex');
+  return openControlStore(path.join(database.getDataDir(), 'control', 'sqlite', dbKey));
+}
+
 test('chapter writes use stable ids and stale versions cannot overwrite accepted revisions', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-chapter-update-api-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -32,11 +41,6 @@ test('chapter writes use stable ids and stale versions cannot overwrite accepted
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(db.getProjectDbPath(project));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();
@@ -65,6 +69,10 @@ test('chapter writes use stable ids and stale versions cannot overwrite accepted
   assert.equal(second.body.volume_id, 2);
   assert.notEqual(first.body.id, second.body.id);
 
+  const updateControlStore = projectControlStore(db, project);
+  const updateEventsBefore = updateControlStore.read();
+  const preparedBeforeUpdate = updateEventsBefore
+    .filter((event) => event.type === 'sqlite.publish.prepared').length;
   const preciseUpdate = await callApi(baseUrl, `/${project}/chapters/1`, {
     method: 'PUT',
     body: { chapter_id: first.body.id, title: 'Saved volume one chapter', content: 'Saved content' },
@@ -79,6 +87,16 @@ test('chapter writes use stable ids and stale versions cannot overwrite accepted
     projectDb.prepare('SELECT title, content FROM chapters WHERE id = ?').get(second.body.id),
     { title: 'Volume two chapter', content: '' },
   );
+  const updateEventsAfter = updateControlStore.read();
+  assert.equal(
+    updateEventsAfter.filter((event) => event.type === 'sqlite.publish.prepared').length,
+    preparedBeforeUpdate + 1,
+  );
+  const restSourceEvent = updateEventsAfter
+    .filter((event) => event.type === 'manuscript.body_mutation.attempt')
+    .at(-1);
+  assert.equal(restSourceEvent.payload.source, 'rest');
+  assert.equal(updateEventsAfter[updateEventsAfter.indexOf(restSourceEvent) + 1].type, 'sqlite.publish.prepared');
 
   const chaptersBeforeMismatchedUpdate = projectDb
     .prepare('SELECT id, title, content FROM chapters ORDER BY id')
@@ -246,4 +264,86 @@ test('chapter writes use stable ids and stale versions cannot overwrite accepted
   });
   assert.equal(missing.status, 404);
   assert.equal(missing.body.error.code, 'DB_NOT_FOUND');
+});
+
+test('chapter PUT publication failure returns the primary error and leaves formal bytes unchanged', async (t) => {
+  withIsolatedDataDir(t);
+  const db = require('../db');
+  const express = require('express');
+  const apiRouter = require('../routes/api');
+  const project = 'chapter-update-publication-failure';
+  let server;
+  t.after(async () => {
+    if (server) await new Promise((resolve) => server.close(resolve));
+  });
+
+  await db.initDatabase();
+  const projectDb = db.createProjectDb(project);
+  projectDb.prepare("INSERT INTO volumes (id, sort_order, title) VALUES (1, 1, 'Volume')").run();
+  withRawManuscriptSetup(() => projectDb
+    .prepare("INSERT INTO chapters (volume_id, num, title, content, word_count) VALUES (1, 1, 'Before title', 'Before body', 10)")
+    .run());
+  const chapter = projectDb.prepare('SELECT * FROM chapters WHERE id = 1').get();
+  const projectPath = db.getProjectDbPath(project);
+  const formalBefore = fs.readFileSync(projectPath);
+  const controlStore = projectControlStore(db, project);
+  const preparedBefore = controlStore.read().filter((event) => event.type === 'sqlite.publish.prepared').length;
+  // Drain the unrelated delayed config-db flush before enabling a process-wide
+  // AtomicStore fault intended only for this project's synchronous request.
+  db.flushAllDatabases();
+  const { projectWriteDiagnostics } = require('../testing/database-internals');
+  db.closeProjectDb(projectPath);
+  const leaseCountBefore = projectWriteDiagnostics().leaseAcquisitionCount(projectPath);
+
+  const app = express();
+  app.use(express.json());
+  app.use('/api', apiRouter);
+  app.use((error, _req, res, _next) => {
+    res.status(503).json({ code: error.code, faultPoint: error.faultPoint });
+  });
+  server = await startServer(app);
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}/api`;
+
+  const response = await withFaults({
+    [FAULT_POINTS.ATOMIC_STORE_PUBLISH_BEFORE_CANDIDATE_WRITE]: { throw: 'EIO' },
+  }, async () => callApi(baseUrl, `/${project}/chapters/1`, {
+    method: 'PUT',
+    body: {
+      chapter_id: chapter.id,
+      expected_data_version: chapter.data_version,
+      title: 'After title',
+      content: 'After body',
+    },
+  }));
+
+  assert.equal(response.status, 503);
+  assert.equal(
+    projectWriteDiagnostics().leaseAcquisitionCount(projectPath),
+    leaseCountBefore + 1,
+  );
+  assert.deepEqual(response.body, {
+    code: 'EIO',
+    faultPoint: FAULT_POINTS.ATOMIC_STORE_PUBLISH_BEFORE_CANDIDATE_WRITE,
+  });
+  assert.deepEqual(fs.readFileSync(projectPath), formalBefore);
+  const events = controlStore.read();
+  assert.equal(
+    events.filter((event) => event.type === 'sqlite.publish.prepared').length,
+    preparedBefore,
+  );
+  const sourceEvent = events.filter((event) => event.type === 'manuscript.body_mutation.attempt').at(-1);
+  assert.equal(sourceEvent.payload.source, 'rest');
+  assert.equal(JSON.stringify(sourceEvent).includes('After body'), false);
+  assert.equal(JSON.stringify(sourceEvent).includes('After title'), false);
+
+  db.projectExecute(
+    project,
+    'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
+    ['after_failed_rest_body', 1, 1, 'model'],
+  );
+  assert.deepEqual(
+    db.projectGet(project, 'SELECT title, content FROM chapters WHERE id = ?', [chapter.id]),
+    { title: 'Before title', content: 'Before body' },
+  );
 });

@@ -1,3 +1,5 @@
+import type { ProjectOpenState, RecoveryAction } from '../types/index.ts'
+
 export interface ProjectSummaryRecord {
   id: string
   name: string
@@ -9,6 +11,9 @@ export interface ProjectSummaryRecord {
   status: string
   mode?: string
   instanceId?: string
+  openState: ProjectOpenState
+  reasonCode: string | null
+  recommendedAction: RecoveryAction | null
 }
 
 interface ProjectCreationOptions {
@@ -42,6 +47,9 @@ export function createProjectFallbackSummary(
       typeof createdProject.instanceId === 'string' && createdProject.instanceId
         ? createdProject.instanceId
         : undefined,
+    openState: 'ready',
+    reasonCode: null,
+    recommendedAction: null,
   }
 }
 

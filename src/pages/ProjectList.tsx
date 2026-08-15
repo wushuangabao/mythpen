@@ -1,8 +1,9 @@
-import { BookOpen, Trash2, X } from 'lucide-react'
+import { AlertTriangle, BookOpen, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { useT } from '@/hooks/useT'
 import { activateOnKeyDown } from '@/lib/a11y'
+import { recoveryReasonI18nKey } from '@/lib/projectRecovery'
 import { useProjectStore } from '@/stores/useProjectStore'
 import { useUIStore } from '@/stores/useUIStore'
 
@@ -25,11 +26,12 @@ export function ProjectList() {
   const totalWords = projects.reduce((s, p) => s + p.wordCount, 0)
 
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const deleteTargetProject = projects.find((project) => project.name === deleteTarget)
 
   if (!showProjectList) return null
 
   const handleDelete = async () => {
-    if (!deleteTarget) return
+    if (!deleteTarget || deleteTargetProject?.openState !== 'ready') return
     const name = deleteTarget
     setDeleteTarget(null)
     await deleteProject(name)
@@ -69,29 +71,43 @@ export function ProjectList() {
                 /* biome-ignore lint/a11y/useSemanticElements: the project card contains a separate delete button. */
                 <div
                   key={p.id}
-                  className="group relative bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-lg p-5 cursor-pointer transition-all hover:border-[var(--hairline-light)] hover:bg-[var(--canvas-elevated)] hover:-translate-y-px"
+                  className={`group relative bg-[var(--canvas-card)] border rounded-lg p-5 cursor-pointer transition-all hover:bg-[var(--canvas-elevated)] hover:-translate-y-px ${
+                    p.openState === 'isolated'
+                      ? 'border-amber-500/50 hover:border-amber-500/70'
+                      : 'border-[var(--hairline)] hover:border-[var(--hairline-light)]'
+                  }`}
                   role="button"
                   tabIndex={0}
                   onKeyDown={activateOnKeyDown}
                   onClick={() => setCurrentProject(p.name)}
                 >
-                  {/* Delete button — visible on hover */}
-                  <button
-                    type="button"
-                    className="absolute top-3 right-3 w-7 h-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 hover:bg-[var(--canvas-mid)] text-[var(--ink-tertiary)] hover:text-red-500 transition-all"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setDeleteTarget(p.name)
-                    }}
-                    title={t('project.deleteTooltip')}
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  {p.openState === 'ready' && (
+                    <button
+                      type="button"
+                      className="absolute top-3 right-3 w-7 h-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 hover:bg-[var(--canvas-mid)] text-[var(--ink-tertiary)] hover:text-red-500 transition-all"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setDeleteTarget(p.name)
+                      }}
+                      title={t('project.deleteTooltip')}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
 
                   <div className="mb-2.5">
                     <ProjectIcon name={p.iconName} className="w-7 h-7" />
                   </div>
                   <div className="font-display text-lg font-medium text-[var(--ink)] mb-1">{p.name}</div>
+                  {p.openState === 'isolated' && (
+                    <div className="mb-2.5 rounded-md bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                      <div className="mb-1 flex items-center gap-1 font-medium">
+                        <AlertTriangle size={12} />
+                        {t('recovery.isolated')}
+                      </div>
+                      <div>{t(recoveryReasonI18nKey(p.reasonCode))}</div>
+                    </div>
+                  )}
                   <div className="flex gap-1 flex-wrap mb-2.5">
                     {p.genres.map((g) => (
                       <span
@@ -132,7 +148,7 @@ export function ProjectList() {
       </div>
 
       {/* Delete confirmation dialog */}
-      {deleteTarget && (
+      {deleteTarget && deleteTargetProject?.openState === 'ready' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" role="presentation">
           <button
             type="button"

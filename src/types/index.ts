@@ -1,4 +1,42 @@
 // ─── Project ───
+export type ProjectOpenState = 'ready' | 'isolated'
+
+export type RecoveryAction = 'recover_transaction' | 'recover_v1_publication' | 'adopt_same_path_identity'
+
+export interface ProjectDiagnostics {
+  state: 'ready' | 'isolated'
+  reasonCode: string | null
+  protocol: string
+  backend: string
+  schema: number | null
+  triggerVersion: number | null
+  expectedTriggerSetDigest: string | null
+  projectMetaTriggerSetDigest: string | null
+  observedTriggerSetDigest: string | null
+  dbIdentity: { dev: string; ino: string } | null
+  expectedIdentity: { dev: string; ino: string } | null
+  projectInstanceIdSha256: string | null
+  currentSeq: number | null
+  expectedSeq: number | null
+  controlStore: {
+    tail: { seq: number; digest: string } | null
+    checkpoint: null
+    events: Array<{ seq: number; type: string; digest: string; prevDigest: string | null }>
+  }
+  integrity: { integrityCheck: string; foreignKeyCheck: string }
+  platformCapabilities: {
+    backend: string
+    exclusiveLease: boolean
+    directoryFsync: boolean
+    atomicReplace: boolean
+    verifiedAbsentInstall: boolean
+  }
+  canAutoRecover: boolean
+  canAdoptIdentity: boolean
+  recommendedAction: RecoveryAction | null
+  snapshot: string
+}
+
 export interface ProjectInfo {
   id: string
   name: string
@@ -11,6 +49,9 @@ export interface ProjectInfo {
   lastOpened: string
   status: string
   instanceId?: string
+  openState: ProjectOpenState
+  reasonCode: string | null
+  recommendedAction: RecoveryAction | null
 }
 
 export interface ProjectMeta {

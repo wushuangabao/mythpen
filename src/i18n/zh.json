@@ -202,6 +202,51 @@
     },
     "createFailed": "创建失败"
   },
+  "recovery": {
+    "title": "项目需要恢复检查",
+    "description": "为了保护项目现场，Mythpen 已阻止进入编辑器和普通项目请求。",
+    "currentProject": "项目：{project}",
+    "isolated": "已安全隔离",
+    "refresh": "刷新诊断",
+    "recover": "尝试自动恢复",
+    "export": "导出诊断包",
+    "back": "返回项目列表",
+    "protect": "请不要删除、覆盖或移动该项目文件，否则可能丢失可恢复的现场。",
+    "exportedFilename": "诊断包已导出：{filename}",
+    "deleteBlocked": "已隔离的项目不能在此删除，请先导出诊断包。",
+    "pending": {
+      "refresh": "正在刷新诊断…",
+      "recover": "正在安全恢复并重新验证项目…",
+      "export": "正在导出诊断包…"
+    },
+    "reason": {
+      "ready": "诊断显示项目已就绪，仍需完成项目列表复核后才能进入。",
+      "forwardRecoverable": "发现可唯一判定的未完成发布，可尝试自动前滚恢复。",
+      "rollbackRecoverable": "发现可唯一判定的未完成发布，可尝试自动回滚恢复。",
+      "recoveryRequired": "当前现场无法自动唯一判定，需要进一步检查。",
+      "schemaTooNew": "项目由更新版本创建，请使用支持该数据库版本的 Mythpen。",
+      "notProjectDatabase": "注册文件不是可识别的 Mythpen 项目数据库。",
+      "identityRebind": "注册路径的文件身份已变化，当前版本不会自动接管。",
+      "durabilityUnsupported": "当前平台或存储位置不满足安全恢复要求。",
+      "storageUnavailable": "存储资源状态不明，暂时不能安全打开项目。",
+      "busy": "项目或配置正被其他进程使用，请稍后刷新。",
+      "stale": "诊断后现场已变化，请重新刷新诊断。",
+      "activationDisabled": "当前构建不允许该恢复动作。",
+      "generic": "项目无法安全打开，需要检查或恢复。"
+    },
+    "error": {
+      "busy": "项目正在使用中，本次操作未执行。",
+      "stale": "现场已变化，不会使用旧诊断自动重试。请手动刷新。",
+      "recoveryRequired": "恢复后的双重安全复核未通过，项目仍保持隔离。",
+      "schemaTooNew": "当前版本不支持该项目的数据库版本。",
+      "notProjectDatabase": "该文件不是可识别的 Mythpen 项目数据库。",
+      "identityRebind": "文件身份需要单独确认，当前版本不会自动处理。",
+      "durabilityUnsupported": "当前平台或存储位置不支持此安全操作。",
+      "storageUnavailable": "存储资源暂时不可用，项目仍保持隔离。",
+      "unavailable": "当前构建不允许此操作。",
+      "generic": "操作失败，项目现场已保留。请刷新诊断或导出诊断包。"
+    }
+  },
   "settings": {
     "title": "设置",
     "uiLanguage": "界面语言",
@@ -386,6 +431,22 @@
     "starting": "正在启动",
     "retry": "重试",
     "quit": "退出"
+  },
+  "shutdown": {
+    "title": "正在安全退出",
+    "saving": "正在停止新的写入并等待已接纳的保存完成。",
+    "closing": "数据库资源正在关闭，此阶段已不能取消退出。",
+    "softDeadline": "安全退出耗时较长。你可以继续等待、取消退出，或明确选择紧急退出。",
+    "waitingForChild": "保存已完成，正在等待服务进程正常结束。",
+    "failed": "安全退出未能完成（{code}）。现场不会被自动覆盖。",
+    "continueWaiting": "继续等待",
+    "waiting": "等待中…",
+    "cancelExit": "取消退出",
+    "cancelling": "正在取消…",
+    "emergencyExit": "紧急退出",
+    "emergencyWarning": "紧急退出会强制结束本应用拥有的服务进程，未完成的操作可能在下次启动时触发恢复。仅在你确认无法继续等待时使用。",
+    "back": "返回",
+    "confirmEmergency": "确认紧急退出"
   },
   "dashboard": {
     "advancePhase": "进入下一阶段",

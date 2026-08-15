@@ -2,6 +2,7 @@
  * 种子数据脚本，用来创建一个名叫做 "我的科幻小说" 的示例项目，包含完整的演示数据
  */
 const { initDatabase, createProjectDb, getProjectDbPath, getConfigDb } = require('./db');
+const { withOfflineSeedBootstrap } = require('./offline-seed-capability');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 
@@ -40,7 +41,9 @@ function seedProject(name) {
     { id: 5, volume_id: 2, num: 5, title: '新世界', outline: '', content: '', word_count: 0, status: 'pending', cognitive_frame: '', emotional_anchor: '', world_texture: '', concrete_mystery: '', interpersonal_tension: '' },
   ];
   const chInsert = db.prepare(`INSERT INTO chapters (id, volume_id, num, title, outline, content, word_count, status, cognitive_frame, emotional_anchor, world_texture, concrete_mystery, interpersonal_tension) VALUES (@id, @volume_id, @num, @title, @outline, @content, @word_count, @status, @cognitive_frame, @emotional_anchor, @world_texture, @concrete_mystery, @interpersonal_tension)`);
-  for (const ch of chapters) chInsert.run(ch);
+  withOfflineSeedBootstrap(() => {
+    for (const ch of chapters) chInsert.run(ch);
+  });
 
   // ─── Characters ───
   const chars = [

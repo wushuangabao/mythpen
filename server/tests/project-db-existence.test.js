@@ -1,8 +1,10 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
+const { canonicalDatabasePath } = require('../sqljs-atomic-store');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -11,9 +13,7 @@ async function startServer(app) {
 }
 
 test('ordinary project access never recreates a missing or deleted database', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-project-existence-'));
-  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
-  process.env.MYTHPEN_DATA_DIR = dataDir;
+  const { dataDir } = withIsolatedDataDir(t);
 
   const db = require('../db');
   const express = require('express');
@@ -24,11 +24,6 @@ test('ordinary project access never recreates a missing or deleted database', as
 
   t.after(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
-    db.closeProjectDb(projectPath);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    fs.rmSync(dataDir, { recursive: true, force: true });
-    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
-    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
   });
 
   await db.initDatabase();
@@ -53,6 +48,18 @@ test('ordinary project access never recreates a missing or deleted database', as
   assert.equal(fs.existsSync(projectPath), false);
 
   const replacementDb = db.createProjectDb(project);
+  const canonicalProjectPath = canonicalDatabasePath(projectPath);
+  const dbKey = crypto.createHash('sha256').update(canonicalProjectPath).digest('hex');
+  const controlParent = path.join(dataDir, 'control', 'sqlite');
+  const retiredDirectories = fs.readdirSync(controlParent).filter(
+    (name) => new RegExp(`^${dbKey}\\.retired-[0-9a-f-]{36}$`).test(name),
+  );
+  assert.equal(retiredDirectories.length, 1, 'the old incarnation evidence is retained exactly once');
+  assert.ok(
+    fs.readdirSync(path.join(controlParent, retiredDirectories[0])).some((name) => name.endsWith('.json')),
+    'the retired incarnation keeps its journal evidence',
+  );
+  assert.equal(fs.existsSync(path.join(controlParent, dbKey)), true);
   const replacementInstanceId = replacementDb
     .prepare("SELECT value FROM project_meta WHERE key = 'project_instance_id'")
     .get().value;
@@ -108,7 +115,41 @@ test('ordinary project access never recreates a missing or deleted database', as
   const missingResponse = await fetch(`${baseUrl}/${project}/chapters`);
   assert.equal(missingResponse.status, 404);
   assert.deepEqual(await missingResponse.json(), {
-    error: { code: 'PROJECT_NOT_FOUND', message: `项目"${project}"不存在`, recoverable: true },
+    error: { code: 'PROJECT_NOT_FOUND', message: '项目不存在', recoverable: true },
   });
   assert.equal(fs.existsSync(projectPath), false);
+});
+
+test('project connection cache uses the Windows canonical physical path key', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows path aliases are case-insensitive');
+  withIsolatedDataDir(t);
+  const db = require('../db');
+  await db.initDatabase();
+  const filePath = db.getProjectDbPath('canonical-cache');
+  const first = db.openProjectDb(filePath);
+  first.flush();
+
+  const second = db.openProjectDb(filePath.toUpperCase());
+
+  assert.equal(second, first);
+  db.closeProjectDb(filePath.toUpperCase());
+});
+
+test('ordinary off-mode open still rejects schema11 without activated admission', async (t) => {
+  withIsolatedDataDir(t);
+  const db = require('../db');
+  await db.initDatabase();
+  const project = 'schema11-without-native-admission';
+  const filePath = db.getProjectDbPath(project);
+  const projectDb = db.createProjectDb(project);
+  projectDb
+    .prepare("UPDATE project_meta SET value = '11' WHERE key = 'schema_version'")
+    .run();
+  projectDb.flush();
+  db.closeProjectDb(filePath);
+
+  assert.throws(
+    () => db.captureProjectInstance(project),
+    (error) => error?.code === 'PROJECT_SCHEMA_TOO_NEW',
+  );
 });
