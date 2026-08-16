@@ -4,6 +4,8 @@
 
 状态：已确认的设计基线（第 8 版；实施状态见 §20）
 
+§19 完成定义已于 2026-08-15 按两级门禁重排，以对齐 `2026-08-15-l2-file-authority-spec.md` 第 1.1 节。该次改动只调整门禁归属与记账方式，不放宽任何技术要求，也不改变第 3 节的任何已确认设计决策。
+
 上游范围：2026-08-06-manuscript-durability-and-versioning-v1-scope.md
 
 上游计划：../plans/2026-08-06-l1-durability-foundation.md
@@ -1727,31 +1729,62 @@ native activation 固定 off。完成服务端、客户端、桌面和手工测�
 
 ## 19. 完成定义
 
-只有同时满足以下条件，延期工作才可标记完成：
+本节按两级门禁组织。该拆分由 `2026-08-15-l2-file-authority-spec.md` 第 1.1 节提出并与之对齐。
+
+原因：本节此前把「技术意义上的完成」和「发布意义上的完成」混在同一张清单里。严格按它卡，L2 会为了 macOS 平台证据和 installer 授权空等，而这两件事与 L2 能否开工毫无技术关系；反过来，把 L2 的进度压力接到本节上，又会诱使人降低 native 的验证标准。两级门禁同时避免这两种失真。
+
+上游范围 D4 的分层纪律不变，只是把「完成」定义为技术意义上的完成而非发布意义上的完成。第 20 节已经在事实层面把 installer/tag/release 记为「不阻塞 Stage B/C」，本节把该事实写进完成定义。
+
+### 19.1 一级门禁｜技术完成（同时是 L2 前置门禁）
+
+满足以下全部条件，延期工作即可标记为技术完成，L2 方可开工：
 
 - Task 8 服务端、前端、诊断导出和用户恢复入口已经实现并通过本地验收；
 - ConfigLifecycleLease 覆盖所有 config writer 的完整生命周期；
 - v1 terminal、SQL guard、JSON error 和遥测副作用缺口关闭；
 - D9 单实例、动态 endpoint/nonce 和 owned-child shutdown 通过编译产物验收；
 - D10 不再固定等待后强杀，且 shutdown 不计算整库 hash、不强制 checkpoint；
-- NativeProjectStore 不再使用 sql.js 整库候选发布；
+- 生产 `server/db.js` 的 `PROJECT_SCHEMA_VERSION` 达到 11，编译期 activation mode 为 production；
+- 生产 open/write wiring 接入 NativeProjectStore，不再使用 sql.js 整库候选发布；
+- 既有 clean schema 10 用户项目可经正式激活升到 schema 11，不要求 bridge、cohort 或 readiness；
 - Task 4 exact crash matrix 的每一行都由真实 child-process strong kill 触发，并唯一收敛到
   下表的 before 或 after；不得用 throw 模拟进程崩溃，也不得漏掉 Task 3 的九个冻结点；
+- Windows NTFS 的 VM 硬重置崩溃矩阵按真实 evidence 通过；
 - ControlStore append 对已 checkpoint 历史保持有界；
-- schema 11 gate/triggers 阻止真实旧版本业务 DML；
-- clean schema 10 项目可直接升级，不要求 bridge、cohort 或 readiness；
+- schema 11 gate/triggers 阻止真实旧版本业务 DML，v0.0.7–0.0.9 负控矩阵全部通过且字节不变；
 - off、fixture_only、production 三种编译期 activation mode 无 runtime 旁路；
-- packaged sidecar 通过 nonce 认证的 ready/build.info 报告编译模式、source commit 和 target triple，且 smoke 结果与目标包类型一致；
+- packaged sidecar 通过 nonce 认证的 ready/build.info 报告编译模式、source commit 和 target triple；
 - schema 高于当前支持值时在 migration/recovery/DML 前 fail-closed 并给出更新版本出口；
 - canonical trigger generator、project_meta digest 与 sqlite_schema observed digest 三方一致，generator 未登记业务表和旧版本 DML 字节变化测试均会失败；
 - same-path identity adoption 只在用户确认和协议一致性检查后发生，并明确不保证字节相同；
 - native 项目存在时 data-root/path 迁移零修改拒绝；
-- Windows/Linux/macOS 平台能力按真实 evidence 分别报告；
 - native transaction p95 < 500 ms，端到端保存 p95 < 300 ms，八段耗时可核对；
 - 单个坏项目不阻止健康项目与服务启动；
 - busy、recovery、unsupported 和 shutdown 错误均为稳定 JSON/可理解 UI；
 - server、client、typecheck、lint、sidecar、桌面与手工验收全部通过；
 - 原计划和进度文档只按实际实现状态更新，不因本设计完成而提前标记 Task 6/8 完成。
+
+### 19.2 二级门禁｜发布完成（与 L2 发布合并执行）
+
+以下条目**不阻塞 L2 开工**，但在任何真实用户项目被升到 schema 11 之前必须满足：
+
+- Linux 指定本地文件系统的平台能力按真实 evidence 报告；
+- macOS capability 明确报告为 false，且该结论有据可查；
+- 第 18 节阶段 D 的 production activation 候选：installer smoke、临时用户 profile 的激活与恢复、升级/降级负测和手工验收；
+- packaged sidecar 的 smoke 结果与目标包类型一致，fixture_only 产物不得进入 installer；
+- installer、tag、release 取得用户明确授权并执行。
+
+把用户升到 schema 11 的时机本来就可以与 L2 的稿件存储迁移一起发布，因此二级门禁与 L2 的发布合并执行，不单独走一次 native 发布。
+
+### 19.3 记账规则
+
+两级门禁必须在验收账本中分别记账，不得合并成一个百分比。
+
+一级未满足时，不得宣称 L1 完成，也不得启动 L2 实施。
+
+二级未满足时，可以宣称 L1 技术完成，但必须同时标注「尚未发布」，且 `DEFERRED` 与 `NOT_RUN` 的条目按原状保留，不折算为通过。
+
+### 19.4 Task 4 exact crash matrix
 
 Task 4 完成定义中的 exact crash matrix 为：
 
@@ -1811,3 +1844,5 @@ production `db.js` 仍是 schema 10，production factory/open/write wiring 与 n
 保持 off。Stage C/D、旧版本 DML 负控、性能与平台矩阵继续 `DEFERRED`；Windows installer、
 Linux、macOS、push、tag 和 release 为 `NOT_RUN`。既有性能重跑仍超过 500/300 ms 原始阈值，
 不得宣称性能或完整 L1 已完成；第 19 节完成定义保持未满足。
+
+补记（2026-08-15）：第 19 节已按两级门禁重排，以对齐 `2026-08-15-l2-file-authority-spec.md` 第 1.1 节。按新的划分，当前状态是**一级技术门禁未满足**——生产 schema、生产 wiring、native 性能、旧版本 DML 负控和 Windows 硬重置矩阵五项均未闭环，因此 L2 不具备开工条件。二级发布门禁整体 `NOT_RUN`，但按新划分它不再是 L2 的前置条件，将与 L2 的稿件存储迁移合并发布。本次重排只改变记账方式和门禁归属，不放宽任何一条既有技术要求，也不改变任何已确认的设计决策。

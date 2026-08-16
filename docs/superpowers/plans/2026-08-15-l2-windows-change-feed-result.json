@@ -1,0 +1,5338 @@
+{
+  "probeVersion": 3,
+  "startedAt": "2026-08-16T03:34:37.114Z",
+  "finishedAt": "2026-08-16T03:35:02.822Z",
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "osRelease": "10.0.26200",
+    "osVersion": "Windows 11 Home China",
+    "bunVersion": "1.3.14",
+    "execPath": "C:\\GitHub\\mythpen\\.codex-tmp\\l2-windows-change-feed-probe.exe",
+    "cwd": "C:\\GitHub\\mythpen"
+  },
+  "options": {
+    "fastCount": 5000,
+    "overflowCount": 20000,
+    "pacedCount": 1000,
+    "pacedDelayMilliseconds": 2,
+    "samePathWrites": 2000,
+    "atomicIterations": 20,
+    "output": "C:\\GitHub\\mythpen\\docs\\superpowers\\plans\\2026-08-15-l2-windows-change-feed-result.json",
+    "keep": false
+  },
+  "baseDirectory": "C:\\GitHub\\mythpen\\.codex-tmp\\l2-rdcw-LtnXyk",
+  "primaryError": null,
+  "cases": [
+    {
+      "name": "three_directory_reachability",
+      "drainMilliseconds": 353.08,
+      "expectedPathCount": 3,
+      "observedExpectedPathCount": 3,
+      "missingPathCount": 0,
+      "missingPathSample": [],
+      "explicitCoverageLost": false,
+      "continuousCoverageAfterSynchronization": true,
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 387.658,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": false,
+          "coverageLossEpoch": 0,
+          "dirtyPathCount": 3
+        },
+        "canReportContinuousCoverage": true
+      },
+      "falseClean": false,
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 1048576,
+        "coverageLost": false,
+        "coverageLossEpoch": 0,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 387.658,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": false,
+            "coverageLossEpoch": 0,
+            "dirtyPathCount": 3
+          }
+        },
+        "dirtyPathCount": 3,
+        "lossSignals": [],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 2,
+            "records": 2,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 2,
+            "records": 2,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 2,
+            "records": 2,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": [
+          {
+            "sequence": 0,
+            "stream": "mythpen",
+            "action": "added",
+            "relativePath": "manuscript.json",
+            "milliseconds": 34.891
+          },
+          {
+            "sequence": 1,
+            "stream": "volumes",
+            "action": "added",
+            "relativePath": "volumes/vol_00000000-0000-4000-8000-000000000001.json",
+            "milliseconds": 35.046
+          },
+          {
+            "sequence": 2,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 35.165
+          },
+          {
+            "sequence": 3,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "manuscript.json",
+            "milliseconds": 35.178
+          },
+          {
+            "sequence": 4,
+            "stream": "volumes",
+            "action": "modified",
+            "relativePath": "volumes/vol_00000000-0000-4000-8000-000000000001.json",
+            "milliseconds": 35.186
+          },
+          {
+            "sequence": 5,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 35.196
+          }
+        ]
+      }
+    },
+    {
+      "name": "paced_distinct_paths",
+      "configuredCount": 1000,
+      "configuredDelayMilliseconds": 2,
+      "writer": {
+        "count": 1000,
+        "delayMilliseconds": 2,
+        "milliseconds": 15513.96
+      },
+      "drainMilliseconds": 352.64,
+      "expectedPathCount": 1000,
+      "observedExpectedPathCount": 1000,
+      "missingPathCount": 0,
+      "missingPathSample": [],
+      "explicitCoverageLost": false,
+      "continuousCoverageAfterSynchronization": true,
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 16316.077,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": false,
+          "coverageLossEpoch": 0,
+          "dirtyPathCount": 1001
+        },
+        "canReportContinuousCoverage": true
+      },
+      "falseClean": false,
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 1048576,
+        "coverageLost": false,
+        "coverageLossEpoch": 0,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 16316.077,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": false,
+            "coverageLossEpoch": 0,
+            "dirtyPathCount": 1001
+          }
+        },
+        "dirtyPathCount": 1001,
+        "lossSignals": [],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 997,
+            "records": 1000,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 1481,
+            "records": 2107,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": [
+          {
+            "sequence": 0,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 444.101
+          },
+          {
+            "sequence": 1,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 444.148
+          },
+          {
+            "sequence": 2,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 462.268
+          },
+          {
+            "sequence": 3,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000002.md",
+            "milliseconds": 462.291
+          },
+          {
+            "sequence": 4,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 462.306
+          },
+          {
+            "sequence": 5,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000002.md",
+            "milliseconds": 462.317
+          },
+          {
+            "sequence": 6,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000003.md",
+            "milliseconds": 465.31
+          },
+          {
+            "sequence": 7,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000003.md",
+            "milliseconds": 465.325
+          },
+          {
+            "sequence": 8,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 493.49
+          },
+          {
+            "sequence": 9,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000004.md",
+            "milliseconds": 493.524
+          },
+          {
+            "sequence": 10,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 493.539
+          },
+          {
+            "sequence": 11,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000004.md",
+            "milliseconds": 493.55
+          },
+          {
+            "sequence": 12,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 509.775
+          },
+          {
+            "sequence": 13,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000005.md",
+            "milliseconds": 509.796
+          },
+          {
+            "sequence": 14,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 509.81
+          },
+          {
+            "sequence": 15,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000005.md",
+            "milliseconds": 509.834
+          },
+          {
+            "sequence": 16,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000005.md",
+            "milliseconds": 509.835
+          },
+          {
+            "sequence": 17,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000006.md",
+            "milliseconds": 509.836
+          },
+          {
+            "sequence": 18,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000006.md",
+            "milliseconds": 509.837
+          },
+          {
+            "sequence": 19,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000007.md",
+            "milliseconds": 524.571
+          },
+          {
+            "sequence": 20,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000007.md",
+            "milliseconds": 524.592
+          },
+          {
+            "sequence": 21,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 539.912
+          },
+          {
+            "sequence": 22,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000008.md",
+            "milliseconds": 540.298
+          },
+          {
+            "sequence": 23,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 540.339
+          },
+          {
+            "sequence": 24,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000008.md",
+            "milliseconds": 540.383
+          },
+          {
+            "sequence": 25,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000009.md",
+            "milliseconds": 555.603
+          },
+          {
+            "sequence": 26,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000009.md",
+            "milliseconds": 555.778
+          },
+          {
+            "sequence": 27,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 586.458
+          },
+          {
+            "sequence": 28,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000a.md",
+            "milliseconds": 586.51
+          },
+          {
+            "sequence": 29,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 586.523
+          },
+          {
+            "sequence": 30,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000a.md",
+            "milliseconds": 586.543
+          },
+          {
+            "sequence": 31,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000b.md",
+            "milliseconds": 586.544
+          },
+          {
+            "sequence": 32,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000b.md",
+            "milliseconds": 586.547
+          },
+          {
+            "sequence": 33,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 602.339
+          },
+          {
+            "sequence": 34,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000c.md",
+            "milliseconds": 602.398
+          },
+          {
+            "sequence": 35,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 602.41
+          },
+          {
+            "sequence": 36,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000c.md",
+            "milliseconds": 602.418
+          },
+          {
+            "sequence": 37,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000d.md",
+            "milliseconds": 617.358
+          },
+          {
+            "sequence": 38,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000d.md",
+            "milliseconds": 617.37
+          },
+          {
+            "sequence": 39,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 633.24
+          },
+          {
+            "sequence": 40,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000e.md",
+            "milliseconds": 633.259
+          },
+          {
+            "sequence": 41,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 633.269
+          },
+          {
+            "sequence": 42,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000e.md",
+            "milliseconds": 633.279
+          },
+          {
+            "sequence": 43,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000f.md",
+            "milliseconds": 649.742
+          },
+          {
+            "sequence": 44,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000f.md",
+            "milliseconds": 649.756
+          },
+          {
+            "sequence": 45,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 664.692
+          },
+          {
+            "sequence": 46,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000010.md",
+            "milliseconds": 664.723
+          },
+          {
+            "sequence": 47,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 664.733
+          },
+          {
+            "sequence": 48,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000010.md",
+            "milliseconds": 664.741
+          },
+          {
+            "sequence": 49,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000010.md",
+            "milliseconds": 664.742
+          },
+          {
+            "sequence": 50,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 695.484
+          },
+          {
+            "sequence": 51,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000011.md",
+            "milliseconds": 695.512
+          },
+          {
+            "sequence": 52,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 695.522
+          },
+          {
+            "sequence": 53,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000011.md",
+            "milliseconds": 695.533
+          },
+          {
+            "sequence": 54,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000012.md",
+            "milliseconds": 695.535
+          },
+          {
+            "sequence": 55,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000012.md",
+            "milliseconds": 695.538
+          },
+          {
+            "sequence": 56,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000013.md",
+            "milliseconds": 710.544
+          },
+          {
+            "sequence": 57,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000013.md",
+            "milliseconds": 710.556
+          },
+          {
+            "sequence": 58,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 741.999
+          },
+          {
+            "sequence": 59,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000014.md",
+            "milliseconds": 742.025
+          },
+          {
+            "sequence": 60,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 742.036
+          },
+          {
+            "sequence": 61,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000014.md",
+            "milliseconds": 742.044
+          },
+          {
+            "sequence": 62,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000015.md",
+            "milliseconds": 742.045
+          },
+          {
+            "sequence": 63,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000015.md",
+            "milliseconds": 742.046
+          },
+          {
+            "sequence": 64,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000015.md",
+            "milliseconds": 742.046
+          },
+          {
+            "sequence": 65,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 758.012
+          },
+          {
+            "sequence": 66,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000016.md",
+            "milliseconds": 758.037
+          },
+          {
+            "sequence": 67,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 758.046
+          },
+          {
+            "sequence": 68,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000016.md",
+            "milliseconds": 758.054
+          },
+          {
+            "sequence": 69,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000017.md",
+            "milliseconds": 773.763
+          },
+          {
+            "sequence": 70,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000017.md",
+            "milliseconds": 773.777
+          },
+          {
+            "sequence": 71,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 804.861
+          },
+          {
+            "sequence": 72,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000018.md",
+            "milliseconds": 804.885
+          },
+          {
+            "sequence": 73,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 804.895
+          },
+          {
+            "sequence": 74,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000018.md",
+            "milliseconds": 804.903
+          },
+          {
+            "sequence": 75,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000019.md",
+            "milliseconds": 804.904
+          },
+          {
+            "sequence": 76,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000019.md",
+            "milliseconds": 804.904
+          },
+          {
+            "sequence": 77,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000019.md",
+            "milliseconds": 804.905
+          },
+          {
+            "sequence": 78,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 820.161
+          },
+          {
+            "sequence": 79,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001a.md",
+            "milliseconds": 820.186
+          },
+          {
+            "sequence": 80,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 820.197
+          },
+          {
+            "sequence": 81,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001a.md",
+            "milliseconds": 820.206
+          },
+          {
+            "sequence": 82,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001b.md",
+            "milliseconds": 835.219
+          },
+          {
+            "sequence": 83,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001b.md",
+            "milliseconds": 835.253
+          },
+          {
+            "sequence": 84,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 852.552
+          },
+          {
+            "sequence": 85,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001c.md",
+            "milliseconds": 852.568
+          },
+          {
+            "sequence": 86,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 852.576
+          },
+          {
+            "sequence": 87,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001c.md",
+            "milliseconds": 852.582
+          },
+          {
+            "sequence": 88,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 882.578
+          },
+          {
+            "sequence": 89,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001d.md",
+            "milliseconds": 882.597
+          },
+          {
+            "sequence": 90,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001d.md",
+            "milliseconds": 882.606
+          },
+          {
+            "sequence": 91,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001e.md",
+            "milliseconds": 882.606
+          },
+          {
+            "sequence": 92,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001e.md",
+            "milliseconds": 882.608
+          },
+          {
+            "sequence": 93,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 897.67
+          },
+          {
+            "sequence": 94,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001f.md",
+            "milliseconds": 897.69
+          },
+          {
+            "sequence": 95,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 897.714
+          },
+          {
+            "sequence": 96,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001f.md",
+            "milliseconds": 897.723
+          },
+          {
+            "sequence": 97,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 929.067
+          },
+          {
+            "sequence": 98,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000020.md",
+            "milliseconds": 929.106
+          },
+          {
+            "sequence": 99,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 929.115
+          },
+          {
+            "sequence": 100,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000020.md",
+            "milliseconds": 929.123
+          },
+          {
+            "sequence": 101,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000021.md",
+            "milliseconds": 929.123
+          },
+          {
+            "sequence": 102,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000021.md",
+            "milliseconds": 929.124
+          },
+          {
+            "sequence": 103,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000022.md",
+            "milliseconds": 958.73
+          },
+          {
+            "sequence": 104,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 958.744
+          },
+          {
+            "sequence": 105,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000022.md",
+            "milliseconds": 958.752
+          },
+          {
+            "sequence": 106,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 960.94
+          },
+          {
+            "sequence": 107,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000023.md",
+            "milliseconds": 960.961
+          },
+          {
+            "sequence": 108,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000023.md",
+            "milliseconds": 960.97
+          },
+          {
+            "sequence": 109,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 990.621
+          },
+          {
+            "sequence": 110,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000024.md",
+            "milliseconds": 990.682
+          },
+          {
+            "sequence": 111,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 990.692
+          },
+          {
+            "sequence": 112,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000024.md",
+            "milliseconds": 990.717
+          },
+          {
+            "sequence": 113,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000025.md",
+            "milliseconds": 990.718
+          },
+          {
+            "sequence": 114,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000025.md",
+            "milliseconds": 990.718
+          },
+          {
+            "sequence": 115,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000026.md",
+            "milliseconds": 1005.519
+          },
+          {
+            "sequence": 116,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000026.md",
+            "milliseconds": 1005.537
+          },
+          {
+            "sequence": 117,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1021.828
+          },
+          {
+            "sequence": 118,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000027.md",
+            "milliseconds": 1021.848
+          },
+          {
+            "sequence": 119,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1021.904
+          },
+          {
+            "sequence": 120,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000027.md",
+            "milliseconds": 1021.918
+          },
+          {
+            "sequence": 121,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000028.md",
+            "milliseconds": 1039.106
+          },
+          {
+            "sequence": 122,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000028.md",
+            "milliseconds": 1039.116
+          },
+          {
+            "sequence": 123,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1052.333
+          },
+          {
+            "sequence": 124,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000029.md",
+            "milliseconds": 1052.357
+          },
+          {
+            "sequence": 125,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1052.365
+          },
+          {
+            "sequence": 126,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000029.md",
+            "milliseconds": 1052.373
+          },
+          {
+            "sequence": 127,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1082.887
+          },
+          {
+            "sequence": 128,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002a.md",
+            "milliseconds": 1082.914
+          },
+          {
+            "sequence": 129,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1082.922
+          },
+          {
+            "sequence": 130,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002a.md",
+            "milliseconds": 1082.943
+          },
+          {
+            "sequence": 131,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002b.md",
+            "milliseconds": 1082.943
+          },
+          {
+            "sequence": 132,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002b.md",
+            "milliseconds": 1082.944
+          },
+          {
+            "sequence": 133,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002c.md",
+            "milliseconds": 1098.661
+          },
+          {
+            "sequence": 134,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002c.md",
+            "milliseconds": 1098.674
+          },
+          {
+            "sequence": 135,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1129.195
+          },
+          {
+            "sequence": 136,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002d.md",
+            "milliseconds": 1129.22
+          },
+          {
+            "sequence": 137,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1129.229
+          },
+          {
+            "sequence": 138,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002d.md",
+            "milliseconds": 1129.237
+          },
+          {
+            "sequence": 139,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002d.md",
+            "milliseconds": 1129.237
+          },
+          {
+            "sequence": 140,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002e.md",
+            "milliseconds": 1129.238
+          },
+          {
+            "sequence": 141,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002e.md",
+            "milliseconds": 1129.238
+          },
+          {
+            "sequence": 142,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1144.45
+          },
+          {
+            "sequence": 143,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002f.md",
+            "milliseconds": 1144.474
+          },
+          {
+            "sequence": 144,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1144.484
+          },
+          {
+            "sequence": 145,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002f.md",
+            "milliseconds": 1144.495
+          },
+          {
+            "sequence": 146,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1175.655
+          },
+          {
+            "sequence": 147,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000030.md",
+            "milliseconds": 1175.684
+          },
+          {
+            "sequence": 148,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1175.694
+          },
+          {
+            "sequence": 149,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000030.md",
+            "milliseconds": 1175.703
+          },
+          {
+            "sequence": 150,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000031.md",
+            "milliseconds": 1175.704
+          },
+          {
+            "sequence": 151,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000031.md",
+            "milliseconds": 1175.704
+          },
+          {
+            "sequence": 152,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000032.md",
+            "milliseconds": 1191.633
+          },
+          {
+            "sequence": 153,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000032.md",
+            "milliseconds": 1191.649
+          },
+          {
+            "sequence": 154,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1206.174
+          },
+          {
+            "sequence": 155,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000033.md",
+            "milliseconds": 1206.199
+          },
+          {
+            "sequence": 156,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1206.209
+          },
+          {
+            "sequence": 157,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000033.md",
+            "milliseconds": 1206.217
+          },
+          {
+            "sequence": 158,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 1229.446
+          },
+          {
+            "sequence": 159,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000034.md",
+            "milliseconds": 1229.49
+          }
+        ]
+      }
+    },
+    {
+      "name": "fast_distinct_paths",
+      "configuredCount": 5000,
+      "configuredDelayMilliseconds": 0,
+      "writer": {
+        "count": 5000,
+        "delayMilliseconds": 0,
+        "milliseconds": 1324.46
+      },
+      "drainMilliseconds": 352.41,
+      "expectedPathCount": 5000,
+      "observedExpectedPathCount": 5000,
+      "missingPathCount": 0,
+      "missingPathSample": [],
+      "explicitCoverageLost": false,
+      "continuousCoverageAfterSynchronization": true,
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 18058.93,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": false,
+          "coverageLossEpoch": 0,
+          "dirtyPathCount": 5001
+        },
+        "canReportContinuousCoverage": true
+      },
+      "falseClean": false,
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 1048576,
+        "coverageLost": false,
+        "coverageLossEpoch": 0,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 18058.93,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": false,
+            "coverageLossEpoch": 0,
+            "dirtyPathCount": 5001
+          }
+        },
+        "dirtyPathCount": 5001,
+        "lossSignals": [],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 254,
+            "records": 5000,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 264,
+            "records": 10101,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": [
+          {
+            "sequence": 0,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 16375.246
+          },
+          {
+            "sequence": 1,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16375.263
+          },
+          {
+            "sequence": 2,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 16375.272
+          },
+          {
+            "sequence": 3,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000002.md",
+            "milliseconds": 16375.28
+          },
+          {
+            "sequence": 4,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000002.md",
+            "milliseconds": 16375.284
+          },
+          {
+            "sequence": 5,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16376.262
+          },
+          {
+            "sequence": 6,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000003.md",
+            "milliseconds": 16376.285
+          },
+          {
+            "sequence": 7,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.24
+          },
+          {
+            "sequence": 8,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000003.md",
+            "milliseconds": 16392.257
+          },
+          {
+            "sequence": 9,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.274
+          },
+          {
+            "sequence": 10,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.852
+          },
+          {
+            "sequence": 11,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.855
+          },
+          {
+            "sequence": 12,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.855
+          },
+          {
+            "sequence": 13,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.855
+          },
+          {
+            "sequence": 14,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.855
+          },
+          {
+            "sequence": 15,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.856
+          },
+          {
+            "sequence": 16,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.856
+          },
+          {
+            "sequence": 17,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.856
+          },
+          {
+            "sequence": 18,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.856
+          },
+          {
+            "sequence": 19,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.856
+          },
+          {
+            "sequence": 20,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.858
+          },
+          {
+            "sequence": 21,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.858
+          },
+          {
+            "sequence": 22,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.858
+          },
+          {
+            "sequence": 23,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.858
+          },
+          {
+            "sequence": 24,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.858
+          },
+          {
+            "sequence": 25,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.859
+          },
+          {
+            "sequence": 26,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.859
+          },
+          {
+            "sequence": 27,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.859
+          },
+          {
+            "sequence": 28,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.859
+          },
+          {
+            "sequence": 29,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.86
+          },
+          {
+            "sequence": 30,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.86
+          },
+          {
+            "sequence": 31,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.86
+          },
+          {
+            "sequence": 32,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.861
+          },
+          {
+            "sequence": 33,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.861
+          },
+          {
+            "sequence": 34,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.861
+          },
+          {
+            "sequence": 35,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.862
+          },
+          {
+            "sequence": 36,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.862
+          },
+          {
+            "sequence": 37,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.862
+          },
+          {
+            "sequence": 38,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.862
+          },
+          {
+            "sequence": 39,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.862
+          },
+          {
+            "sequence": 40,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.863
+          },
+          {
+            "sequence": 41,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.863
+          },
+          {
+            "sequence": 42,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.863
+          },
+          {
+            "sequence": 43,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.863
+          },
+          {
+            "sequence": 44,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.863
+          },
+          {
+            "sequence": 45,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.866
+          },
+          {
+            "sequence": 46,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.867
+          },
+          {
+            "sequence": 47,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.867
+          },
+          {
+            "sequence": 48,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.867
+          },
+          {
+            "sequence": 49,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.867
+          },
+          {
+            "sequence": 50,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.868
+          },
+          {
+            "sequence": 51,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.868
+          },
+          {
+            "sequence": 52,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.868
+          },
+          {
+            "sequence": 53,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.868
+          },
+          {
+            "sequence": 54,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.869
+          },
+          {
+            "sequence": 55,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000004.md",
+            "milliseconds": 16392.89
+          },
+          {
+            "sequence": 56,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000004.md",
+            "milliseconds": 16392.89
+          },
+          {
+            "sequence": 57,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000005.md",
+            "milliseconds": 16392.891
+          },
+          {
+            "sequence": 58,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000005.md",
+            "milliseconds": 16392.891
+          },
+          {
+            "sequence": 59,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000006.md",
+            "milliseconds": 16392.891
+          },
+          {
+            "sequence": 60,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000006.md",
+            "milliseconds": 16392.892
+          },
+          {
+            "sequence": 61,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000007.md",
+            "milliseconds": 16392.892
+          },
+          {
+            "sequence": 62,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000007.md",
+            "milliseconds": 16392.892
+          },
+          {
+            "sequence": 63,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000008.md",
+            "milliseconds": 16392.892
+          },
+          {
+            "sequence": 64,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000008.md",
+            "milliseconds": 16392.894
+          },
+          {
+            "sequence": 65,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000009.md",
+            "milliseconds": 16392.894
+          },
+          {
+            "sequence": 66,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000009.md",
+            "milliseconds": 16392.895
+          },
+          {
+            "sequence": 67,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000a.md",
+            "milliseconds": 16392.895
+          },
+          {
+            "sequence": 68,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000a.md",
+            "milliseconds": 16392.895
+          },
+          {
+            "sequence": 69,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000b.md",
+            "milliseconds": 16392.896
+          },
+          {
+            "sequence": 70,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000b.md",
+            "milliseconds": 16392.9
+          },
+          {
+            "sequence": 71,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000c.md",
+            "milliseconds": 16392.901
+          },
+          {
+            "sequence": 72,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000c.md",
+            "milliseconds": 16392.901
+          },
+          {
+            "sequence": 73,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000d.md",
+            "milliseconds": 16392.901
+          },
+          {
+            "sequence": 74,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000d.md",
+            "milliseconds": 16392.901
+          },
+          {
+            "sequence": 75,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000e.md",
+            "milliseconds": 16392.902
+          },
+          {
+            "sequence": 76,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000e.md",
+            "milliseconds": 16392.902
+          },
+          {
+            "sequence": 77,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000f.md",
+            "milliseconds": 16392.902
+          },
+          {
+            "sequence": 78,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000000f.md",
+            "milliseconds": 16392.903
+          },
+          {
+            "sequence": 79,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000010.md",
+            "milliseconds": 16392.91
+          },
+          {
+            "sequence": 80,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000010.md",
+            "milliseconds": 16392.91
+          },
+          {
+            "sequence": 81,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000011.md",
+            "milliseconds": 16392.91
+          },
+          {
+            "sequence": 82,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000011.md",
+            "milliseconds": 16392.911
+          },
+          {
+            "sequence": 83,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000012.md",
+            "milliseconds": 16392.911
+          },
+          {
+            "sequence": 84,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000012.md",
+            "milliseconds": 16392.911
+          },
+          {
+            "sequence": 85,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000013.md",
+            "milliseconds": 16392.911
+          },
+          {
+            "sequence": 86,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000013.md",
+            "milliseconds": 16392.912
+          },
+          {
+            "sequence": 87,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000014.md",
+            "milliseconds": 16392.912
+          },
+          {
+            "sequence": 88,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000014.md",
+            "milliseconds": 16392.912
+          },
+          {
+            "sequence": 89,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000015.md",
+            "milliseconds": 16392.912
+          },
+          {
+            "sequence": 90,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000015.md",
+            "milliseconds": 16392.913
+          },
+          {
+            "sequence": 91,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000016.md",
+            "milliseconds": 16392.913
+          },
+          {
+            "sequence": 92,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000016.md",
+            "milliseconds": 16392.913
+          },
+          {
+            "sequence": 93,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000017.md",
+            "milliseconds": 16392.914
+          },
+          {
+            "sequence": 94,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000017.md",
+            "milliseconds": 16392.915
+          },
+          {
+            "sequence": 95,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000018.md",
+            "milliseconds": 16392.915
+          },
+          {
+            "sequence": 96,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000018.md",
+            "milliseconds": 16392.915
+          },
+          {
+            "sequence": 97,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000019.md",
+            "milliseconds": 16392.916
+          },
+          {
+            "sequence": 98,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000019.md",
+            "milliseconds": 16392.916
+          },
+          {
+            "sequence": 99,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001a.md",
+            "milliseconds": 16392.916
+          },
+          {
+            "sequence": 100,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001a.md",
+            "milliseconds": 16392.917
+          },
+          {
+            "sequence": 101,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001b.md",
+            "milliseconds": 16392.917
+          },
+          {
+            "sequence": 102,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001b.md",
+            "milliseconds": 16392.917
+          },
+          {
+            "sequence": 103,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001c.md",
+            "milliseconds": 16392.917
+          },
+          {
+            "sequence": 104,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001c.md",
+            "milliseconds": 16392.918
+          },
+          {
+            "sequence": 105,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001d.md",
+            "milliseconds": 16392.918
+          },
+          {
+            "sequence": 106,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001d.md",
+            "milliseconds": 16392.918
+          },
+          {
+            "sequence": 107,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001e.md",
+            "milliseconds": 16392.918
+          },
+          {
+            "sequence": 108,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001e.md",
+            "milliseconds": 16392.919
+          },
+          {
+            "sequence": 109,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001f.md",
+            "milliseconds": 16392.919
+          },
+          {
+            "sequence": 110,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000001f.md",
+            "milliseconds": 16392.921
+          },
+          {
+            "sequence": 111,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000020.md",
+            "milliseconds": 16392.921
+          },
+          {
+            "sequence": 112,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000020.md",
+            "milliseconds": 16392.921
+          },
+          {
+            "sequence": 113,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000021.md",
+            "milliseconds": 16392.921
+          },
+          {
+            "sequence": 114,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000021.md",
+            "milliseconds": 16392.922
+          },
+          {
+            "sequence": 115,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000022.md",
+            "milliseconds": 16392.922
+          },
+          {
+            "sequence": 116,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000022.md",
+            "milliseconds": 16392.922
+          },
+          {
+            "sequence": 117,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000023.md",
+            "milliseconds": 16392.922
+          },
+          {
+            "sequence": 118,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000023.md",
+            "milliseconds": 16392.923
+          },
+          {
+            "sequence": 119,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000024.md",
+            "milliseconds": 16392.923
+          },
+          {
+            "sequence": 120,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000024.md",
+            "milliseconds": 16392.924
+          },
+          {
+            "sequence": 121,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000025.md",
+            "milliseconds": 16392.924
+          },
+          {
+            "sequence": 122,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000025.md",
+            "milliseconds": 16392.925
+          },
+          {
+            "sequence": 123,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000026.md",
+            "milliseconds": 16392.925
+          },
+          {
+            "sequence": 124,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000026.md",
+            "milliseconds": 16392.925
+          },
+          {
+            "sequence": 125,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000027.md",
+            "milliseconds": 16392.926
+          },
+          {
+            "sequence": 126,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000027.md",
+            "milliseconds": 16392.926
+          },
+          {
+            "sequence": 127,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000028.md",
+            "milliseconds": 16392.926
+          },
+          {
+            "sequence": 128,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000028.md",
+            "milliseconds": 16392.926
+          },
+          {
+            "sequence": 129,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000029.md",
+            "milliseconds": 16392.927
+          },
+          {
+            "sequence": 130,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000029.md",
+            "milliseconds": 16392.927
+          },
+          {
+            "sequence": 131,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002a.md",
+            "milliseconds": 16392.927
+          },
+          {
+            "sequence": 132,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002a.md",
+            "milliseconds": 16392.927
+          },
+          {
+            "sequence": 133,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002b.md",
+            "milliseconds": 16392.928
+          },
+          {
+            "sequence": 134,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002b.md",
+            "milliseconds": 16392.928
+          },
+          {
+            "sequence": 135,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002c.md",
+            "milliseconds": 16392.928
+          },
+          {
+            "sequence": 136,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002c.md",
+            "milliseconds": 16392.928
+          },
+          {
+            "sequence": 137,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002d.md",
+            "milliseconds": 16392.929
+          },
+          {
+            "sequence": 138,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002d.md",
+            "milliseconds": 16392.93
+          },
+          {
+            "sequence": 139,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002e.md",
+            "milliseconds": 16392.93
+          },
+          {
+            "sequence": 140,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002e.md",
+            "milliseconds": 16392.93
+          },
+          {
+            "sequence": 141,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002f.md",
+            "milliseconds": 16392.931
+          },
+          {
+            "sequence": 142,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-00000000002f.md",
+            "milliseconds": 16392.931
+          },
+          {
+            "sequence": 143,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000030.md",
+            "milliseconds": 16392.935
+          },
+          {
+            "sequence": 144,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000030.md",
+            "milliseconds": 16392.935
+          },
+          {
+            "sequence": 145,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000030.md",
+            "milliseconds": 16392.936
+          },
+          {
+            "sequence": 146,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000031.md",
+            "milliseconds": 16392.937
+          },
+          {
+            "sequence": 147,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000031.md",
+            "milliseconds": 16392.937
+          },
+          {
+            "sequence": 148,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000032.md",
+            "milliseconds": 16392.937
+          },
+          {
+            "sequence": 149,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000032.md",
+            "milliseconds": 16392.937
+          },
+          {
+            "sequence": 150,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.947
+          },
+          {
+            "sequence": 151,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000033.md",
+            "milliseconds": 16392.953
+          },
+          {
+            "sequence": 152,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000033.md",
+            "milliseconds": 16392.954
+          },
+          {
+            "sequence": 153,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16392.96
+          },
+          {
+            "sequence": 154,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16407.854
+          },
+          {
+            "sequence": 155,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000034.md",
+            "milliseconds": 16407.873
+          },
+          {
+            "sequence": 156,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16407.88
+          },
+          {
+            "sequence": 157,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16407.88
+          },
+          {
+            "sequence": 158,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16407.881
+          },
+          {
+            "sequence": 159,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 16407.881
+          }
+        ]
+      }
+    },
+    {
+      "name": "forced_small_buffer_overflow",
+      "configuredCount": 20000,
+      "configuredBufferByteLength": 512,
+      "writer": {
+        "count": 20000,
+        "delayMilliseconds": 0,
+        "milliseconds": 5536.35
+      },
+      "coverageLostBeforeSynchronization": false,
+      "continuousCoverageAtFirstSynchronization": false,
+      "drainMilliseconds": 501.2,
+      "explicitNativeLoss": true,
+      "latchRemainsSet": true,
+      "expectedPathCount": 20000,
+      "observedExpectedPathCount": 1,
+      "missingPathCount": 19999,
+      "missingPathSample": [
+        "chapters/ch_00000000-0000-4000-8000-000000000002.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000003.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000004.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000005.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000006.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000007.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000008.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000009.md",
+        "chapters/ch_00000000-0000-4000-8000-00000000000a.md",
+        "chapters/ch_00000000-0000-4000-8000-00000000000b.md",
+        "chapters/ch_00000000-0000-4000-8000-00000000000c.md",
+        "chapters/ch_00000000-0000-4000-8000-00000000000d.md",
+        "chapters/ch_00000000-0000-4000-8000-00000000000e.md",
+        "chapters/ch_00000000-0000-4000-8000-00000000000f.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000010.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000011.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000012.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000013.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000014.md",
+        "chapters/ch_00000000-0000-4000-8000-000000000015.md"
+      ],
+      "explicitCoverageLost": true,
+      "continuousCoverageAfterSynchronization": false,
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 24159.197,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": true,
+          "coverageLossEpoch": 2,
+          "dirtyPathCount": 2
+        },
+        "canReportContinuousCoverage": false
+      },
+      "falseClean": false,
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 512,
+        "coverageLost": true,
+        "coverageLossEpoch": 2,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 24161.434,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": true,
+            "coverageLossEpoch": 2,
+            "dirtyPathCount": 2
+          }
+        },
+        "dirtyPathCount": 2,
+        "lossSignals": [
+          {
+            "sequence": 2,
+            "stream": "mythpen",
+            "kind": "zero_byte_completion",
+            "win32Code": null,
+            "detail": null,
+            "milliseconds": 23655.217
+          },
+          {
+            "sequence": 3,
+            "stream": "chapters",
+            "kind": "zero_byte_completion",
+            "win32Code": null,
+            "detail": null,
+            "milliseconds": 23655.23
+          }
+        ],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 2,
+            "records": 1,
+            "zeroByteCompletions": 1,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 2,
+            "records": 1,
+            "zeroByteCompletions": 1,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": [
+          {
+            "sequence": 0,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 23655.111
+          },
+          {
+            "sequence": 1,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 23655.127
+          }
+        ]
+      }
+    },
+    {
+      "name": "same_path_coalescing",
+      "configuredWrites": 2000,
+      "drainMilliseconds": 360.54,
+      "matchingEventSampleCount": 159,
+      "expectedPathCount": 1,
+      "observedExpectedPathCount": 1,
+      "missingPathCount": 0,
+      "missingPathSample": [],
+      "explicitCoverageLost": false,
+      "continuousCoverageAfterSynchronization": true,
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 24877.655,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": false,
+          "coverageLossEpoch": 0,
+          "dirtyPathCount": 2
+        },
+        "canReportContinuousCoverage": true
+      },
+      "falseClean": false,
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 1048576,
+        "coverageLost": false,
+        "coverageLossEpoch": 0,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 24877.655,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": false,
+            "coverageLossEpoch": 0,
+            "dirtyPathCount": 2
+          }
+        },
+        "dirtyPathCount": 2,
+        "lossSignals": [],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 1,
+            "records": 1,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 2,
+            "records": 4104,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": [
+          {
+            "sequence": 0,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 24517.138
+          },
+          {
+            "sequence": 1,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.304
+          },
+          {
+            "sequence": 2,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.313
+          },
+          {
+            "sequence": 3,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.314
+          },
+          {
+            "sequence": 4,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.314
+          },
+          {
+            "sequence": 5,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.315
+          },
+          {
+            "sequence": 6,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.316
+          },
+          {
+            "sequence": 7,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.316
+          },
+          {
+            "sequence": 8,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.317
+          },
+          {
+            "sequence": 9,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.317
+          },
+          {
+            "sequence": 10,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.318
+          },
+          {
+            "sequence": 11,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.318
+          },
+          {
+            "sequence": 12,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.319
+          },
+          {
+            "sequence": 13,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.319
+          },
+          {
+            "sequence": 14,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.32
+          },
+          {
+            "sequence": 15,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.32
+          },
+          {
+            "sequence": 16,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.321
+          },
+          {
+            "sequence": 17,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.321
+          },
+          {
+            "sequence": 18,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.321
+          },
+          {
+            "sequence": 19,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.322
+          },
+          {
+            "sequence": 20,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.323
+          },
+          {
+            "sequence": 21,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.323
+          },
+          {
+            "sequence": 22,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.323
+          },
+          {
+            "sequence": 23,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.324
+          },
+          {
+            "sequence": 24,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.324
+          },
+          {
+            "sequence": 25,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.325
+          },
+          {
+            "sequence": 26,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.325
+          },
+          {
+            "sequence": 27,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.326
+          },
+          {
+            "sequence": 28,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.326
+          },
+          {
+            "sequence": 29,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.326
+          },
+          {
+            "sequence": 30,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.327
+          },
+          {
+            "sequence": 31,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.327
+          },
+          {
+            "sequence": 32,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.328
+          },
+          {
+            "sequence": 33,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.328
+          },
+          {
+            "sequence": 34,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.329
+          },
+          {
+            "sequence": 35,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.329
+          },
+          {
+            "sequence": 36,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.341
+          },
+          {
+            "sequence": 37,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.341
+          },
+          {
+            "sequence": 38,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.342
+          },
+          {
+            "sequence": 39,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.342
+          },
+          {
+            "sequence": 40,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.342
+          },
+          {
+            "sequence": 41,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.343
+          },
+          {
+            "sequence": 42,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.343
+          },
+          {
+            "sequence": 43,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.344
+          },
+          {
+            "sequence": 44,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.344
+          },
+          {
+            "sequence": 45,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.345
+          },
+          {
+            "sequence": 46,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.345
+          },
+          {
+            "sequence": 47,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.346
+          },
+          {
+            "sequence": 48,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.346
+          },
+          {
+            "sequence": 49,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.346
+          },
+          {
+            "sequence": 50,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.347
+          },
+          {
+            "sequence": 51,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.347
+          },
+          {
+            "sequence": 52,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.348
+          },
+          {
+            "sequence": 53,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.349
+          },
+          {
+            "sequence": 54,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.35
+          },
+          {
+            "sequence": 55,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.35
+          },
+          {
+            "sequence": 56,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.355
+          },
+          {
+            "sequence": 57,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.355
+          },
+          {
+            "sequence": 58,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.355
+          },
+          {
+            "sequence": 59,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.356
+          },
+          {
+            "sequence": 60,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.356
+          },
+          {
+            "sequence": 61,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.357
+          },
+          {
+            "sequence": 62,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.357
+          },
+          {
+            "sequence": 63,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.358
+          },
+          {
+            "sequence": 64,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.358
+          },
+          {
+            "sequence": 65,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.358
+          },
+          {
+            "sequence": 66,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.359
+          },
+          {
+            "sequence": 67,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.359
+          },
+          {
+            "sequence": 68,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.36
+          },
+          {
+            "sequence": 69,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.36
+          },
+          {
+            "sequence": 70,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.361
+          },
+          {
+            "sequence": 71,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.361
+          },
+          {
+            "sequence": 72,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.361
+          },
+          {
+            "sequence": 73,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.362
+          },
+          {
+            "sequence": 74,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.362
+          },
+          {
+            "sequence": 75,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.363
+          },
+          {
+            "sequence": 76,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.363
+          },
+          {
+            "sequence": 77,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.363
+          },
+          {
+            "sequence": 78,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.364
+          },
+          {
+            "sequence": 79,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.364
+          },
+          {
+            "sequence": 80,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.366
+          },
+          {
+            "sequence": 81,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.366
+          },
+          {
+            "sequence": 82,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.367
+          },
+          {
+            "sequence": 83,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.367
+          },
+          {
+            "sequence": 84,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.369
+          },
+          {
+            "sequence": 85,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.369
+          },
+          {
+            "sequence": 86,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.37
+          },
+          {
+            "sequence": 87,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.37
+          },
+          {
+            "sequence": 88,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.37
+          },
+          {
+            "sequence": 89,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.371
+          },
+          {
+            "sequence": 90,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.371
+          },
+          {
+            "sequence": 91,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.372
+          },
+          {
+            "sequence": 92,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.372
+          },
+          {
+            "sequence": 93,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.373
+          },
+          {
+            "sequence": 94,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.373
+          },
+          {
+            "sequence": 95,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.374
+          },
+          {
+            "sequence": 96,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.375
+          },
+          {
+            "sequence": 97,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.375
+          },
+          {
+            "sequence": 98,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.376
+          },
+          {
+            "sequence": 99,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.376
+          },
+          {
+            "sequence": 100,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.376
+          },
+          {
+            "sequence": 101,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.377
+          },
+          {
+            "sequence": 102,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.377
+          },
+          {
+            "sequence": 103,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.378
+          },
+          {
+            "sequence": 104,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.378
+          },
+          {
+            "sequence": 105,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.379
+          },
+          {
+            "sequence": 106,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.38
+          },
+          {
+            "sequence": 107,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.38
+          },
+          {
+            "sequence": 108,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.381
+          },
+          {
+            "sequence": 109,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.381
+          },
+          {
+            "sequence": 110,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.382
+          },
+          {
+            "sequence": 111,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.382
+          },
+          {
+            "sequence": 112,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.383
+          },
+          {
+            "sequence": 113,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.383
+          },
+          {
+            "sequence": 114,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.384
+          },
+          {
+            "sequence": 115,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.384
+          },
+          {
+            "sequence": 116,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.385
+          },
+          {
+            "sequence": 117,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.385
+          },
+          {
+            "sequence": 118,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.385
+          },
+          {
+            "sequence": 119,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.386
+          },
+          {
+            "sequence": 120,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.386
+          },
+          {
+            "sequence": 121,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.387
+          },
+          {
+            "sequence": 122,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.387
+          },
+          {
+            "sequence": 123,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.387
+          },
+          {
+            "sequence": 124,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.388
+          },
+          {
+            "sequence": 125,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.388
+          },
+          {
+            "sequence": 126,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.389
+          },
+          {
+            "sequence": 127,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.389
+          },
+          {
+            "sequence": 128,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.392
+          },
+          {
+            "sequence": 129,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.393
+          },
+          {
+            "sequence": 130,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.393
+          },
+          {
+            "sequence": 131,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.395
+          },
+          {
+            "sequence": 132,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.396
+          },
+          {
+            "sequence": 133,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.396
+          },
+          {
+            "sequence": 134,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.397
+          },
+          {
+            "sequence": 135,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.397
+          },
+          {
+            "sequence": 136,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.398
+          },
+          {
+            "sequence": 137,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.398
+          },
+          {
+            "sequence": 138,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.398
+          },
+          {
+            "sequence": 139,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.399
+          },
+          {
+            "sequence": 140,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.399
+          },
+          {
+            "sequence": 141,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.4
+          },
+          {
+            "sequence": 142,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.4
+          },
+          {
+            "sequence": 143,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.401
+          },
+          {
+            "sequence": 144,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.401
+          },
+          {
+            "sequence": 145,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.401
+          },
+          {
+            "sequence": 146,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.402
+          },
+          {
+            "sequence": 147,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.402
+          },
+          {
+            "sequence": 148,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.403
+          },
+          {
+            "sequence": 149,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.403
+          },
+          {
+            "sequence": 150,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.404
+          },
+          {
+            "sequence": 151,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.404
+          },
+          {
+            "sequence": 152,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.404
+          },
+          {
+            "sequence": 153,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.405
+          },
+          {
+            "sequence": 154,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.405
+          },
+          {
+            "sequence": 155,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.406
+          },
+          {
+            "sequence": 156,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.406
+          },
+          {
+            "sequence": 157,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.408
+          },
+          {
+            "sequence": 158,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.408
+          },
+          {
+            "sequence": 159,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24517.409
+          }
+        ]
+      }
+    },
+    {
+      "name": "completion_to_rearm_gap",
+      "firstSignalMilliseconds": 0.07,
+      "continuousCoverageWhileUnarmed": false,
+      "rearmed": true,
+      "drainMilliseconds": 361.98,
+      "expectedPathCount": 2,
+      "observedExpectedPathCount": 2,
+      "missingPathCount": 0,
+      "missingPathSample": [],
+      "explicitCoverageLost": false,
+      "continuousCoverageAfterSynchronization": true,
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 25302.472,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": false,
+          "coverageLossEpoch": 0,
+          "dirtyPathCount": 3
+        },
+        "canReportContinuousCoverage": true
+      },
+      "falseClean": false,
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 65536,
+        "coverageLost": false,
+        "coverageLossEpoch": 0,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 25302.472,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": false,
+            "coverageLossEpoch": 0,
+            "dirtyPathCount": 3
+          }
+        },
+        "dirtyPathCount": 3,
+        "lossSignals": [],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 2,
+            "records": 2,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 2,
+            "records": 4,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": [
+          {
+            "sequence": 0,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24880.87
+          },
+          {
+            "sequence": 1,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 24880.881
+          },
+          {
+            "sequence": 2,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 24940.505
+          },
+          {
+            "sequence": 3,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 24940.525
+          },
+          {
+            "sequence": 4,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000002.md",
+            "milliseconds": 24940.526
+          },
+          {
+            "sequence": 5,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000002.md",
+            "milliseconds": 24940.527
+          }
+        ]
+      }
+    },
+    {
+      "name": "candidate_fsync_atomic_replace",
+      "configuredIterations": 20,
+      "drainMilliseconds": 359.15,
+      "targetActions": [
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name",
+        "removed",
+        "renamed_new_name"
+      ],
+      "expectedPathCount": 1,
+      "observedExpectedPathCount": 1,
+      "missingPathCount": 0,
+      "missingPathSample": [],
+      "explicitCoverageLost": false,
+      "continuousCoverageAfterSynchronization": true,
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 25735.796,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": false,
+          "coverageLossEpoch": 0,
+          "dirtyPathCount": 3
+        },
+        "canReportContinuousCoverage": true
+      },
+      "falseClean": false,
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 1048576,
+        "coverageLost": false,
+        "coverageLossEpoch": 0,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 25735.796,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": false,
+            "coverageLossEpoch": 0,
+            "dirtyPathCount": 3
+          }
+        },
+        "dirtyPathCount": 3,
+        "lossSignals": [],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 40,
+            "records": 40,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 40,
+            "records": 108,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": [
+          {
+            "sequence": 0,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25329.738
+          },
+          {
+            "sequence": 1,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25329.762
+          },
+          {
+            "sequence": 2,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25329.769
+          },
+          {
+            "sequence": 3,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25329.777
+          },
+          {
+            "sequence": 4,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25329.778
+          },
+          {
+            "sequence": 5,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25329.779
+          },
+          {
+            "sequence": 6,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25329.78
+          },
+          {
+            "sequence": 7,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25332.525
+          },
+          {
+            "sequence": 8,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25332.538
+          },
+          {
+            "sequence": 9,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25332.545
+          },
+          {
+            "sequence": 10,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25332.553
+          },
+          {
+            "sequence": 11,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25332.554
+          },
+          {
+            "sequence": 12,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25332.555
+          },
+          {
+            "sequence": 13,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25332.555
+          },
+          {
+            "sequence": 14,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25335.003
+          },
+          {
+            "sequence": 15,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25335.012
+          },
+          {
+            "sequence": 16,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25335.017
+          },
+          {
+            "sequence": 17,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25335.024
+          },
+          {
+            "sequence": 18,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25335.025
+          },
+          {
+            "sequence": 19,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25335.025
+          },
+          {
+            "sequence": 20,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25335.028
+          },
+          {
+            "sequence": 21,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25337.46
+          },
+          {
+            "sequence": 22,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25337.469
+          },
+          {
+            "sequence": 23,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25337.473
+          },
+          {
+            "sequence": 24,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25337.478
+          },
+          {
+            "sequence": 25,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25337.479
+          },
+          {
+            "sequence": 26,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25337.48
+          },
+          {
+            "sequence": 27,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25337.48
+          },
+          {
+            "sequence": 28,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25337.481
+          },
+          {
+            "sequence": 29,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25339.708
+          },
+          {
+            "sequence": 30,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25339.73
+          },
+          {
+            "sequence": 31,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25339.735
+          },
+          {
+            "sequence": 32,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25339.747
+          },
+          {
+            "sequence": 33,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25339.748
+          },
+          {
+            "sequence": 34,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25339.749
+          },
+          {
+            "sequence": 35,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25339.749
+          },
+          {
+            "sequence": 36,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25342.264
+          },
+          {
+            "sequence": 37,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25342.274
+          },
+          {
+            "sequence": 38,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25342.278
+          },
+          {
+            "sequence": 39,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25342.283
+          },
+          {
+            "sequence": 40,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25342.284
+          },
+          {
+            "sequence": 41,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25342.284
+          },
+          {
+            "sequence": 42,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25342.285
+          },
+          {
+            "sequence": 43,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25342.285
+          },
+          {
+            "sequence": 44,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25344.636
+          },
+          {
+            "sequence": 45,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25344.646
+          },
+          {
+            "sequence": 46,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25344.655
+          },
+          {
+            "sequence": 47,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25344.66
+          },
+          {
+            "sequence": 48,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25344.661
+          },
+          {
+            "sequence": 49,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25344.665
+          },
+          {
+            "sequence": 50,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25344.665
+          },
+          {
+            "sequence": 51,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25347.031
+          },
+          {
+            "sequence": 52,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25347.04
+          },
+          {
+            "sequence": 53,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25347.046
+          },
+          {
+            "sequence": 54,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25347.062
+          },
+          {
+            "sequence": 55,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25347.063
+          },
+          {
+            "sequence": 56,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25347.065
+          },
+          {
+            "sequence": 57,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25347.065
+          },
+          {
+            "sequence": 58,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25349.641
+          },
+          {
+            "sequence": 59,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25349.651
+          },
+          {
+            "sequence": 60,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25349.655
+          },
+          {
+            "sequence": 61,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25349.66
+          },
+          {
+            "sequence": 62,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25349.661
+          },
+          {
+            "sequence": 63,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25349.661
+          },
+          {
+            "sequence": 64,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25349.662
+          },
+          {
+            "sequence": 65,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25352.002
+          },
+          {
+            "sequence": 66,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25352.011
+          },
+          {
+            "sequence": 67,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25352.018
+          },
+          {
+            "sequence": 68,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25352.023
+          },
+          {
+            "sequence": 69,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25352.024
+          },
+          {
+            "sequence": 70,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25352.025
+          },
+          {
+            "sequence": 71,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25352.025
+          },
+          {
+            "sequence": 72,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25354.361
+          },
+          {
+            "sequence": 73,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25354.369
+          },
+          {
+            "sequence": 74,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25354.373
+          },
+          {
+            "sequence": 75,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25354.379
+          },
+          {
+            "sequence": 76,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25354.38
+          },
+          {
+            "sequence": 77,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25354.381
+          },
+          {
+            "sequence": 78,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25354.381
+          },
+          {
+            "sequence": 79,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25356.798
+          },
+          {
+            "sequence": 80,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25356.829
+          },
+          {
+            "sequence": 81,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25356.834
+          },
+          {
+            "sequence": 82,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25356.84
+          },
+          {
+            "sequence": 83,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25356.841
+          },
+          {
+            "sequence": 84,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25356.841
+          },
+          {
+            "sequence": 85,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25356.842
+          },
+          {
+            "sequence": 86,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25359.386
+          },
+          {
+            "sequence": 87,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25359.398
+          },
+          {
+            "sequence": 88,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25359.403
+          },
+          {
+            "sequence": 89,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25359.408
+          },
+          {
+            "sequence": 90,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25359.409
+          },
+          {
+            "sequence": 91,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25359.41
+          },
+          {
+            "sequence": 92,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25359.411
+          },
+          {
+            "sequence": 93,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25359.411
+          },
+          {
+            "sequence": 94,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25361.461
+          },
+          {
+            "sequence": 95,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25361.473
+          },
+          {
+            "sequence": 96,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25361.477
+          },
+          {
+            "sequence": 97,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25361.484
+          },
+          {
+            "sequence": 98,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25361.485
+          },
+          {
+            "sequence": 99,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25361.485
+          },
+          {
+            "sequence": 100,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25361.486
+          },
+          {
+            "sequence": 101,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25361.486
+          },
+          {
+            "sequence": 102,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25363.95
+          },
+          {
+            "sequence": 103,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25363.96
+          },
+          {
+            "sequence": 104,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25363.964
+          },
+          {
+            "sequence": 105,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25363.971
+          },
+          {
+            "sequence": 106,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25363.972
+          },
+          {
+            "sequence": 107,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25363.973
+          },
+          {
+            "sequence": 108,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25363.974
+          },
+          {
+            "sequence": 109,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25366.467
+          },
+          {
+            "sequence": 110,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25366.48
+          },
+          {
+            "sequence": 111,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25366.484
+          },
+          {
+            "sequence": 112,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25366.489
+          },
+          {
+            "sequence": 113,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25366.489
+          },
+          {
+            "sequence": 114,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25366.49
+          },
+          {
+            "sequence": 115,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25366.491
+          },
+          {
+            "sequence": 116,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25366.491
+          },
+          {
+            "sequence": 117,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25368.975
+          },
+          {
+            "sequence": 118,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25368.985
+          },
+          {
+            "sequence": 119,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25368.989
+          },
+          {
+            "sequence": 120,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25368.995
+          },
+          {
+            "sequence": 121,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25369
+          },
+          {
+            "sequence": 122,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25369.001
+          },
+          {
+            "sequence": 123,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25369.002
+          },
+          {
+            "sequence": 124,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25369.002
+          },
+          {
+            "sequence": 125,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25371.541
+          },
+          {
+            "sequence": 126,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25371.551
+          },
+          {
+            "sequence": 127,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25371.555
+          },
+          {
+            "sequence": 128,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25371.559
+          },
+          {
+            "sequence": 129,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25371.56
+          },
+          {
+            "sequence": 130,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25371.561
+          },
+          {
+            "sequence": 131,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25371.562
+          },
+          {
+            "sequence": 132,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25374.092
+          },
+          {
+            "sequence": 133,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25374.101
+          },
+          {
+            "sequence": 134,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25374.116
+          },
+          {
+            "sequence": 135,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25374.121
+          },
+          {
+            "sequence": 136,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25374.125
+          },
+          {
+            "sequence": 137,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25374.126
+          },
+          {
+            "sequence": 138,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25374.126
+          },
+          {
+            "sequence": 139,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25374.127
+          },
+          {
+            "sequence": 140,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25376.607
+          },
+          {
+            "sequence": 141,
+            "stream": "chapters",
+            "action": "added",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25376.616
+          },
+          {
+            "sequence": 142,
+            "stream": "mythpen",
+            "action": "modified",
+            "relativePath": "chapters",
+            "milliseconds": 25376.621
+          },
+          {
+            "sequence": 143,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25376.626
+          },
+          {
+            "sequence": 144,
+            "stream": "chapters",
+            "action": "modified",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25376.627
+          },
+          {
+            "sequence": 145,
+            "stream": "chapters",
+            "action": "removed",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25376.627
+          },
+          {
+            "sequence": 146,
+            "stream": "chapters",
+            "action": "renamed_old_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md.11111111-1111-4111-8111-111111111111.tmp",
+            "milliseconds": 25376.628
+          },
+          {
+            "sequence": 147,
+            "stream": "chapters",
+            "action": "renamed_new_name",
+            "relativePath": "chapters/ch_00000000-0000-4000-8000-000000000001.md",
+            "milliseconds": 25376.628
+          }
+        ]
+      }
+    },
+    {
+      "name": "directory_identity_lock",
+      "attempts": [
+        {
+          "name": "chapters",
+          "renameBlocked": true,
+          "renameError": {
+            "code": "EBUSY",
+            "message": "EBUSY: resource busy or locked, rename 'C:\\GitHub\\mythpen\\.codex-tmp\\l2-rdcw-LtnXyk\\directory-identity\\mythpen\\chapters' -> 'C:\\GitHub\\mythpen\\.codex-tmp\\l2-rdcw-LtnXyk\\directory-identity\\mythpen\\chapters-moved'"
+          }
+        },
+        {
+          "name": "volumes",
+          "renameBlocked": true,
+          "renameError": {
+            "code": "EBUSY",
+            "message": "EBUSY: resource busy or locked, rename 'C:\\GitHub\\mythpen\\.codex-tmp\\l2-rdcw-LtnXyk\\directory-identity\\mythpen\\volumes' -> 'C:\\GitHub\\mythpen\\.codex-tmp\\l2-rdcw-LtnXyk\\directory-identity\\mythpen\\volumes-moved'"
+          }
+        },
+        {
+          "name": "mythpen",
+          "renameBlocked": true,
+          "renameError": {
+            "code": "EBUSY",
+            "message": "EBUSY: resource busy or locked, rename 'C:\\GitHub\\mythpen\\.codex-tmp\\l2-rdcw-LtnXyk\\directory-identity\\mythpen' -> 'C:\\GitHub\\mythpen\\.codex-tmp\\l2-rdcw-LtnXyk\\directory-identity\\mythpen-moved'"
+          }
+        }
+      ],
+      "linearizationSnapshotEstablished": true,
+      "synchronization": {
+        "completionsProcessed": 0,
+        "completionLimitReached": false,
+        "linearizationSnapshot": {
+          "establishedAtMilliseconds": 25738.632,
+          "allStreamsArmed": true,
+          "nonsignaledStreams": [
+            "mythpen",
+            "volumes",
+            "chapters"
+          ],
+          "allEventsNonsignaledAtLinearization": true,
+          "coverageLost": false,
+          "coverageLossEpoch": 0,
+          "dirtyPathCount": 0
+        },
+        "canReportContinuousCoverage": true
+      },
+      "pass": true,
+      "feed": {
+        "bufferByteLength": 65536,
+        "coverageLost": false,
+        "coverageLossEpoch": 0,
+        "lastPumpResult": {
+          "completionsProcessed": 0,
+          "completionLimitReached": false,
+          "linearizationSnapshot": {
+            "establishedAtMilliseconds": 25738.632,
+            "allStreamsArmed": true,
+            "nonsignaledStreams": [
+              "mythpen",
+              "volumes",
+              "chapters"
+            ],
+            "allEventsNonsignaledAtLinearization": true,
+            "coverageLost": false,
+            "coverageLossEpoch": 0,
+            "dirtyPathCount": 0
+          }
+        },
+        "dirtyPathCount": 0,
+        "lossSignals": [],
+        "streams": [
+          {
+            "name": "mythpen",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "volumes",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          },
+          {
+            "name": "chapters",
+            "armed": true,
+            "completions": 0,
+            "records": 0,
+            "zeroByteCompletions": 0,
+            "completionErrors": [],
+            "rearmErrors": []
+          }
+        ],
+        "eventSample": []
+      }
+    }
+  ],
+  "passed": true
+}

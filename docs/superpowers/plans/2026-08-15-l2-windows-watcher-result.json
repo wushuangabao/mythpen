@@ -1,0 +1,4503 @@
+{
+  "probeVersion": 3,
+  "capturedAt": "2026-08-15T08:33:14.185Z",
+  "runtime": {
+    "platform": "win32",
+    "architecture": "x64",
+    "execPath": "C:\\GitHub\\mythpen\\.codex-tmp\\l2-watch-v3-1c5e890c17484a4d89c52c6546ef8e79\\l2-watch-probe-windows-x64.exe",
+    "versions": {
+      "node": "24.3.0",
+      "bun": "1.3.14",
+      "boringssl": "0c5fce43b7ed5eb6001487ee48ac65766f5ddcd1",
+      "openssl": "1.1.0",
+      "llhttp": "9.3.0",
+      "libarchive": "ded82291ab41d5e355831b96b0e1ff49e24d8939",
+      "mimalloc": "f15aecb94fc8096008bf87b90c53ed682026914a",
+      "picohttpparser": "066d2b1e9ab820703db0837a7255d92d30f0c9f5",
+      "uwebsockets": "0d9b296af33f2b851fcbf4df3e9ec89751734ba4",
+      "webkit": "5488984d20e0dbfe4be2c3ba8fb18eb81a5e0e8b",
+      "zig": "04e7f6ac1e009525bc00934f20199c68f04e0a24",
+      "zlib": "12731092979c6d07f42da27da673a9f6c7b13586",
+      "tinycc": "12882eee073cfe5c7621bcfadf679e1372d4537b",
+      "lolhtml": "77127cd2b8545998756e8d64e36ee2313c4bb312",
+      "ares": "3ac47ee46edd8ea40370222f91613fc16c434853",
+      "libdeflate": "c8c56a20f8f621e6a966b716b31f1dedab6a41e3",
+      "usockets": "0d9b296af33f2b851fcbf4df3e9ec89751734ba4",
+      "lshpack": "8905c024b6d052f083a3d11d0a169b3c2735c8a1",
+      "zstd": "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+      "v8": "13.6.233.10-node.18",
+      "uv": "1.51.1-dev",
+      "napi": "10",
+      "icu": "73.2",
+      "unicode": "15.0",
+      "modules": "137"
+    },
+    "bunVersion": "1.3.14"
+  },
+  "options": {
+    "overflowCount": 20000,
+    "externalCount": 5000,
+    "pacedCount": 1000,
+    "pacedDelayMilliseconds": 2,
+    "sameFileWrites": 2000,
+    "atomicIterations": 20,
+    "keep": false,
+    "output": "C:\\GitHub\\mythpen\\.codex-tmp\\l2-watch-v3-1c5e890c17484a4d89c52c6546ef8e79\\windows-result.json"
+  },
+  "probeRoot": "C:\\GitHub\\mythpen\\.codex-tmp\\l2-watch-v3-1c5e890c17484a4d89c52c6546ef8e79\\mythpen-l2-watch-win32-VRp2X6",
+  "recursiveDelivery": {
+    "available": true,
+    "directRelative": "chapters/direct-probe.txt",
+    "nestedRelative": "chapters/deep-a/deep-b/nested-probe.txt",
+    "directObserved": true,
+    "nestedObserved": true,
+    "nullFilenameEvents": 0,
+    "errors": [],
+    "quiet": {
+      "elapsedMilliseconds": 460.68,
+      "finalEventCount": 6
+    },
+    "eventCount": 6,
+    "events": [
+      {
+        "sequence": 0,
+        "watcher": "mythpen-recursive",
+        "eventType": "rename",
+        "filename": "chapters\\deep-a",
+        "relativePath": "chapters/deep-a",
+        "milliseconds": 298.606
+      },
+      {
+        "sequence": 1,
+        "watcher": "mythpen-recursive",
+        "eventType": "change",
+        "filename": "chapters\\deep-a",
+        "relativePath": "chapters/deep-a",
+        "milliseconds": 300.396
+      },
+      {
+        "sequence": 2,
+        "watcher": "mythpen-recursive",
+        "eventType": "rename",
+        "filename": "chapters\\direct-probe.txt",
+        "relativePath": "chapters/direct-probe.txt",
+        "milliseconds": 300.414
+      },
+      {
+        "sequence": 3,
+        "watcher": "mythpen-recursive",
+        "eventType": "change",
+        "filename": "chapters",
+        "relativePath": "chapters",
+        "milliseconds": 300.42
+      },
+      {
+        "sequence": 4,
+        "watcher": "mythpen-recursive",
+        "eventType": "rename",
+        "filename": "chapters\\deep-a\\deep-b\\nested-probe.txt",
+        "relativePath": "chapters/deep-a/deep-b/nested-probe.txt",
+        "milliseconds": 300.427
+      },
+      {
+        "sequence": 5,
+        "watcher": "mythpen-recursive",
+        "eventType": "change",
+        "filename": "chapters\\deep-a\\deep-b\\nested-probe.txt",
+        "relativePath": "chapters/deep-a/deep-b/nested-probe.txt",
+        "milliseconds": 300.433
+      }
+    ]
+  },
+  "sameFileBurst": {
+    "available": true,
+    "targetRelative": "chapters/ch_same_file_probe.md",
+    "attemptedWrites": 2000,
+    "writeMilliseconds": 4425,
+    "matchingEventCount": 1,
+    "detectionObserved": true,
+    "fewerEventsThanWrites": true,
+    "nullFilenameEvents": 0,
+    "errors": [],
+    "quiet": {
+      "elapsedMilliseconds": 459.7,
+      "finalEventCount": 1
+    },
+    "events": [
+      {
+        "sequence": 0,
+        "watcher": "chapters",
+        "eventType": "change",
+        "filename": "ch_same_file_probe.md",
+        "relativePath": "chapters/ch_same_file_probe.md",
+        "milliseconds": 5438.871
+      }
+    ]
+  },
+  "distinctPathFlow": {
+    "recursive": {
+      "mode": "recursive",
+      "available": true,
+      "producer": "independent compiled child; watcher event loop remains live",
+      "attemptedDistinctPaths": 5000,
+      "delayMilliseconds": 0,
+      "observedDistinctPaths": 1707,
+      "missingDistinctPaths": 3293,
+      "writer": {
+        "count": 5000,
+        "delayMilliseconds": 0,
+        "milliseconds": 1574.44
+      },
+      "totalEventCount": 3411,
+      "nullFilenameEvents": 0,
+      "errors": [],
+      "explicitLossSignal": false,
+      "silentLossObserved": true,
+      "quiet": {
+        "elapsedMilliseconds": 1062.4,
+        "finalEventCount": 3411
+      },
+      "events": [
+        {
+          "sequence": 0,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000000.tmp",
+          "relativePath": "chapters/external_recursive_0_000000.tmp",
+          "milliseconds": 6219.047
+        },
+        {
+          "sequence": 1,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000000.tmp",
+          "relativePath": "chapters/external_recursive_0_000000.tmp",
+          "milliseconds": 6220.774
+        },
+        {
+          "sequence": 2,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000001.tmp",
+          "relativePath": "chapters/external_recursive_0_000001.tmp",
+          "milliseconds": 6220.796
+        },
+        {
+          "sequence": 3,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000001.tmp",
+          "relativePath": "chapters/external_recursive_0_000001.tmp",
+          "milliseconds": 6220.803
+        },
+        {
+          "sequence": 4,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000002.tmp",
+          "relativePath": "chapters/external_recursive_0_000002.tmp",
+          "milliseconds": 6229.079
+        },
+        {
+          "sequence": 5,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000002.tmp",
+          "relativePath": "chapters/external_recursive_0_000002.tmp",
+          "milliseconds": 6229.101
+        },
+        {
+          "sequence": 6,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000003.tmp",
+          "relativePath": "chapters/external_recursive_0_000003.tmp",
+          "milliseconds": 6229.111
+        },
+        {
+          "sequence": 7,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6229.118
+        },
+        {
+          "sequence": 8,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000004.tmp",
+          "relativePath": "chapters/external_recursive_0_000004.tmp",
+          "milliseconds": 6229.124
+        },
+        {
+          "sequence": 9,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6229.139
+        },
+        {
+          "sequence": 10,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000005.tmp",
+          "relativePath": "chapters/external_recursive_0_000005.tmp",
+          "milliseconds": 6229.153
+        },
+        {
+          "sequence": 11,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6229.16
+        },
+        {
+          "sequence": 12,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000006.tmp",
+          "relativePath": "chapters/external_recursive_0_000006.tmp",
+          "milliseconds": 6229.167
+        },
+        {
+          "sequence": 13,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6229.174
+        },
+        {
+          "sequence": 14,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000007.tmp",
+          "relativePath": "chapters/external_recursive_0_000007.tmp",
+          "milliseconds": 6229.181
+        },
+        {
+          "sequence": 15,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000007.tmp",
+          "relativePath": "chapters/external_recursive_0_000007.tmp",
+          "milliseconds": 6229.188
+        },
+        {
+          "sequence": 16,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000008.tmp",
+          "relativePath": "chapters/external_recursive_0_000008.tmp",
+          "milliseconds": 6229.203
+        },
+        {
+          "sequence": 17,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000008.tmp",
+          "relativePath": "chapters/external_recursive_0_000008.tmp",
+          "milliseconds": 6229.223
+        },
+        {
+          "sequence": 18,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000009.tmp",
+          "relativePath": "chapters/external_recursive_0_000009.tmp",
+          "milliseconds": 6229.229
+        },
+        {
+          "sequence": 19,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000009.tmp",
+          "relativePath": "chapters/external_recursive_0_000009.tmp",
+          "milliseconds": 6229.435
+        },
+        {
+          "sequence": 20,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000010.tmp",
+          "relativePath": "chapters/external_recursive_0_000010.tmp",
+          "milliseconds": 6229.443
+        },
+        {
+          "sequence": 21,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6229.449
+        },
+        {
+          "sequence": 22,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000041.tmp",
+          "relativePath": "chapters/external_recursive_0_000041.tmp",
+          "milliseconds": 6231.016
+        },
+        {
+          "sequence": 23,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000042.tmp",
+          "relativePath": "chapters/external_recursive_0_000042.tmp",
+          "milliseconds": 6231.285
+        },
+        {
+          "sequence": 24,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000042.tmp",
+          "relativePath": "chapters/external_recursive_0_000042.tmp",
+          "milliseconds": 6231.314
+        },
+        {
+          "sequence": 25,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000043.tmp",
+          "relativePath": "chapters/external_recursive_0_000043.tmp",
+          "milliseconds": 6235.973
+        },
+        {
+          "sequence": 26,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000043.tmp",
+          "relativePath": "chapters/external_recursive_0_000043.tmp",
+          "milliseconds": 6236.522
+        },
+        {
+          "sequence": 27,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000044.tmp",
+          "relativePath": "chapters/external_recursive_0_000044.tmp",
+          "milliseconds": 6236.546
+        },
+        {
+          "sequence": 28,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000044.tmp",
+          "relativePath": "chapters/external_recursive_0_000044.tmp",
+          "milliseconds": 6236.553
+        },
+        {
+          "sequence": 29,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000045.tmp",
+          "relativePath": "chapters/external_recursive_0_000045.tmp",
+          "milliseconds": 6236.56
+        },
+        {
+          "sequence": 30,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6236.566
+        },
+        {
+          "sequence": 31,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000046.tmp",
+          "relativePath": "chapters/external_recursive_0_000046.tmp",
+          "milliseconds": 6236.573
+        },
+        {
+          "sequence": 32,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000046.tmp",
+          "relativePath": "chapters/external_recursive_0_000046.tmp",
+          "milliseconds": 6236.58
+        },
+        {
+          "sequence": 33,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000047.tmp",
+          "relativePath": "chapters/external_recursive_0_000047.tmp",
+          "milliseconds": 6236.587
+        },
+        {
+          "sequence": 34,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000047.tmp",
+          "relativePath": "chapters/external_recursive_0_000047.tmp",
+          "milliseconds": 6236.619
+        },
+        {
+          "sequence": 35,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000048.tmp",
+          "relativePath": "chapters/external_recursive_0_000048.tmp",
+          "milliseconds": 6236.628
+        },
+        {
+          "sequence": 36,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6236.643
+        },
+        {
+          "sequence": 37,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000069.tmp",
+          "relativePath": "chapters/external_recursive_0_000069.tmp",
+          "milliseconds": 6238.583
+        },
+        {
+          "sequence": 38,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000070.tmp",
+          "relativePath": "chapters/external_recursive_0_000070.tmp",
+          "milliseconds": 6238.595
+        },
+        {
+          "sequence": 39,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000070.tmp",
+          "relativePath": "chapters/external_recursive_0_000070.tmp",
+          "milliseconds": 6238.602
+        },
+        {
+          "sequence": 40,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000071.tmp",
+          "relativePath": "chapters/external_recursive_0_000071.tmp",
+          "milliseconds": 6238.608
+        },
+        {
+          "sequence": 41,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6238.613
+        },
+        {
+          "sequence": 42,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000072.tmp",
+          "relativePath": "chapters/external_recursive_0_000072.tmp",
+          "milliseconds": 6238.619
+        },
+        {
+          "sequence": 43,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000072.tmp",
+          "relativePath": "chapters/external_recursive_0_000072.tmp",
+          "milliseconds": 6245.245
+        },
+        {
+          "sequence": 44,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000073.tmp",
+          "relativePath": "chapters/external_recursive_0_000073.tmp",
+          "milliseconds": 6245.315
+        },
+        {
+          "sequence": 45,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6245.323
+        },
+        {
+          "sequence": 46,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000074.tmp",
+          "relativePath": "chapters/external_recursive_0_000074.tmp",
+          "milliseconds": 6245.329
+        },
+        {
+          "sequence": 47,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000074.tmp",
+          "relativePath": "chapters/external_recursive_0_000074.tmp",
+          "milliseconds": 6245.335
+        },
+        {
+          "sequence": 48,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000075.tmp",
+          "relativePath": "chapters/external_recursive_0_000075.tmp",
+          "milliseconds": 6245.341
+        },
+        {
+          "sequence": 49,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000075.tmp",
+          "relativePath": "chapters/external_recursive_0_000075.tmp",
+          "milliseconds": 6245.353
+        },
+        {
+          "sequence": 50,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000076.tmp",
+          "relativePath": "chapters/external_recursive_0_000076.tmp",
+          "milliseconds": 6245.36
+        },
+        {
+          "sequence": 51,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6245.366
+        },
+        {
+          "sequence": 52,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000077.tmp",
+          "relativePath": "chapters/external_recursive_0_000077.tmp",
+          "milliseconds": 6245.372
+        },
+        {
+          "sequence": 53,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6245.377
+        },
+        {
+          "sequence": 54,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000078.tmp",
+          "relativePath": "chapters/external_recursive_0_000078.tmp",
+          "milliseconds": 6245.386
+        },
+        {
+          "sequence": 55,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000078.tmp",
+          "relativePath": "chapters/external_recursive_0_000078.tmp",
+          "milliseconds": 6245.391
+        },
+        {
+          "sequence": 56,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000079.tmp",
+          "relativePath": "chapters/external_recursive_0_000079.tmp",
+          "milliseconds": 6245.397
+        },
+        {
+          "sequence": 57,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000079.tmp",
+          "relativePath": "chapters/external_recursive_0_000079.tmp",
+          "milliseconds": 6245.403
+        },
+        {
+          "sequence": 58,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000080.tmp",
+          "relativePath": "chapters/external_recursive_0_000080.tmp",
+          "milliseconds": 6245.409
+        },
+        {
+          "sequence": 59,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000080.tmp",
+          "relativePath": "chapters/external_recursive_0_000080.tmp",
+          "milliseconds": 6245.415
+        },
+        {
+          "sequence": 60,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000081.tmp",
+          "relativePath": "chapters/external_recursive_0_000081.tmp",
+          "milliseconds": 6245.421
+        },
+        {
+          "sequence": 61,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000108.tmp",
+          "relativePath": "chapters/external_recursive_0_000108.tmp",
+          "milliseconds": 6247.074
+        },
+        {
+          "sequence": 62,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000108.tmp",
+          "relativePath": "chapters/external_recursive_0_000108.tmp",
+          "milliseconds": 6247.089
+        },
+        {
+          "sequence": 63,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000109.tmp",
+          "relativePath": "chapters/external_recursive_0_000109.tmp",
+          "milliseconds": 6247.095
+        },
+        {
+          "sequence": 64,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000109.tmp",
+          "relativePath": "chapters/external_recursive_0_000109.tmp",
+          "milliseconds": 6252.434
+        },
+        {
+          "sequence": 65,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000110.tmp",
+          "relativePath": "chapters/external_recursive_0_000110.tmp",
+          "milliseconds": 6252.449
+        },
+        {
+          "sequence": 66,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000110.tmp",
+          "relativePath": "chapters/external_recursive_0_000110.tmp",
+          "milliseconds": 6252.461
+        },
+        {
+          "sequence": 67,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000111.tmp",
+          "relativePath": "chapters/external_recursive_0_000111.tmp",
+          "milliseconds": 6253.218
+        },
+        {
+          "sequence": 68,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6253.236
+        },
+        {
+          "sequence": 69,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000112.tmp",
+          "relativePath": "chapters/external_recursive_0_000112.tmp",
+          "milliseconds": 6253.243
+        },
+        {
+          "sequence": 70,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6253.248
+        },
+        {
+          "sequence": 71,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000113.tmp",
+          "relativePath": "chapters/external_recursive_0_000113.tmp",
+          "milliseconds": 6253.254
+        },
+        {
+          "sequence": 72,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000113.tmp",
+          "relativePath": "chapters/external_recursive_0_000113.tmp",
+          "milliseconds": 6253.26
+        },
+        {
+          "sequence": 73,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000114.tmp",
+          "relativePath": "chapters/external_recursive_0_000114.tmp",
+          "milliseconds": 6253.268
+        },
+        {
+          "sequence": 74,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6253.274
+        },
+        {
+          "sequence": 75,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000115.tmp",
+          "relativePath": "chapters/external_recursive_0_000115.tmp",
+          "milliseconds": 6253.279
+        },
+        {
+          "sequence": 76,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6253.285
+        },
+        {
+          "sequence": 77,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000136.tmp",
+          "relativePath": "chapters/external_recursive_0_000136.tmp",
+          "milliseconds": 6255.619
+        },
+        {
+          "sequence": 78,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6255.632
+        },
+        {
+          "sequence": 79,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000137.tmp",
+          "relativePath": "chapters/external_recursive_0_000137.tmp",
+          "milliseconds": 6255.639
+        },
+        {
+          "sequence": 80,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6255.647
+        },
+        {
+          "sequence": 81,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000138.tmp",
+          "relativePath": "chapters/external_recursive_0_000138.tmp",
+          "milliseconds": 6255.67
+        },
+        {
+          "sequence": 82,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6255.677
+        },
+        {
+          "sequence": 83,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000139.tmp",
+          "relativePath": "chapters/external_recursive_0_000139.tmp",
+          "milliseconds": 6255.682
+        },
+        {
+          "sequence": 84,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6260.503
+        },
+        {
+          "sequence": 85,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000140.tmp",
+          "relativePath": "chapters/external_recursive_0_000140.tmp",
+          "milliseconds": 6260.535
+        },
+        {
+          "sequence": 86,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6260.541
+        },
+        {
+          "sequence": 87,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000141.tmp",
+          "relativePath": "chapters/external_recursive_0_000141.tmp",
+          "milliseconds": 6260.547
+        },
+        {
+          "sequence": 88,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000141.tmp",
+          "relativePath": "chapters/external_recursive_0_000141.tmp",
+          "milliseconds": 6260.554
+        },
+        {
+          "sequence": 89,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000142.tmp",
+          "relativePath": "chapters/external_recursive_0_000142.tmp",
+          "milliseconds": 6260.56
+        },
+        {
+          "sequence": 90,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000142.tmp",
+          "relativePath": "chapters/external_recursive_0_000142.tmp",
+          "milliseconds": 6260.566
+        },
+        {
+          "sequence": 91,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000143.tmp",
+          "relativePath": "chapters/external_recursive_0_000143.tmp",
+          "milliseconds": 6260.571
+        },
+        {
+          "sequence": 92,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6260.577
+        },
+        {
+          "sequence": 93,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000144.tmp",
+          "relativePath": "chapters/external_recursive_0_000144.tmp",
+          "milliseconds": 6260.582
+        },
+        {
+          "sequence": 94,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000144.tmp",
+          "relativePath": "chapters/external_recursive_0_000144.tmp",
+          "milliseconds": 6260.588
+        },
+        {
+          "sequence": 95,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000145.tmp",
+          "relativePath": "chapters/external_recursive_0_000145.tmp",
+          "milliseconds": 6260.593
+        },
+        {
+          "sequence": 96,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6260.599
+        },
+        {
+          "sequence": 97,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000145.tmp",
+          "relativePath": "chapters/external_recursive_0_000145.tmp",
+          "milliseconds": 6275.594
+        },
+        {
+          "sequence": 98,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000146.tmp",
+          "relativePath": "chapters/external_recursive_0_000146.tmp",
+          "milliseconds": 6275.61
+        },
+        {
+          "sequence": 99,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000146.tmp",
+          "relativePath": "chapters/external_recursive_0_000146.tmp",
+          "milliseconds": 6275.616
+        },
+        {
+          "sequence": 100,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000147.tmp",
+          "relativePath": "chapters/external_recursive_0_000147.tmp",
+          "milliseconds": 6275.622
+        },
+        {
+          "sequence": 101,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6275.628
+        },
+        {
+          "sequence": 102,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000148.tmp",
+          "relativePath": "chapters/external_recursive_0_000148.tmp",
+          "milliseconds": 6275.638
+        },
+        {
+          "sequence": 103,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000148.tmp",
+          "relativePath": "chapters/external_recursive_0_000148.tmp",
+          "milliseconds": 6275.644
+        },
+        {
+          "sequence": 104,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000149.tmp",
+          "relativePath": "chapters/external_recursive_0_000149.tmp",
+          "milliseconds": 6275.649
+        },
+        {
+          "sequence": 105,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000149.tmp",
+          "relativePath": "chapters/external_recursive_0_000149.tmp",
+          "milliseconds": 6275.655
+        },
+        {
+          "sequence": 106,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000150.tmp",
+          "relativePath": "chapters/external_recursive_0_000150.tmp",
+          "milliseconds": 6275.661
+        },
+        {
+          "sequence": 107,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000150.tmp",
+          "relativePath": "chapters/external_recursive_0_000150.tmp",
+          "milliseconds": 6275.666
+        },
+        {
+          "sequence": 108,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000151.tmp",
+          "relativePath": "chapters/external_recursive_0_000151.tmp",
+          "milliseconds": 6275.672
+        },
+        {
+          "sequence": 109,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6275.678
+        },
+        {
+          "sequence": 110,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000152.tmp",
+          "relativePath": "chapters/external_recursive_0_000152.tmp",
+          "milliseconds": 6276.485
+        },
+        {
+          "sequence": 111,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000152.tmp",
+          "relativePath": "chapters/external_recursive_0_000152.tmp",
+          "milliseconds": 6276.497
+        },
+        {
+          "sequence": 112,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000153.tmp",
+          "relativePath": "chapters/external_recursive_0_000153.tmp",
+          "milliseconds": 6276.504
+        },
+        {
+          "sequence": 113,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000153.tmp",
+          "relativePath": "chapters/external_recursive_0_000153.tmp",
+          "milliseconds": 6276.51
+        },
+        {
+          "sequence": 114,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000154.tmp",
+          "relativePath": "chapters/external_recursive_0_000154.tmp",
+          "milliseconds": 6276.516
+        },
+        {
+          "sequence": 115,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000154.tmp",
+          "relativePath": "chapters/external_recursive_0_000154.tmp",
+          "milliseconds": 6276.523
+        },
+        {
+          "sequence": 116,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000155.tmp",
+          "relativePath": "chapters/external_recursive_0_000155.tmp",
+          "milliseconds": 6276.529
+        },
+        {
+          "sequence": 117,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_0_000155.tmp",
+          "relativePath": "chapters/external_recursive_0_000155.tmp",
+          "milliseconds": 6276.535
+        },
+        {
+          "sequence": 118,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_0_000156.tmp",
+          "relativePath": "chapters/external_recursive_0_000156.tmp",
+          "milliseconds": 6276.541
+        },
+        {
+          "sequence": 119,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 6276.547
+        }
+      ]
+    },
+    "flatThreeDirectories": {
+      "mode": "flat",
+      "available": true,
+      "producer": "independent compiled child; watcher event loop remains live",
+      "attemptedDistinctPaths": 5000,
+      "delayMilliseconds": 0,
+      "observedDistinctPaths": 468,
+      "missingDistinctPaths": 4532,
+      "writer": {
+        "count": 5000,
+        "delayMilliseconds": 0,
+        "milliseconds": 1543.89
+      },
+      "totalEventCount": 1002,
+      "nullFilenameEvents": 0,
+      "errors": [],
+      "explicitLossSignal": false,
+      "silentLossObserved": true,
+      "quiet": {
+        "elapsedMilliseconds": 1055,
+        "finalEventCount": 1002
+      },
+      "events": [
+        {
+          "sequence": 0,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000000.tmp",
+          "relativePath": "chapters/external_flat_0_000000.tmp",
+          "milliseconds": 9582.523
+        },
+        {
+          "sequence": 1,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 9583.802
+        },
+        {
+          "sequence": 2,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000000.tmp",
+          "relativePath": "chapters/external_flat_0_000000.tmp",
+          "milliseconds": 9583.811
+        },
+        {
+          "sequence": 3,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000001.tmp",
+          "relativePath": "chapters/external_flat_0_000001.tmp",
+          "milliseconds": 9583.817
+        },
+        {
+          "sequence": 4,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000001.tmp",
+          "relativePath": "chapters/external_flat_0_000001.tmp",
+          "milliseconds": 9583.822
+        },
+        {
+          "sequence": 5,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000002.tmp",
+          "relativePath": "chapters/external_flat_0_000002.tmp",
+          "milliseconds": 9587.745
+        },
+        {
+          "sequence": 6,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000002.tmp",
+          "relativePath": "chapters/external_flat_0_000002.tmp",
+          "milliseconds": 9587.755
+        },
+        {
+          "sequence": 7,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000003.tmp",
+          "relativePath": "chapters/external_flat_0_000003.tmp",
+          "milliseconds": 9587.761
+        },
+        {
+          "sequence": 8,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000003.tmp",
+          "relativePath": "chapters/external_flat_0_000003.tmp",
+          "milliseconds": 9587.767
+        },
+        {
+          "sequence": 9,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000004.tmp",
+          "relativePath": "chapters/external_flat_0_000004.tmp",
+          "milliseconds": 9587.772
+        },
+        {
+          "sequence": 10,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000004.tmp",
+          "relativePath": "chapters/external_flat_0_000004.tmp",
+          "milliseconds": 9587.778
+        },
+        {
+          "sequence": 11,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000005.tmp",
+          "relativePath": "chapters/external_flat_0_000005.tmp",
+          "milliseconds": 9587.783
+        },
+        {
+          "sequence": 12,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000005.tmp",
+          "relativePath": "chapters/external_flat_0_000005.tmp",
+          "milliseconds": 9587.789
+        },
+        {
+          "sequence": 13,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 9594.055
+        },
+        {
+          "sequence": 14,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000006.tmp",
+          "relativePath": "chapters/external_flat_0_000006.tmp",
+          "milliseconds": 9594.064
+        },
+        {
+          "sequence": 15,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000006.tmp",
+          "relativePath": "chapters/external_flat_0_000006.tmp",
+          "milliseconds": 9594.069
+        },
+        {
+          "sequence": 16,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000007.tmp",
+          "relativePath": "chapters/external_flat_0_000007.tmp",
+          "milliseconds": 9594.075
+        },
+        {
+          "sequence": 17,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000007.tmp",
+          "relativePath": "chapters/external_flat_0_000007.tmp",
+          "milliseconds": 9594.081
+        },
+        {
+          "sequence": 18,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000008.tmp",
+          "relativePath": "chapters/external_flat_0_000008.tmp",
+          "milliseconds": 9594.086
+        },
+        {
+          "sequence": 19,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000008.tmp",
+          "relativePath": "chapters/external_flat_0_000008.tmp",
+          "milliseconds": 9594.091
+        },
+        {
+          "sequence": 20,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000009.tmp",
+          "relativePath": "chapters/external_flat_0_000009.tmp",
+          "milliseconds": 9594.099
+        },
+        {
+          "sequence": 21,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000009.tmp",
+          "relativePath": "chapters/external_flat_0_000009.tmp",
+          "milliseconds": 9594.104
+        },
+        {
+          "sequence": 22,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000010.tmp",
+          "relativePath": "chapters/external_flat_0_000010.tmp",
+          "milliseconds": 9594.109
+        },
+        {
+          "sequence": 23,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000010.tmp",
+          "relativePath": "chapters/external_flat_0_000010.tmp",
+          "milliseconds": 9594.115
+        },
+        {
+          "sequence": 24,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000011.tmp",
+          "relativePath": "chapters/external_flat_0_000011.tmp",
+          "milliseconds": 9594.12
+        },
+        {
+          "sequence": 25,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000011.tmp",
+          "relativePath": "chapters/external_flat_0_000011.tmp",
+          "milliseconds": 9594.125
+        },
+        {
+          "sequence": 26,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000012.tmp",
+          "relativePath": "chapters/external_flat_0_000012.tmp",
+          "milliseconds": 9594.131
+        },
+        {
+          "sequence": 27,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000012.tmp",
+          "relativePath": "chapters/external_flat_0_000012.tmp",
+          "milliseconds": 9594.136
+        },
+        {
+          "sequence": 28,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000013.tmp",
+          "relativePath": "chapters/external_flat_0_000013.tmp",
+          "milliseconds": 9594.141
+        },
+        {
+          "sequence": 29,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000013.tmp",
+          "relativePath": "chapters/external_flat_0_000013.tmp",
+          "milliseconds": 9594.147
+        },
+        {
+          "sequence": 30,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 9605.525
+        },
+        {
+          "sequence": 31,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000014.tmp",
+          "relativePath": "chapters/external_flat_0_000014.tmp",
+          "milliseconds": 9605.539
+        },
+        {
+          "sequence": 32,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000014.tmp",
+          "relativePath": "chapters/external_flat_0_000014.tmp",
+          "milliseconds": 9606.033
+        },
+        {
+          "sequence": 33,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000015.tmp",
+          "relativePath": "chapters/external_flat_0_000015.tmp",
+          "milliseconds": 9606.045
+        },
+        {
+          "sequence": 34,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000015.tmp",
+          "relativePath": "chapters/external_flat_0_000015.tmp",
+          "milliseconds": 9606.051
+        },
+        {
+          "sequence": 35,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000016.tmp",
+          "relativePath": "chapters/external_flat_0_000016.tmp",
+          "milliseconds": 9606.057
+        },
+        {
+          "sequence": 36,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000016.tmp",
+          "relativePath": "chapters/external_flat_0_000016.tmp",
+          "milliseconds": 9606.063
+        },
+        {
+          "sequence": 37,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000017.tmp",
+          "relativePath": "chapters/external_flat_0_000017.tmp",
+          "milliseconds": 9606.068
+        },
+        {
+          "sequence": 38,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000017.tmp",
+          "relativePath": "chapters/external_flat_0_000017.tmp",
+          "milliseconds": 9606.074
+        },
+        {
+          "sequence": 39,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000018.tmp",
+          "relativePath": "chapters/external_flat_0_000018.tmp",
+          "milliseconds": 9606.08
+        },
+        {
+          "sequence": 40,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000018.tmp",
+          "relativePath": "chapters/external_flat_0_000018.tmp",
+          "milliseconds": 9606.085
+        },
+        {
+          "sequence": 41,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000019.tmp",
+          "relativePath": "chapters/external_flat_0_000019.tmp",
+          "milliseconds": 9606.091
+        },
+        {
+          "sequence": 42,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000019.tmp",
+          "relativePath": "chapters/external_flat_0_000019.tmp",
+          "milliseconds": 9606.097
+        },
+        {
+          "sequence": 43,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000020.tmp",
+          "relativePath": "chapters/external_flat_0_000020.tmp",
+          "milliseconds": 9606.102
+        },
+        {
+          "sequence": 44,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000020.tmp",
+          "relativePath": "chapters/external_flat_0_000020.tmp",
+          "milliseconds": 9606.108
+        },
+        {
+          "sequence": 45,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000021.tmp",
+          "relativePath": "chapters/external_flat_0_000021.tmp",
+          "milliseconds": 9606.113
+        },
+        {
+          "sequence": 46,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000021.tmp",
+          "relativePath": "chapters/external_flat_0_000021.tmp",
+          "milliseconds": 9606.119
+        },
+        {
+          "sequence": 47,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000022.tmp",
+          "relativePath": "chapters/external_flat_0_000022.tmp",
+          "milliseconds": 9606.125
+        },
+        {
+          "sequence": 48,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000022.tmp",
+          "relativePath": "chapters/external_flat_0_000022.tmp",
+          "milliseconds": 9606.13
+        },
+        {
+          "sequence": 49,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000023.tmp",
+          "relativePath": "chapters/external_flat_0_000023.tmp",
+          "milliseconds": 9606.136
+        },
+        {
+          "sequence": 50,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000023.tmp",
+          "relativePath": "chapters/external_flat_0_000023.tmp",
+          "milliseconds": 9606.141
+        },
+        {
+          "sequence": 51,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000024.tmp",
+          "relativePath": "chapters/external_flat_0_000024.tmp",
+          "milliseconds": 9606.147
+        },
+        {
+          "sequence": 52,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000024.tmp",
+          "relativePath": "chapters/external_flat_0_000024.tmp",
+          "milliseconds": 9606.153
+        },
+        {
+          "sequence": 53,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000025.tmp",
+          "relativePath": "chapters/external_flat_0_000025.tmp",
+          "milliseconds": 9606.158
+        },
+        {
+          "sequence": 54,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000025.tmp",
+          "relativePath": "chapters/external_flat_0_000025.tmp",
+          "milliseconds": 9606.165
+        },
+        {
+          "sequence": 55,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000026.tmp",
+          "relativePath": "chapters/external_flat_0_000026.tmp",
+          "milliseconds": 9606.17
+        },
+        {
+          "sequence": 56,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000026.tmp",
+          "relativePath": "chapters/external_flat_0_000026.tmp",
+          "milliseconds": 9606.176
+        },
+        {
+          "sequence": 57,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000027.tmp",
+          "relativePath": "chapters/external_flat_0_000027.tmp",
+          "milliseconds": 9606.182
+        },
+        {
+          "sequence": 58,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000027.tmp",
+          "relativePath": "chapters/external_flat_0_000027.tmp",
+          "milliseconds": 9606.187
+        },
+        {
+          "sequence": 59,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000028.tmp",
+          "relativePath": "chapters/external_flat_0_000028.tmp",
+          "milliseconds": 9606.192
+        },
+        {
+          "sequence": 60,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000028.tmp",
+          "relativePath": "chapters/external_flat_0_000028.tmp",
+          "milliseconds": 9606.198
+        },
+        {
+          "sequence": 61,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000029.tmp",
+          "relativePath": "chapters/external_flat_0_000029.tmp",
+          "milliseconds": 9606.204
+        },
+        {
+          "sequence": 62,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000029.tmp",
+          "relativePath": "chapters/external_flat_0_000029.tmp",
+          "milliseconds": 9606.209
+        },
+        {
+          "sequence": 63,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000030.tmp",
+          "relativePath": "chapters/external_flat_0_000030.tmp",
+          "milliseconds": 9606.215
+        },
+        {
+          "sequence": 64,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000030.tmp",
+          "relativePath": "chapters/external_flat_0_000030.tmp",
+          "milliseconds": 9606.22
+        },
+        {
+          "sequence": 65,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 9615.427
+        },
+        {
+          "sequence": 66,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 9652.106
+        },
+        {
+          "sequence": 67,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000063.tmp",
+          "relativePath": "chapters/external_flat_0_000063.tmp",
+          "milliseconds": 9652.124
+        },
+        {
+          "sequence": 68,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000063.tmp",
+          "relativePath": "chapters/external_flat_0_000063.tmp",
+          "milliseconds": 9652.129
+        },
+        {
+          "sequence": 69,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000064.tmp",
+          "relativePath": "chapters/external_flat_0_000064.tmp",
+          "milliseconds": 9652.135
+        },
+        {
+          "sequence": 70,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000064.tmp",
+          "relativePath": "chapters/external_flat_0_000064.tmp",
+          "milliseconds": 9652.147
+        },
+        {
+          "sequence": 71,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000065.tmp",
+          "relativePath": "chapters/external_flat_0_000065.tmp",
+          "milliseconds": 9652.153
+        },
+        {
+          "sequence": 72,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000065.tmp",
+          "relativePath": "chapters/external_flat_0_000065.tmp",
+          "milliseconds": 9652.158
+        },
+        {
+          "sequence": 73,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000066.tmp",
+          "relativePath": "chapters/external_flat_0_000066.tmp",
+          "milliseconds": 9652.164
+        },
+        {
+          "sequence": 74,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000066.tmp",
+          "relativePath": "chapters/external_flat_0_000066.tmp",
+          "milliseconds": 9652.169
+        },
+        {
+          "sequence": 75,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000067.tmp",
+          "relativePath": "chapters/external_flat_0_000067.tmp",
+          "milliseconds": 9652.175
+        },
+        {
+          "sequence": 76,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000067.tmp",
+          "relativePath": "chapters/external_flat_0_000067.tmp",
+          "milliseconds": 9652.18
+        },
+        {
+          "sequence": 77,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000068.tmp",
+          "relativePath": "chapters/external_flat_0_000068.tmp",
+          "milliseconds": 9652.186
+        },
+        {
+          "sequence": 78,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000068.tmp",
+          "relativePath": "chapters/external_flat_0_000068.tmp",
+          "milliseconds": 9652.191
+        },
+        {
+          "sequence": 79,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000069.tmp",
+          "relativePath": "chapters/external_flat_0_000069.tmp",
+          "milliseconds": 9652.196
+        },
+        {
+          "sequence": 80,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000069.tmp",
+          "relativePath": "chapters/external_flat_0_000069.tmp",
+          "milliseconds": 9652.202
+        },
+        {
+          "sequence": 81,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000070.tmp",
+          "relativePath": "chapters/external_flat_0_000070.tmp",
+          "milliseconds": 9652.207
+        },
+        {
+          "sequence": 82,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000070.tmp",
+          "relativePath": "chapters/external_flat_0_000070.tmp",
+          "milliseconds": 9652.212
+        },
+        {
+          "sequence": 83,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000071.tmp",
+          "relativePath": "chapters/external_flat_0_000071.tmp",
+          "milliseconds": 9652.218
+        },
+        {
+          "sequence": 84,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000071.tmp",
+          "relativePath": "chapters/external_flat_0_000071.tmp",
+          "milliseconds": 9652.223
+        },
+        {
+          "sequence": 85,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000072.tmp",
+          "relativePath": "chapters/external_flat_0_000072.tmp",
+          "milliseconds": 9652.228
+        },
+        {
+          "sequence": 86,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000072.tmp",
+          "relativePath": "chapters/external_flat_0_000072.tmp",
+          "milliseconds": 9652.234
+        },
+        {
+          "sequence": 87,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000073.tmp",
+          "relativePath": "chapters/external_flat_0_000073.tmp",
+          "milliseconds": 9652.239
+        },
+        {
+          "sequence": 88,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000073.tmp",
+          "relativePath": "chapters/external_flat_0_000073.tmp",
+          "milliseconds": 9652.245
+        },
+        {
+          "sequence": 89,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000074.tmp",
+          "relativePath": "chapters/external_flat_0_000074.tmp",
+          "milliseconds": 9652.25
+        },
+        {
+          "sequence": 90,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000074.tmp",
+          "relativePath": "chapters/external_flat_0_000074.tmp",
+          "milliseconds": 9652.255
+        },
+        {
+          "sequence": 91,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000075.tmp",
+          "relativePath": "chapters/external_flat_0_000075.tmp",
+          "milliseconds": 9652.261
+        },
+        {
+          "sequence": 92,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000075.tmp",
+          "relativePath": "chapters/external_flat_0_000075.tmp",
+          "milliseconds": 9652.266
+        },
+        {
+          "sequence": 93,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000076.tmp",
+          "relativePath": "chapters/external_flat_0_000076.tmp",
+          "milliseconds": 9652.272
+        },
+        {
+          "sequence": 94,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000076.tmp",
+          "relativePath": "chapters/external_flat_0_000076.tmp",
+          "milliseconds": 9652.277
+        },
+        {
+          "sequence": 95,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000077.tmp",
+          "relativePath": "chapters/external_flat_0_000077.tmp",
+          "milliseconds": 9652.282
+        },
+        {
+          "sequence": 96,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000077.tmp",
+          "relativePath": "chapters/external_flat_0_000077.tmp",
+          "milliseconds": 9652.288
+        },
+        {
+          "sequence": 97,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000078.tmp",
+          "relativePath": "chapters/external_flat_0_000078.tmp",
+          "milliseconds": 9652.293
+        },
+        {
+          "sequence": 98,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000078.tmp",
+          "relativePath": "chapters/external_flat_0_000078.tmp",
+          "milliseconds": 9652.299
+        },
+        {
+          "sequence": 99,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000079.tmp",
+          "relativePath": "chapters/external_flat_0_000079.tmp",
+          "milliseconds": 9652.304
+        },
+        {
+          "sequence": 100,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000079.tmp",
+          "relativePath": "chapters/external_flat_0_000079.tmp",
+          "milliseconds": 9652.309
+        },
+        {
+          "sequence": 101,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000080.tmp",
+          "relativePath": "chapters/external_flat_0_000080.tmp",
+          "milliseconds": 9652.315
+        },
+        {
+          "sequence": 102,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000080.tmp",
+          "relativePath": "chapters/external_flat_0_000080.tmp",
+          "milliseconds": 9652.32
+        },
+        {
+          "sequence": 103,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000081.tmp",
+          "relativePath": "chapters/external_flat_0_000081.tmp",
+          "milliseconds": 9652.325
+        },
+        {
+          "sequence": 104,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000081.tmp",
+          "relativePath": "chapters/external_flat_0_000081.tmp",
+          "milliseconds": 9652.331
+        },
+        {
+          "sequence": 105,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000082.tmp",
+          "relativePath": "chapters/external_flat_0_000082.tmp",
+          "milliseconds": 9652.336
+        },
+        {
+          "sequence": 106,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000082.tmp",
+          "relativePath": "chapters/external_flat_0_000082.tmp",
+          "milliseconds": 9652.868
+        },
+        {
+          "sequence": 107,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000083.tmp",
+          "relativePath": "chapters/external_flat_0_000083.tmp",
+          "milliseconds": 9652.892
+        },
+        {
+          "sequence": 108,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000083.tmp",
+          "relativePath": "chapters/external_flat_0_000083.tmp",
+          "milliseconds": 9652.899
+        },
+        {
+          "sequence": 109,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000084.tmp",
+          "relativePath": "chapters/external_flat_0_000084.tmp",
+          "milliseconds": 9652.905
+        },
+        {
+          "sequence": 110,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000084.tmp",
+          "relativePath": "chapters/external_flat_0_000084.tmp",
+          "milliseconds": 9652.912
+        },
+        {
+          "sequence": 111,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000085.tmp",
+          "relativePath": "chapters/external_flat_0_000085.tmp",
+          "milliseconds": 9652.918
+        },
+        {
+          "sequence": 112,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000085.tmp",
+          "relativePath": "chapters/external_flat_0_000085.tmp",
+          "milliseconds": 9652.924
+        },
+        {
+          "sequence": 113,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000086.tmp",
+          "relativePath": "chapters/external_flat_0_000086.tmp",
+          "milliseconds": 9652.93
+        },
+        {
+          "sequence": 114,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000086.tmp",
+          "relativePath": "chapters/external_flat_0_000086.tmp",
+          "milliseconds": 9652.936
+        },
+        {
+          "sequence": 115,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000087.tmp",
+          "relativePath": "chapters/external_flat_0_000087.tmp",
+          "milliseconds": 9652.943
+        },
+        {
+          "sequence": 116,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000087.tmp",
+          "relativePath": "chapters/external_flat_0_000087.tmp",
+          "milliseconds": 9652.949
+        },
+        {
+          "sequence": 117,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000088.tmp",
+          "relativePath": "chapters/external_flat_0_000088.tmp",
+          "milliseconds": 9652.954
+        },
+        {
+          "sequence": 118,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_0_000088.tmp",
+          "relativePath": "chapters/external_flat_0_000088.tmp",
+          "milliseconds": 9652.96
+        },
+        {
+          "sequence": 119,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_0_000089.tmp",
+          "relativePath": "chapters/external_flat_0_000089.tmp",
+          "milliseconds": 9652.966
+        }
+      ]
+    }
+  },
+  "distinctPathPaced": {
+    "recursive": {
+      "mode": "recursive",
+      "available": true,
+      "producer": "independent compiled child; watcher event loop remains live",
+      "attemptedDistinctPaths": 1000,
+      "delayMilliseconds": 2,
+      "observedDistinctPaths": 1000,
+      "missingDistinctPaths": 0,
+      "writer": {
+        "count": 1000,
+        "delayMilliseconds": 2,
+        "milliseconds": 13735.83
+      },
+      "totalEventCount": 2487,
+      "nullFilenameEvents": 0,
+      "errors": [],
+      "explicitLossSignal": false,
+      "silentLossObserved": false,
+      "quiet": {
+        "elapsedMilliseconds": 1759.35,
+        "finalEventCount": 2487
+      },
+      "events": [
+        {
+          "sequence": 0,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000000.tmp",
+          "relativePath": "chapters/external_recursive_2_000000.tmp",
+          "milliseconds": 13013.949
+        },
+        {
+          "sequence": 1,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000000.tmp",
+          "relativePath": "chapters/external_recursive_2_000000.tmp",
+          "milliseconds": 13014.245
+        },
+        {
+          "sequence": 2,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000001.tmp",
+          "relativePath": "chapters/external_recursive_2_000001.tmp",
+          "milliseconds": 13029.154
+        },
+        {
+          "sequence": 3,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13030.014
+        },
+        {
+          "sequence": 4,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000002.tmp",
+          "relativePath": "chapters/external_recursive_2_000002.tmp",
+          "milliseconds": 13032.162
+        },
+        {
+          "sequence": 5,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13033.329
+        },
+        {
+          "sequence": 6,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000003.tmp",
+          "relativePath": "chapters/external_recursive_2_000003.tmp",
+          "milliseconds": 13048.256
+        },
+        {
+          "sequence": 7,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000003.tmp",
+          "relativePath": "chapters/external_recursive_2_000003.tmp",
+          "milliseconds": 13048.508
+        },
+        {
+          "sequence": 8,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13061.991
+        },
+        {
+          "sequence": 9,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000004.tmp",
+          "relativePath": "chapters/external_recursive_2_000004.tmp",
+          "milliseconds": 13063.029
+        },
+        {
+          "sequence": 10,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13063.565
+        },
+        {
+          "sequence": 11,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000005.tmp",
+          "relativePath": "chapters/external_recursive_2_000005.tmp",
+          "milliseconds": 13079.872
+        },
+        {
+          "sequence": 12,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000005.tmp",
+          "relativePath": "chapters/external_recursive_2_000005.tmp",
+          "milliseconds": 13080.154
+        },
+        {
+          "sequence": 13,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13095.231
+        },
+        {
+          "sequence": 14,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000006.tmp",
+          "relativePath": "chapters/external_recursive_2_000006.tmp",
+          "milliseconds": 13095.89
+        },
+        {
+          "sequence": 15,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13095.899
+        },
+        {
+          "sequence": 16,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000007.tmp",
+          "relativePath": "chapters/external_recursive_2_000007.tmp",
+          "milliseconds": 13112.546
+        },
+        {
+          "sequence": 17,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000007.tmp",
+          "relativePath": "chapters/external_recursive_2_000007.tmp",
+          "milliseconds": 13112.764
+        },
+        {
+          "sequence": 18,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000008.tmp",
+          "relativePath": "chapters/external_recursive_2_000008.tmp",
+          "milliseconds": 13115.422
+        },
+        {
+          "sequence": 19,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13115.432
+        },
+        {
+          "sequence": 20,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000009.tmp",
+          "relativePath": "chapters/external_recursive_2_000009.tmp",
+          "milliseconds": 13129.749
+        },
+        {
+          "sequence": 21,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000009.tmp",
+          "relativePath": "chapters/external_recursive_2_000009.tmp",
+          "milliseconds": 13129.949
+        },
+        {
+          "sequence": 22,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13145.871
+        },
+        {
+          "sequence": 23,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000010.tmp",
+          "relativePath": "chapters/external_recursive_2_000010.tmp",
+          "milliseconds": 13146.417
+        },
+        {
+          "sequence": 24,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13146.424
+        },
+        {
+          "sequence": 25,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000011.tmp",
+          "relativePath": "chapters/external_recursive_2_000011.tmp",
+          "milliseconds": 13162.401
+        },
+        {
+          "sequence": 26,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000011.tmp",
+          "relativePath": "chapters/external_recursive_2_000011.tmp",
+          "milliseconds": 13162.625
+        },
+        {
+          "sequence": 27,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13178.745
+        },
+        {
+          "sequence": 28,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000012.tmp",
+          "relativePath": "chapters/external_recursive_2_000012.tmp",
+          "milliseconds": 13179.549
+        },
+        {
+          "sequence": 29,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13179.558
+        },
+        {
+          "sequence": 30,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000013.tmp",
+          "relativePath": "chapters/external_recursive_2_000013.tmp",
+          "milliseconds": 13195.458
+        },
+        {
+          "sequence": 31,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000013.tmp",
+          "relativePath": "chapters/external_recursive_2_000013.tmp",
+          "milliseconds": 13195.958
+        },
+        {
+          "sequence": 32,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13212.612
+        },
+        {
+          "sequence": 33,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000014.tmp",
+          "relativePath": "chapters/external_recursive_2_000014.tmp",
+          "milliseconds": 13213.211
+        },
+        {
+          "sequence": 34,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000014.tmp",
+          "relativePath": "chapters/external_recursive_2_000014.tmp",
+          "milliseconds": 13213.219
+        },
+        {
+          "sequence": 35,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000015.tmp",
+          "relativePath": "chapters/external_recursive_2_000015.tmp",
+          "milliseconds": 13230.335
+        },
+        {
+          "sequence": 36,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000015.tmp",
+          "relativePath": "chapters/external_recursive_2_000015.tmp",
+          "milliseconds": 13230.642
+        },
+        {
+          "sequence": 37,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13245.369
+        },
+        {
+          "sequence": 38,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000016.tmp",
+          "relativePath": "chapters/external_recursive_2_000016.tmp",
+          "milliseconds": 13246.217
+        },
+        {
+          "sequence": 39,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13246.24
+        },
+        {
+          "sequence": 40,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000017.tmp",
+          "relativePath": "chapters/external_recursive_2_000017.tmp",
+          "milliseconds": 13260.524
+        },
+        {
+          "sequence": 41,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000017.tmp",
+          "relativePath": "chapters/external_recursive_2_000017.tmp",
+          "milliseconds": 13260.846
+        },
+        {
+          "sequence": 42,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13275.65
+        },
+        {
+          "sequence": 43,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000018.tmp",
+          "relativePath": "chapters/external_recursive_2_000018.tmp",
+          "milliseconds": 13276.587
+        },
+        {
+          "sequence": 44,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13276.595
+        },
+        {
+          "sequence": 45,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000019.tmp",
+          "relativePath": "chapters/external_recursive_2_000019.tmp",
+          "milliseconds": 13280.415
+        },
+        {
+          "sequence": 46,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000019.tmp",
+          "relativePath": "chapters/external_recursive_2_000019.tmp",
+          "milliseconds": 13280.855
+        },
+        {
+          "sequence": 47,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13295.175
+        },
+        {
+          "sequence": 48,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000020.tmp",
+          "relativePath": "chapters/external_recursive_2_000020.tmp",
+          "milliseconds": 13296.125
+        },
+        {
+          "sequence": 49,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000020.tmp",
+          "relativePath": "chapters/external_recursive_2_000020.tmp",
+          "milliseconds": 13296.133
+        },
+        {
+          "sequence": 50,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000021.tmp",
+          "relativePath": "chapters/external_recursive_2_000021.tmp",
+          "milliseconds": 13313.223
+        },
+        {
+          "sequence": 51,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000021.tmp",
+          "relativePath": "chapters/external_recursive_2_000021.tmp",
+          "milliseconds": 13313.5
+        },
+        {
+          "sequence": 52,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13327.705
+        },
+        {
+          "sequence": 53,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000022.tmp",
+          "relativePath": "chapters/external_recursive_2_000022.tmp",
+          "milliseconds": 13328.518
+        },
+        {
+          "sequence": 54,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13329.28
+        },
+        {
+          "sequence": 55,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000023.tmp",
+          "relativePath": "chapters/external_recursive_2_000023.tmp",
+          "milliseconds": 13343.834
+        },
+        {
+          "sequence": 56,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000023.tmp",
+          "relativePath": "chapters/external_recursive_2_000023.tmp",
+          "milliseconds": 13344.405
+        },
+        {
+          "sequence": 57,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13358.354
+        },
+        {
+          "sequence": 58,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000024.tmp",
+          "relativePath": "chapters/external_recursive_2_000024.tmp",
+          "milliseconds": 13359.386
+        },
+        {
+          "sequence": 59,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13359.394
+        },
+        {
+          "sequence": 60,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000025.tmp",
+          "relativePath": "chapters/external_recursive_2_000025.tmp",
+          "milliseconds": 13374.668
+        },
+        {
+          "sequence": 61,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000025.tmp",
+          "relativePath": "chapters/external_recursive_2_000025.tmp",
+          "milliseconds": 13375.25
+        },
+        {
+          "sequence": 62,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13390.219
+        },
+        {
+          "sequence": 63,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000026.tmp",
+          "relativePath": "chapters/external_recursive_2_000026.tmp",
+          "milliseconds": 13391
+        },
+        {
+          "sequence": 64,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13391.009
+        },
+        {
+          "sequence": 65,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000027.tmp",
+          "relativePath": "chapters/external_recursive_2_000027.tmp",
+          "milliseconds": 13405.651
+        },
+        {
+          "sequence": 66,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000027.tmp",
+          "relativePath": "chapters/external_recursive_2_000027.tmp",
+          "milliseconds": 13406.103
+        },
+        {
+          "sequence": 67,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13428.357
+        },
+        {
+          "sequence": 68,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000028.tmp",
+          "relativePath": "chapters/external_recursive_2_000028.tmp",
+          "milliseconds": 13429.195
+        },
+        {
+          "sequence": 69,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13429.204
+        },
+        {
+          "sequence": 70,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000029.tmp",
+          "relativePath": "chapters/external_recursive_2_000029.tmp",
+          "milliseconds": 13431.787
+        },
+        {
+          "sequence": 71,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000029.tmp",
+          "relativePath": "chapters/external_recursive_2_000029.tmp",
+          "milliseconds": 13432.136
+        },
+        {
+          "sequence": 72,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13445.271
+        },
+        {
+          "sequence": 73,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000030.tmp",
+          "relativePath": "chapters/external_recursive_2_000030.tmp",
+          "milliseconds": 13446.08
+        },
+        {
+          "sequence": 74,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13446.09
+        },
+        {
+          "sequence": 75,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000031.tmp",
+          "relativePath": "chapters/external_recursive_2_000031.tmp",
+          "milliseconds": 13461.991
+        },
+        {
+          "sequence": 76,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000031.tmp",
+          "relativePath": "chapters/external_recursive_2_000031.tmp",
+          "milliseconds": 13462.445
+        },
+        {
+          "sequence": 77,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13479.157
+        },
+        {
+          "sequence": 78,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000032.tmp",
+          "relativePath": "chapters/external_recursive_2_000032.tmp",
+          "milliseconds": 13480.197
+        },
+        {
+          "sequence": 79,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13480.209
+        },
+        {
+          "sequence": 80,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000033.tmp",
+          "relativePath": "chapters/external_recursive_2_000033.tmp",
+          "milliseconds": 13482.109
+        },
+        {
+          "sequence": 81,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000033.tmp",
+          "relativePath": "chapters/external_recursive_2_000033.tmp",
+          "milliseconds": 13482.576
+        },
+        {
+          "sequence": 82,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13511.735
+        },
+        {
+          "sequence": 83,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000034.tmp",
+          "relativePath": "chapters/external_recursive_2_000034.tmp",
+          "milliseconds": 13512.432
+        },
+        {
+          "sequence": 84,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13512.441
+        },
+        {
+          "sequence": 85,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000035.tmp",
+          "relativePath": "chapters/external_recursive_2_000035.tmp",
+          "milliseconds": 13528.565
+        },
+        {
+          "sequence": 86,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000035.tmp",
+          "relativePath": "chapters/external_recursive_2_000035.tmp",
+          "milliseconds": 13529.088
+        },
+        {
+          "sequence": 87,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13545.252
+        },
+        {
+          "sequence": 88,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000036.tmp",
+          "relativePath": "chapters/external_recursive_2_000036.tmp",
+          "milliseconds": 13546.746
+        },
+        {
+          "sequence": 89,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13546.755
+        },
+        {
+          "sequence": 90,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000037.tmp",
+          "relativePath": "chapters/external_recursive_2_000037.tmp",
+          "milliseconds": 13562.042
+        },
+        {
+          "sequence": 91,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000037.tmp",
+          "relativePath": "chapters/external_recursive_2_000037.tmp",
+          "milliseconds": 13562.288
+        },
+        {
+          "sequence": 92,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13565.815
+        },
+        {
+          "sequence": 93,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000038.tmp",
+          "relativePath": "chapters/external_recursive_2_000038.tmp",
+          "milliseconds": 13566.481
+        },
+        {
+          "sequence": 94,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13566.489
+        },
+        {
+          "sequence": 95,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000039.tmp",
+          "relativePath": "chapters/external_recursive_2_000039.tmp",
+          "milliseconds": 13579.834
+        },
+        {
+          "sequence": 96,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000039.tmp",
+          "relativePath": "chapters/external_recursive_2_000039.tmp",
+          "milliseconds": 13580.139
+        },
+        {
+          "sequence": 97,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13594.721
+        },
+        {
+          "sequence": 98,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000040.tmp",
+          "relativePath": "chapters/external_recursive_2_000040.tmp",
+          "milliseconds": 13595.439
+        },
+        {
+          "sequence": 99,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000040.tmp",
+          "relativePath": "chapters/external_recursive_2_000040.tmp",
+          "milliseconds": 13595.45
+        },
+        {
+          "sequence": 100,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000041.tmp",
+          "relativePath": "chapters/external_recursive_2_000041.tmp",
+          "milliseconds": 13612.631
+        },
+        {
+          "sequence": 101,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000041.tmp",
+          "relativePath": "chapters/external_recursive_2_000041.tmp",
+          "milliseconds": 13614.352
+        },
+        {
+          "sequence": 102,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000042.tmp",
+          "relativePath": "chapters/external_recursive_2_000042.tmp",
+          "milliseconds": 13615.247
+        },
+        {
+          "sequence": 103,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13615.256
+        },
+        {
+          "sequence": 104,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000043.tmp",
+          "relativePath": "chapters/external_recursive_2_000043.tmp",
+          "milliseconds": 13628.71
+        },
+        {
+          "sequence": 105,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000043.tmp",
+          "relativePath": "chapters/external_recursive_2_000043.tmp",
+          "milliseconds": 13629.505
+        },
+        {
+          "sequence": 106,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000044.tmp",
+          "relativePath": "chapters/external_recursive_2_000044.tmp",
+          "milliseconds": 13632.071
+        },
+        {
+          "sequence": 107,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13632.083
+        },
+        {
+          "sequence": 108,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000045.tmp",
+          "relativePath": "chapters/external_recursive_2_000045.tmp",
+          "milliseconds": 13645.142
+        },
+        {
+          "sequence": 109,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000045.tmp",
+          "relativePath": "chapters/external_recursive_2_000045.tmp",
+          "milliseconds": 13645.751
+        },
+        {
+          "sequence": 110,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13646.982
+        },
+        {
+          "sequence": 111,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000046.tmp",
+          "relativePath": "chapters/external_recursive_2_000046.tmp",
+          "milliseconds": 13661.906
+        },
+        {
+          "sequence": 112,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000046.tmp",
+          "relativePath": "chapters/external_recursive_2_000046.tmp",
+          "milliseconds": 13662.155
+        },
+        {
+          "sequence": 113,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13664.288
+        },
+        {
+          "sequence": 114,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000047.tmp",
+          "relativePath": "chapters/external_recursive_2_000047.tmp",
+          "milliseconds": 13665.268
+        },
+        {
+          "sequence": 115,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000047.tmp",
+          "relativePath": "chapters/external_recursive_2_000047.tmp",
+          "milliseconds": 13665.28
+        },
+        {
+          "sequence": 116,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000048.tmp",
+          "relativePath": "chapters/external_recursive_2_000048.tmp",
+          "milliseconds": 13678.541
+        },
+        {
+          "sequence": 117,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters\\external_recursive_2_000048.tmp",
+          "relativePath": "chapters/external_recursive_2_000048.tmp",
+          "milliseconds": 13679.478
+        },
+        {
+          "sequence": 118,
+          "watcher": "mythpen-recursive",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 13695.042
+        },
+        {
+          "sequence": 119,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\external_recursive_2_000049.tmp",
+          "relativePath": "chapters/external_recursive_2_000049.tmp",
+          "milliseconds": 13695.787
+        }
+      ]
+    },
+    "flatThreeDirectories": {
+      "mode": "flat",
+      "available": true,
+      "producer": "independent compiled child; watcher event loop remains live",
+      "attemptedDistinctPaths": 1000,
+      "delayMilliseconds": 2,
+      "observedDistinctPaths": 1000,
+      "missingDistinctPaths": 0,
+      "writer": {
+        "count": 1000,
+        "delayMilliseconds": 2,
+        "milliseconds": 13840.44
+      },
+      "totalEventCount": 2522,
+      "nullFilenameEvents": 0,
+      "errors": [],
+      "explicitLossSignal": false,
+      "silentLossObserved": false,
+      "quiet": {
+        "elapsedMilliseconds": 1006.55,
+        "finalEventCount": 2522
+      },
+      "events": [
+        {
+          "sequence": 0,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000000.tmp",
+          "relativePath": "chapters/external_flat_2_000000.tmp",
+          "milliseconds": 28924.329
+        },
+        {
+          "sequence": 1,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000000.tmp",
+          "relativePath": "chapters/external_flat_2_000000.tmp",
+          "milliseconds": 28924.674
+        },
+        {
+          "sequence": 2,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 28929.826
+        },
+        {
+          "sequence": 3,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000001.tmp",
+          "relativePath": "chapters/external_flat_2_000001.tmp",
+          "milliseconds": 28930.447
+        },
+        {
+          "sequence": 4,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000001.tmp",
+          "relativePath": "chapters/external_flat_2_000001.tmp",
+          "milliseconds": 28930.632
+        },
+        {
+          "sequence": 5,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000002.tmp",
+          "relativePath": "chapters/external_flat_2_000002.tmp",
+          "milliseconds": 28946.056
+        },
+        {
+          "sequence": 6,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000002.tmp",
+          "relativePath": "chapters/external_flat_2_000002.tmp",
+          "milliseconds": 28947.085
+        },
+        {
+          "sequence": 7,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 28961.837
+        },
+        {
+          "sequence": 8,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000003.tmp",
+          "relativePath": "chapters/external_flat_2_000003.tmp",
+          "milliseconds": 28962.291
+        },
+        {
+          "sequence": 9,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000003.tmp",
+          "relativePath": "chapters/external_flat_2_000003.tmp",
+          "milliseconds": 28962.523
+        },
+        {
+          "sequence": 10,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000004.tmp",
+          "relativePath": "chapters/external_flat_2_000004.tmp",
+          "milliseconds": 28965.135
+        },
+        {
+          "sequence": 11,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000004.tmp",
+          "relativePath": "chapters/external_flat_2_000004.tmp",
+          "milliseconds": 28965.602
+        },
+        {
+          "sequence": 12,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 28979.549
+        },
+        {
+          "sequence": 13,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000005.tmp",
+          "relativePath": "chapters/external_flat_2_000005.tmp",
+          "milliseconds": 28979.997
+        },
+        {
+          "sequence": 14,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000005.tmp",
+          "relativePath": "chapters/external_flat_2_000005.tmp",
+          "milliseconds": 28980.224
+        },
+        {
+          "sequence": 15,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000006.tmp",
+          "relativePath": "chapters/external_flat_2_000006.tmp",
+          "milliseconds": 28996.024
+        },
+        {
+          "sequence": 16,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000006.tmp",
+          "relativePath": "chapters/external_flat_2_000006.tmp",
+          "milliseconds": 28996.271
+        },
+        {
+          "sequence": 17,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29011.943
+        },
+        {
+          "sequence": 18,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000007.tmp",
+          "relativePath": "chapters/external_flat_2_000007.tmp",
+          "milliseconds": 29012.468
+        },
+        {
+          "sequence": 19,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000007.tmp",
+          "relativePath": "chapters/external_flat_2_000007.tmp",
+          "milliseconds": 29012.651
+        },
+        {
+          "sequence": 20,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000008.tmp",
+          "relativePath": "chapters/external_flat_2_000008.tmp",
+          "milliseconds": 29026.91
+        },
+        {
+          "sequence": 21,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000008.tmp",
+          "relativePath": "chapters/external_flat_2_000008.tmp",
+          "milliseconds": 29027.126
+        },
+        {
+          "sequence": 22,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29041.818
+        },
+        {
+          "sequence": 23,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000009.tmp",
+          "relativePath": "chapters/external_flat_2_000009.tmp",
+          "milliseconds": 29042.209
+        },
+        {
+          "sequence": 24,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000009.tmp",
+          "relativePath": "chapters/external_flat_2_000009.tmp",
+          "milliseconds": 29042.385
+        },
+        {
+          "sequence": 25,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000010.tmp",
+          "relativePath": "chapters/external_flat_2_000010.tmp",
+          "milliseconds": 29057.856
+        },
+        {
+          "sequence": 26,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000010.tmp",
+          "relativePath": "chapters/external_flat_2_000010.tmp",
+          "milliseconds": 29058.42
+        },
+        {
+          "sequence": 27,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29072.879
+        },
+        {
+          "sequence": 28,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000011.tmp",
+          "relativePath": "chapters/external_flat_2_000011.tmp",
+          "milliseconds": 29073.413
+        },
+        {
+          "sequence": 29,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000011.tmp",
+          "relativePath": "chapters/external_flat_2_000011.tmp",
+          "milliseconds": 29073.604
+        },
+        {
+          "sequence": 30,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000012.tmp",
+          "relativePath": "chapters/external_flat_2_000012.tmp",
+          "milliseconds": 29087.811
+        },
+        {
+          "sequence": 31,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000012.tmp",
+          "relativePath": "chapters/external_flat_2_000012.tmp",
+          "milliseconds": 29088.03
+        },
+        {
+          "sequence": 32,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29104.517
+        },
+        {
+          "sequence": 33,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000013.tmp",
+          "relativePath": "chapters/external_flat_2_000013.tmp",
+          "milliseconds": 29104.97
+        },
+        {
+          "sequence": 34,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29104.978
+        },
+        {
+          "sequence": 35,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000013.tmp",
+          "relativePath": "chapters/external_flat_2_000013.tmp",
+          "milliseconds": 29105.155
+        },
+        {
+          "sequence": 36,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000014.tmp",
+          "relativePath": "chapters/external_flat_2_000014.tmp",
+          "milliseconds": 29119.848
+        },
+        {
+          "sequence": 37,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000014.tmp",
+          "relativePath": "chapters/external_flat_2_000014.tmp",
+          "milliseconds": 29120.094
+        },
+        {
+          "sequence": 38,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29134.921
+        },
+        {
+          "sequence": 39,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000015.tmp",
+          "relativePath": "chapters/external_flat_2_000015.tmp",
+          "milliseconds": 29135.356
+        },
+        {
+          "sequence": 40,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000015.tmp",
+          "relativePath": "chapters/external_flat_2_000015.tmp",
+          "milliseconds": 29135.566
+        },
+        {
+          "sequence": 41,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000016.tmp",
+          "relativePath": "chapters/external_flat_2_000016.tmp",
+          "milliseconds": 29151.561
+        },
+        {
+          "sequence": 42,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000016.tmp",
+          "relativePath": "chapters/external_flat_2_000016.tmp",
+          "milliseconds": 29151.764
+        },
+        {
+          "sequence": 43,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29165.761
+        },
+        {
+          "sequence": 44,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000017.tmp",
+          "relativePath": "chapters/external_flat_2_000017.tmp",
+          "milliseconds": 29166.544
+        },
+        {
+          "sequence": 45,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000017.tmp",
+          "relativePath": "chapters/external_flat_2_000017.tmp",
+          "milliseconds": 29166.762
+        },
+        {
+          "sequence": 46,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000018.tmp",
+          "relativePath": "chapters/external_flat_2_000018.tmp",
+          "milliseconds": 29180.487
+        },
+        {
+          "sequence": 47,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000018.tmp",
+          "relativePath": "chapters/external_flat_2_000018.tmp",
+          "milliseconds": 29180.678
+        },
+        {
+          "sequence": 48,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29196.353
+        },
+        {
+          "sequence": 49,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000019.tmp",
+          "relativePath": "chapters/external_flat_2_000019.tmp",
+          "milliseconds": 29197.041
+        },
+        {
+          "sequence": 50,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000019.tmp",
+          "relativePath": "chapters/external_flat_2_000019.tmp",
+          "milliseconds": 29197.383
+        },
+        {
+          "sequence": 51,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000020.tmp",
+          "relativePath": "chapters/external_flat_2_000020.tmp",
+          "milliseconds": 29212.625
+        },
+        {
+          "sequence": 52,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000020.tmp",
+          "relativePath": "chapters/external_flat_2_000020.tmp",
+          "milliseconds": 29212.934
+        },
+        {
+          "sequence": 53,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29228.614
+        },
+        {
+          "sequence": 54,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000021.tmp",
+          "relativePath": "chapters/external_flat_2_000021.tmp",
+          "milliseconds": 29230.052
+        },
+        {
+          "sequence": 55,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29230.07
+        },
+        {
+          "sequence": 56,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000021.tmp",
+          "relativePath": "chapters/external_flat_2_000021.tmp",
+          "milliseconds": 29230.255
+        },
+        {
+          "sequence": 57,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000022.tmp",
+          "relativePath": "chapters/external_flat_2_000022.tmp",
+          "milliseconds": 29244.549
+        },
+        {
+          "sequence": 58,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000022.tmp",
+          "relativePath": "chapters/external_flat_2_000022.tmp",
+          "milliseconds": 29244.799
+        },
+        {
+          "sequence": 59,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29260.162
+        },
+        {
+          "sequence": 60,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000023.tmp",
+          "relativePath": "chapters/external_flat_2_000023.tmp",
+          "milliseconds": 29260.702
+        },
+        {
+          "sequence": 61,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000023.tmp",
+          "relativePath": "chapters/external_flat_2_000023.tmp",
+          "milliseconds": 29261.249
+        },
+        {
+          "sequence": 62,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000024.tmp",
+          "relativePath": "chapters/external_flat_2_000024.tmp",
+          "milliseconds": 29264.135
+        },
+        {
+          "sequence": 63,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000024.tmp",
+          "relativePath": "chapters/external_flat_2_000024.tmp",
+          "milliseconds": 29264.323
+        },
+        {
+          "sequence": 64,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29279.392
+        },
+        {
+          "sequence": 65,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000025.tmp",
+          "relativePath": "chapters/external_flat_2_000025.tmp",
+          "milliseconds": 29279.929
+        },
+        {
+          "sequence": 66,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000025.tmp",
+          "relativePath": "chapters/external_flat_2_000025.tmp",
+          "milliseconds": 29280.182
+        },
+        {
+          "sequence": 67,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000026.tmp",
+          "relativePath": "chapters/external_flat_2_000026.tmp",
+          "milliseconds": 29287.439
+        },
+        {
+          "sequence": 68,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000026.tmp",
+          "relativePath": "chapters/external_flat_2_000026.tmp",
+          "milliseconds": 29287.744
+        },
+        {
+          "sequence": 69,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29311.757
+        },
+        {
+          "sequence": 70,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000027.tmp",
+          "relativePath": "chapters/external_flat_2_000027.tmp",
+          "milliseconds": 29312.168
+        },
+        {
+          "sequence": 71,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000027.tmp",
+          "relativePath": "chapters/external_flat_2_000027.tmp",
+          "milliseconds": 29312.414
+        },
+        {
+          "sequence": 72,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000028.tmp",
+          "relativePath": "chapters/external_flat_2_000028.tmp",
+          "milliseconds": 29317.42
+        },
+        {
+          "sequence": 73,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000028.tmp",
+          "relativePath": "chapters/external_flat_2_000028.tmp",
+          "milliseconds": 29318.067
+        },
+        {
+          "sequence": 74,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29332.793
+        },
+        {
+          "sequence": 75,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000029.tmp",
+          "relativePath": "chapters/external_flat_2_000029.tmp",
+          "milliseconds": 29332.812
+        },
+        {
+          "sequence": 76,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000029.tmp",
+          "relativePath": "chapters/external_flat_2_000029.tmp",
+          "milliseconds": 29333.225
+        },
+        {
+          "sequence": 77,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000030.tmp",
+          "relativePath": "chapters/external_flat_2_000030.tmp",
+          "milliseconds": 29334.502
+        },
+        {
+          "sequence": 78,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000030.tmp",
+          "relativePath": "chapters/external_flat_2_000030.tmp",
+          "milliseconds": 29334.761
+        },
+        {
+          "sequence": 79,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29362.373
+        },
+        {
+          "sequence": 80,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000031.tmp",
+          "relativePath": "chapters/external_flat_2_000031.tmp",
+          "milliseconds": 29362.751
+        },
+        {
+          "sequence": 81,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000031.tmp",
+          "relativePath": "chapters/external_flat_2_000031.tmp",
+          "milliseconds": 29362.99
+        },
+        {
+          "sequence": 82,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000032.tmp",
+          "relativePath": "chapters/external_flat_2_000032.tmp",
+          "milliseconds": 29366.635
+        },
+        {
+          "sequence": 83,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000032.tmp",
+          "relativePath": "chapters/external_flat_2_000032.tmp",
+          "milliseconds": 29366.97
+        },
+        {
+          "sequence": 84,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29381.284
+        },
+        {
+          "sequence": 85,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000033.tmp",
+          "relativePath": "chapters/external_flat_2_000033.tmp",
+          "milliseconds": 29381.719
+        },
+        {
+          "sequence": 86,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000033.tmp",
+          "relativePath": "chapters/external_flat_2_000033.tmp",
+          "milliseconds": 29381.961
+        },
+        {
+          "sequence": 87,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000034.tmp",
+          "relativePath": "chapters/external_flat_2_000034.tmp",
+          "milliseconds": 29396.919
+        },
+        {
+          "sequence": 88,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000034.tmp",
+          "relativePath": "chapters/external_flat_2_000034.tmp",
+          "milliseconds": 29397.119
+        },
+        {
+          "sequence": 89,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29413.115
+        },
+        {
+          "sequence": 90,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000035.tmp",
+          "relativePath": "chapters/external_flat_2_000035.tmp",
+          "milliseconds": 29413.622
+        },
+        {
+          "sequence": 91,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29413.633
+        },
+        {
+          "sequence": 92,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000035.tmp",
+          "relativePath": "chapters/external_flat_2_000035.tmp",
+          "milliseconds": 29413.857
+        },
+        {
+          "sequence": 93,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000036.tmp",
+          "relativePath": "chapters/external_flat_2_000036.tmp",
+          "milliseconds": 29429.643
+        },
+        {
+          "sequence": 94,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000036.tmp",
+          "relativePath": "chapters/external_flat_2_000036.tmp",
+          "milliseconds": 29429.913
+        },
+        {
+          "sequence": 95,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29444.95
+        },
+        {
+          "sequence": 96,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000037.tmp",
+          "relativePath": "chapters/external_flat_2_000037.tmp",
+          "milliseconds": 29445.548
+        },
+        {
+          "sequence": 97,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000037.tmp",
+          "relativePath": "chapters/external_flat_2_000037.tmp",
+          "milliseconds": 29445.747
+        },
+        {
+          "sequence": 98,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000038.tmp",
+          "relativePath": "chapters/external_flat_2_000038.tmp",
+          "milliseconds": 29447.597
+        },
+        {
+          "sequence": 99,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000038.tmp",
+          "relativePath": "chapters/external_flat_2_000038.tmp",
+          "milliseconds": 29447.809
+        },
+        {
+          "sequence": 100,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29461.708
+        },
+        {
+          "sequence": 101,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000039.tmp",
+          "relativePath": "chapters/external_flat_2_000039.tmp",
+          "milliseconds": 29462.176
+        },
+        {
+          "sequence": 102,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000039.tmp",
+          "relativePath": "chapters/external_flat_2_000039.tmp",
+          "milliseconds": 29462.44
+        },
+        {
+          "sequence": 103,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000040.tmp",
+          "relativePath": "chapters/external_flat_2_000040.tmp",
+          "milliseconds": 29478.645
+        },
+        {
+          "sequence": 104,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000040.tmp",
+          "relativePath": "chapters/external_flat_2_000040.tmp",
+          "milliseconds": 29479.093
+        },
+        {
+          "sequence": 105,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29481.322
+        },
+        {
+          "sequence": 106,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000041.tmp",
+          "relativePath": "chapters/external_flat_2_000041.tmp",
+          "milliseconds": 29481.796
+        },
+        {
+          "sequence": 107,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000041.tmp",
+          "relativePath": "chapters/external_flat_2_000041.tmp",
+          "milliseconds": 29482.026
+        },
+        {
+          "sequence": 108,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000042.tmp",
+          "relativePath": "chapters/external_flat_2_000042.tmp",
+          "milliseconds": 29496.372
+        },
+        {
+          "sequence": 109,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000042.tmp",
+          "relativePath": "chapters/external_flat_2_000042.tmp",
+          "milliseconds": 29496.593
+        },
+        {
+          "sequence": 110,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29499.294
+        },
+        {
+          "sequence": 111,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000043.tmp",
+          "relativePath": "chapters/external_flat_2_000043.tmp",
+          "milliseconds": 29499.833
+        },
+        {
+          "sequence": 112,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000043.tmp",
+          "relativePath": "chapters/external_flat_2_000043.tmp",
+          "milliseconds": 29500.152
+        },
+        {
+          "sequence": 113,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000044.tmp",
+          "relativePath": "chapters/external_flat_2_000044.tmp",
+          "milliseconds": 29512.657
+        },
+        {
+          "sequence": 114,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000044.tmp",
+          "relativePath": "chapters/external_flat_2_000044.tmp",
+          "milliseconds": 29512.836
+        },
+        {
+          "sequence": 115,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 29528.508
+        },
+        {
+          "sequence": 116,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000045.tmp",
+          "relativePath": "chapters/external_flat_2_000045.tmp",
+          "milliseconds": 29529.063
+        },
+        {
+          "sequence": 117,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000045.tmp",
+          "relativePath": "chapters/external_flat_2_000045.tmp",
+          "milliseconds": 29529.24
+        },
+        {
+          "sequence": 118,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "external_flat_2_000046.tmp",
+          "relativePath": "chapters/external_flat_2_000046.tmp",
+          "milliseconds": 29546.35
+        },
+        {
+          "sequence": 119,
+          "watcher": "chapters",
+          "eventType": "change",
+          "filename": "external_flat_2_000046.tmp",
+          "relativePath": "chapters/external_flat_2_000046.tmp",
+          "milliseconds": 29547.254
+        }
+      ]
+    }
+  },
+  "distinctPathPressure": {
+    "recursive": {
+      "mode": "recursive",
+      "available": true,
+      "attemptedDistinctPaths": 20000,
+      "observedDistinctPaths": 1,
+      "missingDistinctPaths": 19999,
+      "writeMilliseconds": 13058.57,
+      "totalEventCount": 1,
+      "nullFilenameEvents": 0,
+      "errors": [],
+      "explicitLossSignal": false,
+      "silentLossObserved": true,
+      "quiet": {
+        "elapsedMilliseconds": 1063.6,
+        "finalEventCount": 1
+      },
+      "events": [
+        {
+          "sequence": 0,
+          "watcher": "mythpen-recursive",
+          "eventType": "rename",
+          "filename": "chapters\\overflow_recursive_000000.tmp",
+          "relativePath": "chapters/overflow_recursive_000000.tmp",
+          "milliseconds": 57178.607
+        }
+      ]
+    },
+    "flatThreeDirectories": {
+      "mode": "flat",
+      "available": true,
+      "attemptedDistinctPaths": 20000,
+      "observedDistinctPaths": 1,
+      "missingDistinctPaths": 19999,
+      "writeMilliseconds": 40118.78,
+      "totalEventCount": 2,
+      "nullFilenameEvents": 0,
+      "errors": [],
+      "explicitLossSignal": false,
+      "silentLossObserved": true,
+      "quiet": {
+        "elapsedMilliseconds": 1097.71,
+        "finalEventCount": 2
+      },
+      "events": [
+        {
+          "sequence": 0,
+          "watcher": "chapters",
+          "eventType": "rename",
+          "filename": "overflow_flat_000000.tmp",
+          "relativePath": "chapters/overflow_flat_000000.tmp",
+          "milliseconds": 112155.136
+        },
+        {
+          "sequence": 1,
+          "watcher": "mythpen",
+          "eventType": "change",
+          "filename": "chapters",
+          "relativePath": "chapters",
+          "milliseconds": 112155.221
+        }
+      ]
+    }
+  },
+  "atomicReplace": {
+    "available": true,
+    "targetRelative": "chapters/ch_atomic_probe.md",
+    "attemptedIterations": 20,
+    "completedIterations": 20,
+    "targetObservedEveryCompletedIteration": true,
+    "candidateObservedEveryCompletedIteration": true,
+    "errors": [],
+    "nullFilenameEvents": 0,
+    "sequenceDistribution": [
+      {
+        "sequence": "rename:<candidate> -> change:<candidate> -> rename:<target>",
+        "occurrences": 20
+      }
+    ],
+    "runs": [
+      {
+        "iteration": 0,
+        "candidateRelative": "chapters/.ch_atomic_probe.0000.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0000.candidate",
+          "change:chapters/.ch_atomic_probe.0000.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 1,
+        "candidateRelative": "chapters/.ch_atomic_probe.0001.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0001.candidate",
+          "change:chapters/.ch_atomic_probe.0001.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 2,
+        "candidateRelative": "chapters/.ch_atomic_probe.0002.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0002.candidate",
+          "change:chapters/.ch_atomic_probe.0002.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 3,
+        "candidateRelative": "chapters/.ch_atomic_probe.0003.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0003.candidate",
+          "change:chapters/.ch_atomic_probe.0003.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 4,
+        "candidateRelative": "chapters/.ch_atomic_probe.0004.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0004.candidate",
+          "change:chapters/.ch_atomic_probe.0004.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 5,
+        "candidateRelative": "chapters/.ch_atomic_probe.0005.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0005.candidate",
+          "change:chapters/.ch_atomic_probe.0005.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 6,
+        "candidateRelative": "chapters/.ch_atomic_probe.0006.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0006.candidate",
+          "change:chapters/.ch_atomic_probe.0006.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 7,
+        "candidateRelative": "chapters/.ch_atomic_probe.0007.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0007.candidate",
+          "change:chapters/.ch_atomic_probe.0007.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 8,
+        "candidateRelative": "chapters/.ch_atomic_probe.0008.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0008.candidate",
+          "change:chapters/.ch_atomic_probe.0008.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 9,
+        "candidateRelative": "chapters/.ch_atomic_probe.0009.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0009.candidate",
+          "change:chapters/.ch_atomic_probe.0009.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 10,
+        "candidateRelative": "chapters/.ch_atomic_probe.0010.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0010.candidate",
+          "change:chapters/.ch_atomic_probe.0010.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 11,
+        "candidateRelative": "chapters/.ch_atomic_probe.0011.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0011.candidate",
+          "change:chapters/.ch_atomic_probe.0011.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 12,
+        "candidateRelative": "chapters/.ch_atomic_probe.0012.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0012.candidate",
+          "change:chapters/.ch_atomic_probe.0012.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 13,
+        "candidateRelative": "chapters/.ch_atomic_probe.0013.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0013.candidate",
+          "change:chapters/.ch_atomic_probe.0013.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 14,
+        "candidateRelative": "chapters/.ch_atomic_probe.0014.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0014.candidate",
+          "change:chapters/.ch_atomic_probe.0014.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 15,
+        "candidateRelative": "chapters/.ch_atomic_probe.0015.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0015.candidate",
+          "change:chapters/.ch_atomic_probe.0015.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 16,
+        "candidateRelative": "chapters/.ch_atomic_probe.0016.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0016.candidate",
+          "change:chapters/.ch_atomic_probe.0016.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 17,
+        "candidateRelative": "chapters/.ch_atomic_probe.0017.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0017.candidate",
+          "change:chapters/.ch_atomic_probe.0017.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 18,
+        "candidateRelative": "chapters/.ch_atomic_probe.0018.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0018.candidate",
+          "change:chapters/.ch_atomic_probe.0018.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      },
+      {
+        "iteration": 19,
+        "candidateRelative": "chapters/.ch_atomic_probe.0019.candidate",
+        "operationError": null,
+        "targetObserved": true,
+        "candidateObserved": true,
+        "sequence": [
+          "rename:chapters/.ch_atomic_probe.0019.candidate",
+          "change:chapters/.ch_atomic_probe.0019.candidate",
+          "rename:chapters/ch_atomic_probe.md"
+        ],
+        "sequenceShape": [
+          "rename:<candidate>",
+          "change:<candidate>",
+          "rename:<target>"
+        ]
+      }
+    ]
+  }
+}
