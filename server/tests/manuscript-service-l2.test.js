@@ -15,6 +15,7 @@ const {
 const {
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
+  canonicalSchema12ReuseIdentityPlan,
 } = require('../manuscript/projection-store');
 const { createL2ManuscriptService } = require('../manuscript/l2-service');
 const {
@@ -1002,6 +1003,10 @@ test('ordinary service preserves the four Task 7B non-create mutations and exact
       targetInput.ignoredLedger,
     );
     assert.deepEqual(targetInput.localIdentityPlan, expectedIdentityPlan());
+    assert.deepEqual(
+      targetInput.localIdentityPlan,
+      canonicalSchema12ReuseIdentityPlan(targetInput.currentProjection),
+    );
     assert.equal(Object.isFrozen(targetInput.currentProjection), true);
     assert.equal(Object.isFrozen(targetInput.ignoredLedger), true);
     assert.equal(Object.isFrozen(targetInput.localIdentityPlan), true);

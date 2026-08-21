@@ -433,6 +433,106 @@ test('compileAfter validates present and absent observations plus reference cros
   }
 });
 
+test('resolution transition is original-only while ordinary compileAfter keeps equal-row status rules', () => {
+  const ledger = new IgnoredIdentityLedger();
+  const beforeRows = normalizeIgnoredLedgerRows([]);
+  const preparation = ledger.prepareResolution({
+    action: 'ignore_in_place',
+    request: { kind: 'chapter', uid: CHAPTER_A },
+    beforeRows,
+    baseGeneration: 7,
+  });
+  const candidate = Object.freeze({
+    capacitySnapshot: Object.freeze({}),
+    chapters: Object.freeze([]),
+    controlledFiles: Object.freeze([]),
+    diagnostics: Object.freeze({}),
+    ignoredLedgerAfter: Object.freeze([Object.freeze(observation({
+      reference: reference('detached', null, null),
+    }))]),
+    projectUid: VOLUME_A,
+    volumeOrder: Object.freeze([]),
+    volumes: Object.freeze([]),
+    warnings: Object.freeze([]),
+  });
+  const transition = ledger.finalizeResolution({
+    preparation,
+    candidate,
+    targetGeneration: 8,
+  });
+  const after = ledger.compileResolutionAfter({
+    transition,
+    beforeRows,
+    candidate,
+    targetGeneration: 8,
+  });
+
+  assert.deepEqual(after, [row({
+    opaque_container_kind: null,
+    opaque_container_uid: null,
+    is_currently_referenced: 0,
+    projection_generation: 8,
+  })]);
+  assert.throws(() => ledger.compileResolutionAfter({
+    transition: Object.freeze({ ...transition }),
+    beforeRows,
+    candidate,
+    targetGeneration: 8,
+  }), /original.*module-branded/i);
+  assert.throws(() => ledger.compileAfter({
+    beforeRows,
+    observations: candidate.ignoredLedgerAfter,
+    targetGeneration: 8,
+  }), /cover every before row exactly once/i);
+});
+
+test('finalizeResolution never searches normalized observations with indexOf', () => {
+  const ledger = new IgnoredIdentityLedger();
+  const uids = Array.from({ length: 128 }, (_, index) => (
+    `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, '0')}`
+  ));
+  const beforeRows = normalizeIgnoredLedgerRows(uids.map((uid) => row({ resource_uid: uid })));
+  const preparation = ledger.prepareResolution({
+    action: 'ignore_in_place',
+    request: { kind: 'chapter', uid: uids[0] },
+    beforeRows,
+    baseGeneration: 7,
+  });
+  const candidate = Object.freeze({
+    capacitySnapshot: Object.freeze({}),
+    chapters: Object.freeze([]),
+    controlledFiles: Object.freeze([]),
+    diagnostics: Object.freeze({}),
+    ignoredLedgerAfter: Object.freeze(uids.map((uid) => observation({ uid }))),
+    projectUid: VOLUME_A,
+    volumeOrder: Object.freeze([]),
+    volumes: Object.freeze([]),
+    warnings: Object.freeze([]),
+  });
+  const originalDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'indexOf');
+  let indexOfCalls = 0;
+  Object.defineProperty(Array.prototype, 'indexOf', {
+    ...originalDescriptor,
+    value(...args) {
+      indexOfCalls += 1;
+      return Reflect.apply(originalDescriptor.value, this, args);
+    },
+  });
+  let transition;
+  try {
+    transition = ledger.finalizeResolution({
+      preparation,
+      candidate,
+      targetGeneration: 8,
+    });
+  } finally {
+    Object.defineProperty(Array.prototype, 'indexOf', originalDescriptor);
+  }
+
+  assert.ok(transition);
+  assert.equal(indexOfCalls, 0);
+});
+
 test('serializeOpaqueMembers appends only active indexed opaque members in UTF-8 order', () => {
   const ledger = new IgnoredIdentityLedger();
   const rows = [

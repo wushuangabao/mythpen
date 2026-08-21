@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import { ManuscriptStatusBanner } from '@/components/ManuscriptStatusBanner'
 import { useT } from '@/hooks/useT'
 import { shouldSynchronizeEditorDom } from '@/lib/editorAuthoritySync'
+import { type EditorSaveIntent, runEditorSaveWithProtection } from '@/lib/editorSaveProtection'
 import {
   editorSaveKey,
   enqueueEditorSave,
@@ -12,7 +13,7 @@ import {
   getEditorSaveQueueSnapshot,
   subscribeEditorSaveQueue,
 } from '@/lib/editorSaveQueue'
-import type { ManuscriptDirtyBinding } from '@/lib/manuscriptDirtyResources'
+import { createManuscriptDirtyBinding, isManuscriptSaveProtected } from '@/lib/manuscriptDirtyResources'
 import {
   discardTitleSave,
   flushTitleSave,
@@ -24,7 +25,7 @@ import {
   subscribeTitleSaveQueue,
   titleSaveKey,
 } from '@/lib/titleSaveQueue'
-import { type Chapter, useChapterStore } from '@/stores/useChapterStore'
+import { useChapterStore } from '@/stores/useChapterStore'
 import { useEditorStore } from '@/stores/useEditorStore'
 import { useProjectStore } from '@/stores/useProjectStore'
 import { useRevisionStore } from '@/stores/useRevisionStore'
@@ -64,36 +65,6 @@ function editorTargetKey(project: string, chapterId: number): string {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || '保存失败')
-}
-
-const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
-const SHA256_PATTERN = /^[0-9a-f]{64}$/u
-const MANUSCRIPT_WINDOW_ID = globalThis.crypto?.randomUUID?.() ?? `window-${Date.now()}`
-
-function dirtyBinding(chapter: Chapter, domain: 'body' | 'sidecar'): ManuscriptDirtyBinding | undefined {
-  const rawSha256 = domain === 'body' ? chapter.baseWitness?.raw_sha256 : chapter.baseWitness?.sidecar_raw_sha256
-  if (
-    !chapter.chapterUid ||
-    !chapter.manuscriptProjectUid ||
-    !chapter.projectInstanceId ||
-    !UUID_V4_PATTERN.test(chapter.chapterUid) ||
-    !UUID_V4_PATTERN.test(chapter.manuscriptProjectUid) ||
-    !UUID_V4_PATTERN.test(chapter.projectInstanceId) ||
-    typeof rawSha256 !== 'string' ||
-    !SHA256_PATTERN.test(rawSha256)
-  )
-    return undefined
-  return {
-    identity: {
-      projectUid: chapter.manuscriptProjectUid,
-      projectInstanceId: chapter.projectInstanceId,
-      resourceKind: 'chapter',
-      resourceUid: chapter.chapterUid,
-      domain,
-      windowId: MANUSCRIPT_WINDOW_ID,
-    },
-    baseRawSha256: rawSha256,
-  }
 }
 
 export function EditorContent() {
@@ -151,9 +122,7 @@ export function EditorContent() {
   const titleSaveError = activeTitleTargetKey ? titleQueueSnapshot.errors[activeTitleTargetKey] : undefined
   const editorSaveFailure = currentProject && chapterId ? getEditorSaveFailure(currentProject, chapterId) : null
   const titleSaveFailure = currentProject && chapterId ? getTitleSaveFailure(currentProject, chapterId) : null
-  const manuscriptProtectionCode = [editorSaveFailure?.code, titleSaveFailure?.code].find(
-    (code) => code === 'EXTERNAL_DRAFT_CONFLICT' || code === 'RECOVERY_REQUIRED',
-  )
+  const manuscriptProtectionCode = [editorSaveFailure?.code, titleSaveFailure?.code].find(isManuscriptSaveProtected)
   const manuscriptProtectionMessage =
     manuscriptProtectionCode === editorSaveFailure?.code ? editorSaveFailure?.message : titleSaveFailure?.message
   const editorLocked = revisionLocked || Boolean(manuscriptProtectionCode)
@@ -220,92 +189,112 @@ export function EditorContent() {
 
   // Persist editor content to the process-wide queue. The queue outlives this
   // component, so a failed blur save remains recoverable after navigation.
-  const doSave = useCallback((): Promise<void> => {
-    const pn = useProjectStore.getState().currentProject
-    const chapterState = useChapterStore.getState()
-    const ch = chapterState.currentChapter
-    const chNum = ch?.num
-    const editorTarget = editorTargetRef.current
-    if (
-      !pn ||
-      !ch ||
-      !chNum ||
-      !editorRef.current ||
-      chapterState.projectName !== pn ||
-      editorTarget.project !== pn ||
-      editorTarget.chapterId !== ch.id
-    ) {
-      return Promise.resolve()
-    }
+  const doSave = useCallback(
+    (intent: EditorSaveIntent = 'automatic'): Promise<void> => {
+      const pn = useProjectStore.getState().currentProject
+      const chapterState = useChapterStore.getState()
+      const ch = chapterState.currentChapter
+      const chNum = ch?.num
+      const editorTarget = editorTargetRef.current
+      if (
+        !pn ||
+        !ch ||
+        !chNum ||
+        !editorRef.current ||
+        chapterState.projectName !== pn ||
+        editorTarget.project !== pn ||
+        editorTarget.chapterId !== ch.id
+      ) {
+        return Promise.resolve()
+      }
+      const protectionFailure =
+        [getEditorSaveFailure(pn, ch.id), getTitleSaveFailure(pn, ch.id)].find((failure) =>
+          isManuscriptSaveProtected(failure?.code),
+        ) ?? null
+      if (protectionFailure) {
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+        return runEditorSaveWithProtection(protectionFailure, intent, async () => {})
+      }
 
-    const html = editorRef.current.innerHTML
-    const textContent = editorRef.current.textContent?.trim() || ''
-    const markdown = textContent === '' ? '' : extractContent(html)
-    const targetKey = editorTargetKey(pn, ch.id)
+      const html = editorRef.current.innerHTML
+      const textContent = editorRef.current.textContent?.trim() || ''
+      const markdown = textContent === '' ? '' : extractContent(html)
+      const targetKey = editorTargetKey(pn, ch.id)
 
-    const isActiveTarget = () => {
-      const activeProject = useProjectStore.getState().currentProject
-      const activeChapterState = useChapterStore.getState()
-      const activeTarget = editorTargetRef.current
-      return (
-        activeProject === pn &&
-        activeChapterState.projectName === pn &&
-        activeChapterState.currentChapter?.id === ch.id &&
-        activeTarget.project === pn &&
-        activeTarget.chapterId === ch.id
-      )
-    }
+      const isActiveTarget = () => {
+        const activeProject = useProjectStore.getState().currentProject
+        const activeChapterState = useChapterStore.getState()
+        const activeTarget = editorTargetRef.current
+        return (
+          activeProject === pn &&
+          activeChapterState.projectName === pn &&
+          activeChapterState.currentChapter?.id === ch.id &&
+          activeTarget.project === pn &&
+          activeTarget.chapterId === ch.id
+        )
+      }
 
-    const readActiveSnapshot = () => {
-      if (!isActiveTarget() || !editorRef.current) return null
-      const currentText = editorRef.current.textContent?.trim() || ''
-      return currentText === '' ? '' : extractContent(editorRef.current.innerHTML)
-    }
+      const readActiveSnapshot = () => {
+        if (!isActiveTarget() || !editorRef.current) return null
+        const currentText = editorRef.current.textContent?.trim() || ''
+        return currentText === '' ? '' : extractContent(editorRef.current.innerHTML)
+      }
 
-    const lastSavedContent = savedContentByTargetRef.current.get(targetKey) ?? ch.content ?? ''
-    const queuedDraft = getEditorSaveDraft(pn, ch.id)
-    if (queuedDraft?.content !== markdown && (queuedDraft || markdown !== lastSavedContent)) {
-      enqueueEditorSave(pn, ch.id, chNum, markdown, ch.dataVersion, dirtyBinding(ch, 'body'), ch.baseWitness)
-    }
+      const lastSavedContent = savedContentByTargetRef.current.get(targetKey) ?? ch.content ?? ''
+      const queuedDraft = getEditorSaveDraft(pn, ch.id)
+      if (queuedDraft?.content !== markdown && (queuedDraft || markdown !== lastSavedContent)) {
+        enqueueEditorSave(
+          pn,
+          ch.id,
+          chNum,
+          markdown,
+          ch.dataVersion,
+          createManuscriptDirtyBinding(ch, 'body'),
+          ch.baseWitness,
+        )
+      }
 
-    const persistSnapshot = async () => {
-      if (getEditorSaveDraft(pn, ch.id)) {
-        if (isActiveTarget()) setSaveStatus('saving')
-        try {
-          await flushEditorSave(pn, ch.id, async (entry) => {
-            const persistedDataVersion = await updateChapter(
-              entry.project,
-              entry.chapterNum,
-              { content: entry.content },
-              entry.chapterId,
-              entry.baseDataVersion,
-              entry.baseWitness,
-            )
-            savedContentByTargetRef.current.set(targetKey, entry.content)
-            return persistedDataVersion
-          })
-        } catch (error) {
-          if (isActiveTarget()) {
-            setIsDirty(true)
-            setSaveStatus('unsaved')
+      const persistSnapshot = async () => {
+        if (getEditorSaveDraft(pn, ch.id)) {
+          if (isActiveTarget()) setSaveStatus('saving')
+          try {
+            await flushEditorSave(pn, ch.id, async (entry) => {
+              const persistedDataVersion = await updateChapter(
+                entry.project,
+                entry.chapterNum,
+                { content: entry.content },
+                entry.chapterId,
+                entry.baseDataVersion,
+                entry.baseWitness,
+              )
+              savedContentByTargetRef.current.set(targetKey, entry.content)
+              return persistedDataVersion
+            })
+          } catch (error) {
+            if (isActiveTarget()) {
+              setIsDirty(true)
+              setSaveStatus('unsaved')
+            }
+            throw error
           }
-          throw error
+        }
+
+        if (isActiveTarget()) {
+          const currentSnapshot = readActiveSnapshot()
+          const activeChapter = useChapterStore.getState().currentChapter
+          const persistedContent = activeChapter?.id === ch.id ? activeChapter.content || '' : null
+          const fullySaved =
+            !getEditorSaveDraft(pn, ch.id) && currentSnapshot !== null && currentSnapshot === persistedContent
+          setIsDirty(!fullySaved)
+          setSaveStatus(fullySaved ? 'saved' : 'unsaved')
         }
       }
 
-      if (isActiveTarget()) {
-        const currentSnapshot = readActiveSnapshot()
-        const activeChapter = useChapterStore.getState().currentChapter
-        const persistedContent = activeChapter?.id === ch.id ? activeChapter.content || '' : null
-        const fullySaved =
-          !getEditorSaveDraft(pn, ch.id) && currentSnapshot !== null && currentSnapshot === persistedContent
-        setIsDirty(!fullySaved)
-        setSaveStatus(fullySaved ? 'saved' : 'unsaved')
-      }
-    }
-
-    return persistSnapshot()
-  }, [updateChapter, setSaveStatus, extractContent]) // no longer depends on chapter/currentProject
+      return persistSnapshot()
+    },
+    [updateChapter, setSaveStatus, extractContent],
+  ) // no longer depends on chapter/currentProject
 
   useEffect(() => {
     const flushEditor = (event: Event) => {
@@ -314,7 +303,7 @@ export function EditorContent() {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
       isEditingRef.current = false
       if (detail?.lock && editorRef.current) editorRef.current.contentEditable = 'false'
-      void doSave().then(
+      void doSave('explicit').then(
         () => detail?.resolve?.(),
         (error) => detail?.reject?.(error),
       )
@@ -335,6 +324,12 @@ export function EditorContent() {
       void doSaveRef.current().catch(() => {})
     }, interval * 1000)
   }, []) // stable — reads doSave and settings through refs
+
+  useEffect(() => {
+    if (!manuscriptProtectionCode || !saveTimerRef.current) return
+    clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = null
+  }, [manuscriptProtectionCode])
 
   // Sync editor content from store when chapter changes
   const syncContent = useCallback(() => {
@@ -461,7 +456,7 @@ export function EditorContent() {
         activeChapter.num,
         content,
         activeChapter.dataVersion,
-        dirtyBinding(activeChapter, 'body'),
+        createManuscriptDirtyBinding(activeChapter, 'body'),
         activeChapter.baseWitness,
       )
     }
@@ -560,7 +555,7 @@ export function EditorContent() {
           activeChapter.id,
           activeChapter.num,
           nextTitle,
-          dirtyBinding(activeChapter, 'sidecar'),
+          createManuscriptDirtyBinding(activeChapter, 'sidecar'),
           activeChapter.baseWitness,
         )
         setSaveStatus('unsaved')
@@ -581,7 +576,7 @@ export function EditorContent() {
         chapter.id,
         chapter.num,
         rawTitle,
-        dirtyBinding(chapter, 'sidecar'),
+        createManuscriptDirtyBinding(chapter, 'sidecar'),
         chapter.baseWitness,
       )
     }

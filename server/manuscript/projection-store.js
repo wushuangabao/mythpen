@@ -98,6 +98,10 @@ const BUILD_TARGET_KEYS = Object.freeze([
   'candidate', 'currentProjection', 'targetGeneration', 'projectedAt',
   'ignoredLedger', 'localIdentityPlan',
 ]);
+const RESOLUTION_BUILD_TARGET_KEYS = Object.freeze([
+  ...BUILD_TARGET_KEYS,
+  'resolutionTransition',
+]);
 const TARGET_KEYS = Object.freeze([
   'domain', 'version', 'projectUid', 'projectInstanceId', 'basis',
   'basisDigest', 'baseGeneration', 'targetGeneration', 'projectedAt',
@@ -110,6 +114,34 @@ const BUILT_TARGET_AUTHORITY = Symbol('built projection target authority');
 
 function invalid(message) {
   throw new TypeError(message);
+}
+
+function projectionStale(message, cause) {
+  const error = new Error(message, cause === undefined ? undefined : { cause });
+  error.code = 'PROJECTION_STALE';
+  return error;
+}
+
+function assertLiveResolutionLedger(projectStore, target) {
+  try {
+    const currentIgnored = projectStore.readAll(`
+      SELECT resource_kind, resource_uid, ignore_status,
+             opaque_container_kind, opaque_container_uid,
+             is_currently_referenced, member_snapshot_json,
+             projection_generation
+      FROM manuscript_ignored_resources
+      ORDER BY resource_kind, resource_uid
+    `);
+    if (!Array.isArray(currentIgnored)) invalid('resolution ignored-ledger read must return rows');
+    const normalized = normalizeIgnoredLedgerRows(currentIgnored, 'live ignored ledger');
+    if (
+      normalized.some((row) => row.projection_generation !== target.baseGeneration)
+      || canonicalIgnoredLedgerDigest(normalized) !== target.basis.ignoredBeforeDigest
+    ) throw projectionStale('live ignored ledger does not match the resolution basis');
+  } catch (cause) {
+    if (cause?.code === 'PROJECTION_STALE') throw cause;
+    throw projectionStale('live ignored ledger could not be verified', cause);
+  }
 }
 
 function utf8Compare(left, right) {
@@ -567,6 +599,31 @@ function normalizeCurrentProjection(value) {
     invalid('currentProjection basisDigest does not match its canonical basis');
   }
   return { projectUid, projectInstanceId, basis };
+}
+
+function canonicalSchema12ReuseIdentityPlan(currentProjection) {
+  const current = normalizeCurrentProjection(currentProjection);
+  if (current.basis.sourceKind !== 'schema12') {
+    invalid('reuse identity plan requires an exact schema12 currentProjection');
+  }
+  return deepFreeze([
+    ...current.basis.chapters.map((row) => ({
+      assignmentKind: 'reuse_uid',
+      objectKind: 'chapter',
+      uid: row.uid,
+      id: row.id,
+      num: row.num,
+    })),
+    ...current.basis.volumes.map((row) => ({
+      assignmentKind: 'reuse_uid',
+      objectKind: 'volume',
+      uid: row.uid,
+      id: row.id,
+    })),
+  ].sort((left, right) => (
+    utf8Compare(left.objectKind, right.objectKind)
+    || utf8Compare(left.uid, right.uid)
+  )));
 }
 
 function normalizeCandidate(value) {
@@ -1276,6 +1333,87 @@ class SQLiteProjectionStore {
     return normalizeTarget(deepFreeze(target), BUILT_TARGET_AUTHORITY);
   }
 
+  buildResolutionTarget(input) {
+    const descriptors = assertExactKeys(
+      input,
+      RESOLUTION_BUILD_TARGET_KEYS,
+      'buildResolutionTarget input',
+    );
+    const currentProjection = descriptors.currentProjection.value;
+    const candidate = descriptors.candidate.value;
+    const current = normalizeCurrentProjection(currentProjection);
+    const candidateValue = normalizeCandidate(candidate);
+    if (candidateValue.projectUid !== current.projectUid) {
+      invalid('candidate project UID does not match currentProjection');
+    }
+    const targetGeneration = nonNegativeInteger(
+      descriptors.targetGeneration.value,
+      'targetGeneration',
+    );
+    if (targetGeneration !== current.basis.baseGeneration + 1) {
+      invalid('resolution targetGeneration must be the exact successor');
+    }
+    const projectedAt = canonicalTime(descriptors.projectedAt.value);
+    const ignoredLedgerBefore = normalizeIgnoredLedgerRows(
+      descriptors.ignoredLedger.value,
+      'ignoredLedger',
+    );
+    if (
+      canonicalIgnoredLedgerDigest(ignoredLedgerBefore)
+      !== current.basis.ignoredBeforeDigest
+    ) {
+      invalid('ignoredLedger does not match the projection basis');
+    }
+    for (const row of ignoredLedgerBefore) {
+      if (row.projection_generation !== current.basis.baseGeneration) {
+        invalid('ignoredLedger rows must use the base generation');
+      }
+    }
+    const ignoredLedger = ignoredIdentityLedger.compileResolutionAfter({
+      transition: descriptors.resolutionTransition.value,
+      beforeRows: ignoredLedgerBefore,
+      candidate,
+      targetGeneration,
+    });
+    const localIdentityPlan = normalizeIdentityPlan(descriptors.localIdentityPlan.value);
+    const canonicalReusePlan = canonicalSchema12ReuseIdentityPlan(currentProjection);
+    if (JSON.stringify(localIdentityPlan) !== JSON.stringify(canonicalReusePlan)) {
+      invalid('resolution localIdentityPlan must be the canonical schema12 reuse plan');
+    }
+    validateIdentityCoverage(current.basis, candidateValue, localIdentityPlan);
+    const rows = compileRows(
+      current.basis,
+      candidateValue,
+      localIdentityPlan,
+      projectedAt,
+    );
+    const proposalInvalidations = deriveProposalInvalidations(
+      current.basis,
+      candidateValue,
+      localIdentityPlan,
+    );
+    const target = {
+      domain: PROJECTION_TARGET_DOMAIN,
+      version: PROJECTION_TARGET_VERSION,
+      projectUid: current.projectUid,
+      projectInstanceId: current.projectInstanceId,
+      basis: current.basis,
+      basisDigest: current.basis.basisDigest,
+      baseGeneration: current.basis.baseGeneration,
+      targetGeneration,
+      projectedAt,
+      volumes: rows.volumes,
+      chapters: rows.chapters,
+      sqliteSequence: targetSequence(current.basis, rows),
+      controlledFiles: candidateValue.controlledFiles,
+      ignoredLedger,
+      capacitySnapshot: candidateValue.capacitySnapshot,
+      proposalInvalidations,
+      localIdentityPlan,
+    };
+    return normalizeTarget(deepFreeze(target), BUILT_TARGET_AUTHORITY);
+  }
+
   validateTarget(target) {
     return normalizeTarget(target);
   }
@@ -1299,10 +1437,54 @@ class SQLiteProjectionStore {
     }
     return projectStore.publishProjectionTarget({ target });
   }
+
+  publishResolution(input) {
+    const descriptors = assertExactKeys(
+      input,
+      ['projectStore', 'target'],
+      'publishResolution input',
+    );
+    const projectStore = descriptors.projectStore.value;
+    if (
+      (projectStore === null || (typeof projectStore !== 'object' && typeof projectStore !== 'function'))
+      || typeof projectStore.readAll !== 'function'
+      || typeof projectStore.publishProjectionTarget !== 'function'
+    ) invalid('resolution projectStore must expose readAll and publishProjectionTarget');
+    const target = this.validateTarget(descriptors.target.value);
+    assertLiveResolutionLedger(projectStore, target);
+    return projectStore.publishProjectionTarget({ target });
+  }
+
+  verifyResolutionNoop(input) {
+    const descriptors = assertExactKeys(
+      input,
+      ['projectStore', 'target'],
+      'verifyResolutionNoop input',
+    );
+    const projectStore = descriptors.projectStore.value;
+    if (
+      (projectStore === null || (typeof projectStore !== 'object' && typeof projectStore !== 'function'))
+      || typeof projectStore.readAll !== 'function'
+      || typeof projectStore.inspectProjectionTarget !== 'function'
+    ) invalid('noop projectStore must expose readAll and inspectProjectionTarget');
+    const target = this.validateTarget(descriptors.target.value);
+    assertLiveResolutionLedger(projectStore, target);
+    let disposition;
+    try {
+      disposition = projectStore.inspectProjectionTarget({ target });
+    } catch (cause) {
+      throw projectionStale('live projection base could not be inspected', cause);
+    }
+    if (disposition !== 'base') {
+      throw projectionStale('live projection is not the exact resolution base');
+    }
+    return true;
+  }
 }
 
 module.exports = {
   SQLiteProjectionStore,
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
+  canonicalSchema12ReuseIdentityPlan,
 };

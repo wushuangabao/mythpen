@@ -1,12 +1,13 @@
-import { isolateProjectDraft } from './projectDraftRecovery.ts'
 import type { ManuscriptBaseWitness } from './api.ts'
 import {
   discardManuscriptDirtyResource,
+  isManuscriptSaveProtected,
+  type ManuscriptDirtyBinding,
   markManuscriptResourceDirty,
   markManuscriptResourceSaving,
   settleManuscriptResource,
-  type ManuscriptDirtyBinding,
 } from './manuscriptDirtyResources.ts'
+import { isolateProjectDraft } from './projectDraftRecovery.ts'
 
 export interface EditorSaveEntry {
   project: string
@@ -292,7 +293,7 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
               pending.dirtyBinding,
               pending.version,
               requestId,
-              code === 'EXTERNAL_DRAFT_CONFLICT' ? 'stale' : 'failed',
+              isManuscriptSaveProtected(code) ? 'stale' : 'failed',
             )
           }
         } else if (visible?.version !== pending.version) {

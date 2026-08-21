@@ -28,10 +28,15 @@ function projectSelector(name = 'novel', expectedInstanceId = INSTANCE_A) {
   return { name, expectedInstanceId };
 }
 
-function projectIdentity({ ino = '101', canonical = 'C:\\Mythpen\\control\\project-a' } = {}) {
+function projectIdentity({
+  ino = '101',
+  canonical = 'C:\\Mythpen\\control\\project-a',
+  projectInstanceId = INSTANCE_A,
+  projectUid = '00000000-0000-4000-8000-000000000010',
+} = {}) {
   return deepFreeze({
-    projectUid: '00000000-0000-4000-8000-000000000010',
-    projectInstanceId: INSTANCE_A,
+    projectUid,
+    projectInstanceId,
     lifecyclePlatformIdentity: {
       canonicalRealControlDirectory: canonical,
       controlDirectoryIdentity: { dev: '7', ino },
@@ -72,6 +77,7 @@ function harness({
   identities,
   identity = projectIdentity(),
   registry,
+  start,
   verify,
 } = {}) {
   const events = [];
@@ -150,6 +156,7 @@ function harness({
       assert.ok(ownerRecord);
       assert.equal(ownerRecord.identity, exactIdentity);
       assert.equal(ownerRecord.state, 'inert');
+      await start?.(owner, exactIdentity);
       ownerRecord.state = 'active';
     },
     async assertSameBinding(owner, exactIdentity) {
@@ -334,8 +341,197 @@ test('open, admit, and close follow the fixed order and return only an opaque se
   assert.equal(calls.freshnessStart, 1);
   assert.equal(calls.freshnessAdmit, 1);
   assert.equal(calls.freshnessClose, 1);
-  assert.equal(controller.beginRetiring, undefined);
-  assert.equal(controller.drain, undefined);
+  assert.equal(typeof controller.beginRetiring, 'function');
+  assert.equal(typeof controller.drain, 'function');
+  assert.equal(typeof controller.resumeAfterRetirementFailure, 'function');
+});
+
+test('retiring one project fences new opens and admits while drain waits without registry ownership', async () => {
+  const identityA = projectIdentity();
+  const identityB = projectIdentity({
+    canonical: 'C:\\Mythpen\\control\\project-b',
+    ino: '202',
+    projectInstanceId: INSTANCE_B,
+    projectUid: '00000000-0000-4000-8000-000000000020',
+  });
+  let registryDepth = 0;
+  const identities = new Map([
+    ['novel-a', identityA],
+    ['novel-b', identityB],
+  ]);
+  const registry = {
+    async withProjectIdentity(selector, callback) {
+      registryDepth += 1;
+      try {
+        return await callback(identities.get(selector.name));
+      } finally {
+        registryDepth -= 1;
+      }
+    },
+  };
+  const fixture = harness({ identities, registry });
+  const sessionA = await fixture.controller.openSession(projectSelector('novel-a', INSTANCE_A));
+  const sessionB = await fixture.controller.openSession(projectSelector('novel-b', INSTANCE_B));
+  const operationGate = deferred();
+  const operationStarted = deferred();
+  const beforeRegistry = deferred();
+  const beforeWriter = deferred();
+  const reachedWriterBoundary = deferred();
+  let writerDepth = 0;
+  const admitted = fixture.controller.admit(sessionA, async () => {
+    operationStarted.resolve();
+    await beforeRegistry.promise;
+    return registry.withProjectIdentity(projectSelector('novel-a', INSTANCE_A), async () => {
+      reachedWriterBoundary.resolve();
+      await beforeWriter.promise;
+      writerDepth += 1;
+      try {
+        return await operationGate.promise;
+      } finally {
+        writerDepth -= 1;
+      }
+    });
+  });
+  await operationStarted.promise;
+
+  const epoch = fixture.controller.beginRetiring(
+    projectSelector('novel-a', INSTANCE_A),
+  );
+  assert.equal(Object.isFrozen(epoch), true);
+  assert.deepEqual(Reflect.ownKeys(epoch), []);
+  await turn();
+  assert.equal(registryDepth, 0);
+  await assert.rejects(
+    fixture.controller.openSession(projectSelector('novel-a', INSTANCE_A)),
+    (error) => error?.code === 'MANUSCRIPT_LIFECYCLE_UNAVAILABLE',
+  );
+  await assert.rejects(
+    fixture.controller.admit(sessionA, () => 'must-not-run'),
+    (error) => error?.code === 'MANUSCRIPT_LIFECYCLE_UNAVAILABLE',
+  );
+  assert.equal(await fixture.controller.admit(sessionB, () => 'other-project'), 'other-project');
+
+  let drained = false;
+  const draining = fixture.controller.drain(epoch).then(() => { drained = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+  assert.equal(registryDepth, 0);
+  beforeRegistry.resolve();
+  await reachedWriterBoundary.promise;
+  assert.equal(drained, false);
+  assert.equal(registryDepth, 1);
+  assert.equal(writerDepth, 0);
+  beforeWriter.resolve();
+  await turn();
+  assert.equal(writerDepth, 1);
+  operationGate.resolve('finished');
+  assert.equal(await admitted, 'finished');
+  await draining;
+  assert.equal(registryDepth, 0);
+
+  await fixture.controller.closeForRetirement(epoch, identityA);
+  fixture.controller.completeRetirement(epoch);
+  await assert.rejects(fixture.controller.close(sessionA), TypeError);
+  assert.equal(await fixture.controller.admit(sessionB, () => 'still-open'), 'still-open');
+  await fixture.controller.close(sessionB);
+});
+
+test('retirement epochs are controller-owned project-bound one-shot authorities', async () => {
+  const identityA = projectIdentity();
+  const identityB = projectIdentity({
+    canonical: 'C:\\Mythpen\\control\\project-b',
+    ino: '202',
+    projectInstanceId: INSTANCE_B,
+    projectUid: '00000000-0000-4000-8000-000000000020',
+  });
+  const first = harness({
+    identities: new Map([
+      ['novel-a', identityA],
+      ['novel-b', identityB],
+    ]),
+  });
+  const second = harness({ identity: projectIdentity({ ino: '303' }) });
+  const session = await first.controller.openSession(projectSelector('novel-a', INSTANCE_A));
+  const epoch = await first.controller.beginRetiring(projectSelector('novel-a', INSTANCE_A));
+  const foreign = await second.controller.beginRetiring(projectSelector('foreign', INSTANCE_A));
+
+  for (const invalidEpoch of [{}, Object.freeze({}), { ...epoch }, foreign]) {
+    await assert.rejects(first.controller.drain(invalidEpoch), TypeError);
+  }
+  await assert.rejects(
+    first.controller.resumeAfterRetirementFailure(epoch, identityA),
+    TypeError,
+  );
+  await first.controller.drain(epoch);
+  await assert.rejects(
+    first.controller.closeForRetirement(epoch, identityB),
+    TypeError,
+  );
+  await first.controller.resumeAfterRetirementFailure(epoch, identityA);
+  assert.equal(await first.controller.admit(session, () => 'resumed'), 'resumed');
+  for (const consumeAgain of [
+    () => first.controller.drain(epoch),
+    () => first.controller.resumeAfterRetirementFailure(epoch, identityA),
+    () => first.controller.closeForRetirement(epoch, identityA),
+    () => first.controller.completeRetirement(epoch),
+  ]) {
+    await assert.rejects(Promise.resolve().then(consumeAgain), TypeError);
+  }
+
+  await first.controller.close(session);
+  await second.controller.drain(foreign);
+  await second.controller.resumeAfterRetirementFailure(foreign, second.identity);
+});
+
+test('successful retirement discards sessions feed state and shared lease before a fresh reopen', async () => {
+  const fixture = harness();
+  const session = await fixture.controller.openSession(projectSelector());
+  assert.equal(await fixture.controller.admit(session, () => 'before'), 'before');
+  const epoch = await fixture.controller.beginRetiring(projectSelector());
+  await fixture.controller.drain(epoch);
+  await fixture.controller.closeForRetirement(epoch, fixture.identity);
+  assert.equal(fixture.calls.freshnessClose, 1);
+  assert.equal(fixture.calls.release, 1);
+  fixture.controller.completeRetirement(epoch);
+
+  const reactivated = await fixture.controller.openSession(projectSelector());
+  assert.equal(fixture.calls.acquireShared, 2);
+  assert.equal(fixture.calls.verify, 2);
+  assert.equal(fixture.calls.createOwner, 2);
+  assert.equal(fixture.calls.freshnessStart, 2);
+  assert.equal(await fixture.controller.admit(reactivated, () => 'after'), 'after');
+  await fixture.controller.close(reactivated);
+  assert.equal(fixture.calls.freshnessClose, 2);
+  assert.equal(fixture.calls.release, 2);
+});
+
+test('drain waits for an accepted open paused in freshness start and retirement closes its minted session', async () => {
+  const startEntered = deferred();
+  const startGate = deferred();
+  const fixture = harness({
+    start() {
+      startEntered.resolve();
+      return startGate.promise;
+    },
+  });
+  const opening = fixture.controller.openSession(projectSelector());
+  await startEntered.promise;
+
+  const epoch = fixture.controller.beginRetiring(projectSelector());
+  let drained = false;
+  const draining = fixture.controller.drain(epoch).then(() => { drained = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+
+  startGate.resolve();
+  const session = await opening;
+  await draining;
+  assert.equal(drained, true);
+  await fixture.controller.closeForRetirement(epoch, fixture.identity);
+  fixture.controller.completeRetirement(epoch);
+  await assert.rejects(fixture.controller.close(session), TypeError);
+  assert.equal(fixture.calls.freshnessClose, 1);
+  assert.equal(fixture.calls.release, 1);
 });
 
 test('invalid or non-frozen registry identity is rejected before shared acquire and verification', async () => {
@@ -824,6 +1020,69 @@ test('a registry/config exit failure rolls back the minted session and preserves
   assert.equal(fixture.calls.freshnessStart, 0);
   assert.equal(fixture.calls.freshnessClose, 1);
   assert.equal(releaseCalls, 1);
+});
+
+test('a retirement registry exit failure stays fenced but its original epoch can resume after recheck', async () => {
+  const exitError = new Error('retirement config lease exit failed');
+  exitError.code = 'CONFIG_LEASE_UNKNOWN';
+  const exactIdentity = projectIdentity();
+  let failExit = true;
+  const registry = {
+    async withProjectIdentity(_selector, callback) {
+      const result = await callback(exactIdentity);
+      if (failExit) {
+        failExit = false;
+        throw exitError;
+      }
+      return result;
+    },
+  };
+  const fixture = harness({ identity: exactIdentity, registry });
+  const epoch = fixture.controller.beginRetiring(projectSelector());
+
+  await assert.rejects(
+    fixture.controller.drain(epoch),
+    (error) => error === exitError,
+  );
+  await assert.rejects(
+    fixture.controller.openSession(projectSelector()),
+    (error) => error?.code === 'MANUSCRIPT_LIFECYCLE_UNAVAILABLE',
+  );
+  await fixture.controller.resumeAfterRetirementFailure(epoch, exactIdentity);
+  const session = await fixture.controller.openSession(projectSelector());
+  await fixture.controller.close(session);
+});
+
+test('a synchronous retirement registry exit failure still returns its recoverable epoch', async () => {
+  const exitError = new Error('synchronous retirement config exit failed');
+  exitError.code = 'CONFIG_LEASE_UNKNOWN';
+  const exactIdentity = projectIdentity();
+  let failExit = true;
+  const registry = {
+    withProjectIdentity(_selector, callback) {
+      const result = callback(exactIdentity);
+      if (failExit) {
+        failExit = false;
+        throw exitError;
+      }
+      return result;
+    },
+  };
+  const fixture = harness({ identity: exactIdentity, registry });
+
+  const epoch = fixture.controller.beginRetiring(projectSelector());
+  assert.equal(Object.isFrozen(epoch), true);
+  await assert.rejects(
+    fixture.controller.drain(epoch),
+    (error) => error === exitError,
+  );
+  await assert.rejects(
+    fixture.controller.openSession(projectSelector()),
+    (error) => error?.code === 'MANUSCRIPT_LIFECYCLE_UNAVAILABLE',
+  );
+  await fixture.controller.resumeAfterRetirementFailure(epoch, exactIdentity);
+  const session = await fixture.controller.openSession(projectSelector());
+  await fixture.controller.close(session);
 });
 
 test('both known release dispositions allow a later open to acquire a new handle', async () => {

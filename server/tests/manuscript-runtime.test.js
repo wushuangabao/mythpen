@@ -568,6 +568,46 @@ test('files happy table composes migrated and newly-created projects while sqlit
     'SELECT COUNT(*) AS count FROM recent_projects WHERE name = ?',
   ).get('task14b-production-creation').count, 0);
   await new Promise((resolve) => server.close(resolve));
+
+  productionRuntime.close();
+  database.closeAllDatabases();
+  database.configureStorage({ dataDir: fixture.root });
+  await database.initDatabase();
+  productionRuntime = createProductionManuscriptRuntime();
+  delete require.cache[require.resolve('../routes/api')];
+  delete require.cache[require.resolve('../manuscript/runtime')];
+  require('../manuscript/runtime').installManuscriptRuntime(productionRuntime);
+  const reopenedApp = express();
+  reopenedApp.use(express.json());
+  reopenedApp.use('/api', require('../routes/api'));
+  const reopenedServer = await new Promise((resolve) => {
+    const listening = reopenedApp.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  const reopenedBaseUrl = `http://127.0.0.1:${reopenedServer.address().port}/api`;
+  const reopenedProjects = await (await fetch(`${reopenedBaseUrl}/projects`)).json();
+  const reopenedMigrated = reopenedProjects.find((project) => project.name === sourceName);
+  const reopenedCreated = reopenedProjects.find((project) => project.name === createdProjectName);
+  assert.equal(reopenedMigrated?.instanceId, productionAdmission.databaseFacts.projectInstanceId);
+  assert.equal(reopenedCreated?.instanceId, createdAdmission.databaseFacts.projectInstanceId);
+  assert.equal(database.getConfigDb().prepare(
+    'SELECT COUNT(*) AS count FROM recent_projects WHERE name = ?',
+  ).get(createdProjectName).count, 0);
+  const reopenedMetadata = await (await fetch(
+    `${reopenedBaseUrl}/projects/by-name/${encodeURIComponent(createdProjectName)}`,
+  )).json();
+  assert.equal(reopenedMetadata.project_instance_id, createdAdmission.databaseFacts.projectInstanceId);
+  const reopenedSidebar = await (await fetch(
+    `${reopenedBaseUrl}/${encodeURIComponent(createdProjectName)}/sidebar-items`,
+  )).json();
+  assert.equal(reopenedSidebar.some((item) => item.route === 'page-dashboard'), true);
+  assert.deepEqual(await (await fetch(
+    `${reopenedBaseUrl}/${encodeURIComponent(createdProjectName)}/workflow/phase`,
+  )).json(), { phase: 'idea' });
+  assert.equal((await productionRuntime.read(
+    { projectUid: productionAdmission.databaseFacts.projectUid },
+    { kind: 'chapter', chapterId: 1 },
+  )).value.content, 'recovered body');
+  await new Promise((resolve) => reopenedServer.close(resolve));
 });
 
 test('stale baseWitness returns EXTERNAL_DRAFT_CONFLICT before every L2 publication write', async () => {

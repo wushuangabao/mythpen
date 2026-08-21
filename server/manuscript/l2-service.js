@@ -6,6 +6,7 @@ const { assertControlledFileRef } = require('./paths');
 const {
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
+  canonicalSchema12ReuseIdentityPlan,
 } = require('./projection-store');
 const {
   canonicalCreateLogicalInputDigest,
@@ -380,24 +381,7 @@ function snapshotTurn(turnContext) {
       invalid('ignoredLedger generation does not match the projection basis');
     }
   }
-  const localIdentityPlan = Object.freeze([
-    ...basis.chapters.map((row) => Object.freeze({
-      assignmentKind: 'reuse_uid',
-      objectKind: 'chapter',
-      uid: row.uid,
-      id: row.id,
-      num: row.num,
-    })),
-    ...basis.volumes.map((row) => Object.freeze({
-      assignmentKind: 'reuse_uid',
-      objectKind: 'volume',
-      uid: row.uid,
-      id: row.id,
-    })),
-  ].sort((left, right) => (
-    Buffer.compare(Buffer.from(left.objectKind, 'utf8'), Buffer.from(right.objectKind, 'utf8'))
-    || Buffer.compare(Buffer.from(left.uid, 'utf8'), Buffer.from(right.uid, 'utf8'))
-  )));
+  const localIdentityPlan = canonicalSchema12ReuseIdentityPlan(currentProjection);
 
   return Object.freeze({
     journalId,

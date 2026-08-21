@@ -2,6 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const path = require('node:path');
+const { isDeepStrictEqual } = require('node:util');
 
 const {
   LIMITS,
@@ -22,6 +23,7 @@ const {
 const {
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
+  canonicalSchema12ReuseIdentityPlan,
 } = require('./projection-store');
 const {
   requireFileBoundaryCapability,
@@ -88,7 +90,10 @@ const CANONICAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const storeRecords = new WeakMap();
 const treeIdentityRecords = new WeakMap();
 const validatedSnapshotRecords = new WeakMap();
+const projectionCandidateRecords = new WeakMap();
 const buildResultRecords = new WeakMap();
+const orphanBaselineRecords = new WeakMap();
+const orphanPreparedRecords = new WeakMap();
 const ignoredIdentityLedger = new IgnoredIdentityLedger();
 
 function isPlainObject(value) {
@@ -1810,6 +1815,194 @@ function assertOwnedEnumeration(store, snapshot, { requireLatest = true } = {}) 
   return context;
 }
 
+function assertCandidateMatchesProjectionBasis(candidate, currentProjection) {
+  const basis = currentProjection.basis;
+  const activeVolumes = basis.volumes
+    .filter((row) => row.isPresent === 1)
+    .sort((left, right) => left.sortOrder - right.sortOrder);
+  if (
+    candidate.volumes.length !== activeVolumes.length
+    || candidate.volumes.some((row, index) => (
+      row.volumeUid !== activeVolumes[index].uid
+      || row.volumePosition !== activeVolumes[index].sortOrder
+    ))
+  ) {
+    throw new TypeError('orphan resolution found a non-target volume projection change');
+  }
+  const volumeUidById = new Map(activeVolumes.map((row) => [row.id, row.uid]));
+  const activeChapters = basis.chapters
+    .filter((row) => row.isPresent === 1)
+    .sort((left, right) => left.manuscriptPosition - right.manuscriptPosition);
+  if (
+    candidate.chapters.length !== activeChapters.length
+    || candidate.chapters.some((row, index) => {
+      const basisRow = activeChapters[index];
+      const volumeUid = basisRow.volumeId === null
+        ? null
+        : volumeUidById.get(basisRow.volumeId);
+      return (
+        volumeUid === undefined
+        || row.chapterUid !== basisRow.uid
+        || row.volumeUid !== volumeUid
+        || row.chapterPosition !== basisRow.chapterPosition
+        || row.manuscriptPosition !== basisRow.manuscriptPosition
+        || row.bodyRawSha256 !== basisRow.bodyRawSha256
+        || row.status !== basisRow.status
+      );
+    })
+  ) {
+    throw new TypeError('orphan resolution found a non-target chapter projection change');
+  }
+}
+
+function isExactSingleInsertion(before, after, uid) {
+  if (
+    before.includes(uid)
+    || after.length !== before.length + 1
+    || after.filter((current) => current === uid).length !== 1
+  ) return false;
+  let beforeIndex = 0;
+  for (const current of after) {
+    if (current === uid) continue;
+    if (current !== before[beforeIndex]) return false;
+    beforeIndex += 1;
+  }
+  return beforeIndex === before.length;
+}
+
+function sameControlledFactsExceptRewrite(beforeFacts, afterFacts, rewrittenKey) {
+  if (beforeFacts.length !== afterFacts.length) return false;
+  const afterByKey = new Map(afterFacts.map((fact) => [logicalRefKey(fact.ref), fact]));
+  if (afterByKey.size !== afterFacts.length) return false;
+  for (const before of beforeFacts) {
+    const key = logicalRefKey(before.ref);
+    const after = afterByKey.get(key);
+    if (after === undefined) return false;
+    if (key !== rewrittenKey) {
+      if (!isDeepStrictEqual(after, before)) return false;
+      continue;
+    }
+    if (
+      after.role !== before.role
+      || after.resourceUid !== before.resourceUid
+      || !isDeepStrictEqual(after.ref, before.ref)
+      || !isDeepStrictEqual(after.parentIdentity, before.parentIdentity)
+    ) return false;
+  }
+  return true;
+}
+
+function allowsNewActiveIndexInsertion(candidate, baselineCandidate, preparation) {
+  if (preparation.transitionKind !== 'new_active') return false;
+  const targetObservation = candidate.ignoredLedgerAfter.find((observation) => (
+    observation.kind === preparation.kind && observation.uid === preparation.uid
+  ));
+  if (
+    targetObservation === undefined
+    || targetObservation.status !== 'active'
+    || targetObservation.reference.state !== 'indexed'
+  ) return false;
+  const baselineRecord = projectionCandidateRecords.get(baselineCandidate);
+  const candidateRecord = projectionCandidateRecords.get(candidate);
+  const before = validatedSnapshotRecords.get(baselineRecord?.snapshot);
+  const after = validatedSnapshotRecords.get(candidateRecord?.snapshot);
+  if (before === undefined || after === undefined) return false;
+  if (
+    !isDeepStrictEqual(
+      [...before.volumeSnapshots.keys()],
+      [...after.volumeSnapshots.keys()],
+    )
+  ) return false;
+
+  let rewrittenKey;
+  if (preparation.kind === 'volume') {
+    if (
+      targetObservation.reference.containerKind !== 'manuscript'
+      || targetObservation.reference.containerUid !== null
+      || !isExactSingleInsertion(
+        before.manuscript.parsed.volume_uids,
+        after.manuscript.parsed.volume_uids,
+        preparation.uid,
+      )
+      || !isDeepStrictEqual(
+        before.unassigned.parsed.chapter_uids,
+        after.unassigned.parsed.chapter_uids,
+      )
+    ) return false;
+    rewrittenKey = 'manuscript';
+  } else if (targetObservation.reference.containerKind === 'unassigned') {
+    if (
+      targetObservation.reference.containerUid !== null
+      || !isDeepStrictEqual(
+        before.manuscript.parsed.volume_uids,
+        after.manuscript.parsed.volume_uids,
+      )
+      || !isExactSingleInsertion(
+        before.unassigned.parsed.chapter_uids,
+        after.unassigned.parsed.chapter_uids,
+        preparation.uid,
+      )
+    ) return false;
+    rewrittenKey = 'unassigned';
+  } else if (targetObservation.reference.containerKind === 'volume') {
+    const volumeUid = targetObservation.reference.containerUid;
+    const beforeVolume = before.volumeSnapshots.get(volumeUid);
+    const afterVolume = after.volumeSnapshots.get(volumeUid);
+    if (
+      beforeVolume === undefined
+      || afterVolume === undefined
+      || !isDeepStrictEqual(
+        before.manuscript.parsed.volume_uids,
+        after.manuscript.parsed.volume_uids,
+      )
+      || !isDeepStrictEqual(
+        before.unassigned.parsed.chapter_uids,
+        after.unassigned.parsed.chapter_uids,
+      )
+      || !isExactSingleInsertion(
+        beforeVolume.parsed.chapter_uids,
+        afterVolume.parsed.chapter_uids,
+        preparation.uid,
+      )
+    ) return false;
+    rewrittenKey = `volume_index:${volumeUid}`;
+  } else {
+    return false;
+  }
+
+  for (const [volumeUid, beforeVolume] of before.volumeSnapshots) {
+    const afterVolume = after.volumeSnapshots.get(volumeUid);
+    if (afterVolume === undefined) return false;
+    if (
+      rewrittenKey !== `volume_index:${volumeUid}`
+      && !isDeepStrictEqual(
+        beforeVolume.parsed.chapter_uids,
+        afterVolume.parsed.chapter_uids,
+      )
+    ) return false;
+  }
+  return sameControlledFactsExceptRewrite(
+    baselineCandidate.controlledFiles,
+    candidate.controlledFiles,
+    rewrittenKey,
+  );
+}
+
+function assertResolutionCandidateMatchesBaseline(candidate, baselineCandidate, preparation) {
+  if (
+    candidate.projectUid !== baselineCandidate.projectUid
+    || !isDeepStrictEqual(candidate.volumeOrder, baselineCandidate.volumeOrder)
+    || !isDeepStrictEqual(candidate.volumes, baselineCandidate.volumes)
+    || !isDeepStrictEqual(candidate.chapters, baselineCandidate.chapters)
+  ) {
+    throw new TypeError('orphan resolution found a non-target projection or file fact change');
+  }
+  if (
+    !isDeepStrictEqual(candidate.controlledFiles, baselineCandidate.controlledFiles)
+    && !allowsNewActiveIndexInsertion(candidate, baselineCandidate, preparation)
+  ) throw new TypeError('orphan resolution found a non-target projection or file fact change');
+}
+
 function assertUnambiguousEnumeration(context) {
   if (context.journalCandidates.length !== 0 || context.residues.length !== 0) {
     throw manuscriptError('RECOVERY_REQUIRED', { reason: 'uid_path_enumeration_ambiguous' });
@@ -2525,6 +2718,136 @@ class ManuscriptStore {
     return result.snapshot;
   }
 
+  captureOrphanBaseline(input) {
+    const descriptors = dataDescriptors(input, 'orphan baseline input');
+    assertExactKeys(
+      descriptors,
+      ['projectBinding', 'currentProjection', 'ignoredLedger', 'projectionCandidate'],
+      'orphan baseline input',
+    );
+    const projectBinding = snapshotProjectBinding(
+      descriptorValue(descriptors, 'projectBinding'),
+    );
+    const currentProjection = descriptorValue(descriptors, 'currentProjection');
+    canonicalSchema12ReuseIdentityPlan(currentProjection);
+    const projectionCandidate = descriptorValue(descriptors, 'projectionCandidate');
+    const candidateRecord = projectionCandidateRecords.get(projectionCandidate);
+    if (candidateRecord === undefined || candidateRecord.store !== this) {
+      throw new TypeError(
+        'orphan baseline requires the original Store projection candidate authority',
+      );
+    }
+    assertCandidateMatchesProjectionBasis(projectionCandidate, currentProjection);
+    if (currentProjection.projectUid !== projectBinding.projectUid) {
+      throw new TypeError('orphan baseline project binding does not match currentProjection');
+    }
+    const baseGeneration = currentProjection.basis.baseGeneration;
+    if (baseGeneration === Number.MAX_SAFE_INTEGER) {
+      throw new TypeError('orphan baseline target generation exceeds the safe integer range');
+    }
+    const ignoredRows = normalizeIgnoredLedgerRows(
+      descriptorValue(descriptors, 'ignoredLedger'),
+      'orphan baseline ignoredLedger',
+    );
+    if (
+      canonicalIgnoredLedgerDigest(ignoredRows)
+      !== currentProjection.basis.ignoredBeforeDigest
+    ) {
+      throw new TypeError('orphan baseline ignoredLedger does not match currentProjection');
+    }
+    for (const row of ignoredRows) {
+      if (row.projection_generation !== baseGeneration) {
+        throw new TypeError('orphan baseline ignoredLedger generation is stale');
+      }
+    }
+    const lifecycleBasis = deepFreeze({
+      activeChapterUids: currentProjection.basis.chapters
+        .filter((row) => row.isPresent === 1)
+        .map((row) => row.uid),
+      chapterTombstoneUids: currentProjection.basis.chapters
+        .filter((row) => row.isPresent === 0)
+        .map((row) => row.uid),
+      activeVolumeUids: currentProjection.basis.volumes
+        .filter((row) => row.isPresent === 1)
+        .map((row) => row.uid),
+      volumeTombstoneUids: currentProjection.basis.volumes
+        .filter((row) => row.isPresent === 0)
+        .map((row) => row.uid),
+    });
+    const baseline = Object.freeze({});
+    orphanBaselineRecords.set(baseline, Object.freeze({
+      baseGeneration,
+      capturedScanEpoch: storeRecords.get(this).nextScanEpoch,
+      currentProjection,
+      ignoredRows,
+      lifecycleBasis,
+      projectionCandidate,
+      projectBinding,
+      store: this,
+      targetGeneration: baseGeneration + 1,
+    }));
+    return baseline;
+  }
+
+  async preflightOrphanResolution(action, request, baseline) {
+    const base = orphanBaselineRecords.get(baseline);
+    if (base === undefined || base.store !== this) {
+      throw new TypeError('orphan resolution requires the original branded Store baseline');
+    }
+    if (storeRecords.get(this).nextScanEpoch !== base.capturedScanEpoch) {
+      throw manuscriptError('RECOVERY_REQUIRED', { reason: 'orphan_baseline_stale' });
+    }
+    const preparation = ignoredIdentityLedger.prepareResolution({
+      action,
+      request,
+      beforeRows: base.ignoredRows,
+      baseGeneration: base.baseGeneration,
+    });
+    const pending = ignoredIdentityLedger.describeResolutionPreparation(preparation);
+    const snapshot = await this.validateFull(base.projectBinding, Object.freeze({
+      ignoredLedger: pending.validationLedger,
+      lifecycleBasis: base.lifecycleBasis,
+    }));
+    if (
+      snapshot.classifications.journalCandidates.length !== 0
+      || snapshot.classifications.residues.length !== 0
+    ) {
+      throw manuscriptError('RECOVERY_REQUIRED', {
+        reason: 'orphan_resolution_enumeration_ambiguous',
+      });
+    }
+    const candidate = await this.buildProjectionCandidate(snapshot);
+    assertResolutionCandidateMatchesBaseline(candidate, base.projectionCandidate, pending);
+    const transition = ignoredIdentityLedger.finalizeResolution({
+      preparation,
+      candidate,
+      targetGeneration: base.targetGeneration,
+    });
+    const transitionRecord = ignoredIdentityLedger.describeResolutionTransition(transition);
+    const prepared = Object.freeze({});
+    orphanPreparedRecords.set(prepared, Object.freeze({
+      action,
+      beforeRows: base.ignoredRows,
+      candidate,
+      currentProjection: base.currentProjection,
+      noOp: transitionRecord.noOp,
+      requestKind: transitionRecord.kind,
+      requestUid: transitionRecord.uid,
+      store: this,
+      targetGeneration: base.targetGeneration,
+      transition,
+    }));
+    return prepared;
+  }
+
+  describeOrphanResolution(prepared) {
+    const record = orphanPreparedRecords.get(prepared);
+    if (record === undefined || record.store !== this) {
+      throw new TypeError('orphan resolution requires the original Store prepared candidate');
+    }
+    return record;
+  }
+
   createUidPathProbe(snapshot) {
     const validated = validatedSnapshotRecords.get(snapshot);
     const context = validated?.store === this
@@ -2905,7 +3228,7 @@ class ManuscriptStore {
       unassignedPosition += 1;
       appendChapter(chapterUid, null, unassignedPosition);
     }
-    return deepFreeze({
+    const candidate = deepFreeze({
       capacitySnapshot: snapshot.capacitySnapshot,
       chapters,
       controlledFiles: snapshot.controlledFiles,
@@ -2919,6 +3242,8 @@ class ManuscriptStore {
       volumes,
       warnings: snapshot.warnings,
     });
+    projectionCandidateRecords.set(candidate, Object.freeze({ snapshot, store: this }));
+    return candidate;
   }
 
   async buildClosure(snapshot, mutation, ignoredRows, identityReservation) {

@@ -5,11 +5,17 @@ import {
   discardTitleSave,
   flushTitleSave,
   getTitleSaveDraft,
+  getTitleSaveFailure,
   getTitleSaveQueueSnapshot,
   stageTitleSave,
   titleSaveKey,
   type TitleSaveEntry,
 } from '../src/lib/titleSaveQueue.ts'
+import {
+  discardManuscriptDirtyResource,
+  getManuscriptDirtySnapshot,
+  type ManuscriptDirtyBinding,
+} from '../src/lib/manuscriptDirtyResources.ts'
 
 interface Deferred {
   promise: Promise<void>
@@ -224,4 +230,37 @@ test('a deleted instance callback cannot overwrite a same-name replacement title
   assert.equal(replacementWrites, 1)
   assert.equal(getTitleSaveDraft(project, chapterId), null)
   assert.equal(getTitleSaveQueueSnapshot().errors[titleSaveKey(project, chapterId)], undefined)
+})
+
+test('a recovery-required title failure stays recoverable and settles its dirty resource as stale', async () => {
+  const project = 'title-recovery-required-project'
+  const chapterId = 909
+  const dirtyBinding: ManuscriptDirtyBinding = {
+    identity: {
+      projectUid: '11111111-1111-4111-8111-111111111111',
+      projectInstanceId: '22222222-2222-4222-8222-222222222222',
+      resourceKind: 'chapter',
+      resourceUid: '33333333-3333-4333-8333-333333333333',
+      domain: 'sidecar',
+      windowId: 'title-recovery-window',
+    },
+    baseRawSha256: 'a'.repeat(64),
+  }
+
+  try {
+    stageTitleSave(project, chapterId, 9, '保留标题', dirtyBinding)
+    await assert.rejects(
+      flushTitleSave(project, chapterId, async () => {
+        throw Object.assign(new Error('需要先恢复'), { code: 'RECOVERY_REQUIRED' })
+      }),
+      /需要先恢复/,
+    )
+
+    assert.equal(getTitleSaveDraft(project, chapterId)?.title, '保留标题')
+    assert.equal(getTitleSaveFailure(project, chapterId)?.code, 'RECOVERY_REQUIRED')
+    assert.equal(getManuscriptDirtySnapshot()[0]?.status, 'stale')
+  } finally {
+    discardTitleSave(project, chapterId)
+    discardManuscriptDirtyResource(dirtyBinding)
+  }
 })

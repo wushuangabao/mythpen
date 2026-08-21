@@ -7,6 +7,7 @@ import { useToast } from '@/hooks/useToast'
 import { aiApi, chatApi } from '@/lib/api'
 import { getModifiedEntities, notifyDataChanged } from '@/lib/dataEvents'
 import { enqueueEditorSave } from '@/lib/editorSaveQueue'
+import { createManuscriptDirtyBinding } from '@/lib/manuscriptDirtyResources'
 import {
   discardRecoverableProjectDraft,
   formatRecoverableProjectDraft,
@@ -487,12 +488,19 @@ export function AIPanel() {
         draft.chapterNum,
         draft.content,
         targetChapter.dataVersion,
-        undefined,
+        createManuscriptDirtyBinding(targetChapter, 'body'),
         targetChapter.baseWitness,
       )
     }
     if (draft.title !== undefined) {
-      stageTitleSave(project, draft.chapterId, draft.chapterNum, draft.title, undefined, targetChapter.baseWitness)
+      stageTitleSave(
+        project,
+        draft.chapterId,
+        draft.chapterNum,
+        draft.title,
+        createManuscriptDirtyBinding(targetChapter, 'sidecar'),
+        targetChapter.baseWitness,
+      )
     }
     showToast(t('ai.projectDraftRestored'), 'success')
   }

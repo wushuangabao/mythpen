@@ -22,8 +22,15 @@ const MEMBER_ROLES = Object.freeze({
   chapter: Object.freeze(['chapter_body', 'chapter_sidecar']),
   volume: Object.freeze(['volume_index']),
 });
+const RESOLUTION_ACTIONS = new Set(['ignore_in_place', 'revoke_ignore']);
+const CANDIDATE_KEYS = Object.freeze([
+  'capacitySnapshot', 'chapters', 'controlledFiles', 'diagnostics',
+  'ignoredLedgerAfter', 'projectUid', 'volumeOrder', 'volumes', 'warnings',
+]);
 const canonicalRowArrays = new WeakSet();
 const referenceTransitionRecords = new WeakMap();
+const resolutionPreparationRecords = new WeakMap();
+const resolutionTransitionRecords = new WeakMap();
 
 function invalid(message) {
   throw new TypeError(message);
@@ -394,6 +401,32 @@ function assertObservationMatchesRow(current, before, label) {
   }
 }
 
+function assertObservationFactsMatchRow(current, before, label) {
+  if (
+    current.kind !== before.resource_kind
+    || current.uid !== before.resource_uid
+    || current.memberSnapshotJson !== before.member_snapshot_json
+    || current.referenced !== before.is_currently_referenced
+    || current.containerKind !== before.opaque_container_kind
+    || current.containerUid !== before.opaque_container_uid
+  ) {
+    invalid(`${label} does not exactly match the ignored ledger identity facts`);
+  }
+}
+
+function rowFromObservation(current, status, targetGeneration) {
+  return {
+    resource_kind: current.kind,
+    resource_uid: current.uid,
+    ignore_status: status,
+    opaque_container_kind: current.containerKind,
+    opaque_container_uid: current.containerUid,
+    is_currently_referenced: current.referenced,
+    member_snapshot_json: current.memberSnapshotJson,
+    projection_generation: targetGeneration,
+  };
+}
+
 class IgnoredIdentityLedger {
   constructor() {
     Object.freeze(this);
@@ -479,6 +512,205 @@ class IgnoredIdentityLedger {
     Object.freeze(compiled);
     canonicalRowArrays.add(compiled);
     return compiled;
+  }
+
+  prepareResolution(input) {
+    const descriptors = exactDataDescriptors(
+      input,
+      ['action', 'request', 'beforeRows', 'baseGeneration'],
+      'prepareResolution input',
+    );
+    const action = descriptorValue(descriptors, 'action');
+    if (!RESOLUTION_ACTIONS.has(action)) invalid('resolution action is invalid');
+    const requestDescriptors = exactDataDescriptors(
+      descriptorValue(descriptors, 'request'),
+      ['kind', 'uid'],
+      'resolution request',
+    );
+    const kind = resourceKind(
+      descriptorValue(requestDescriptors, 'kind'),
+      'resolution request.kind',
+    );
+    const uid = canonicalUuid(
+      descriptorValue(requestDescriptors, 'uid'),
+      'resolution request.uid',
+    );
+    const baseGeneration = nonNegativeInteger(
+      descriptorValue(descriptors, 'baseGeneration'),
+      'baseGeneration',
+    );
+    const beforeRows = normalizeIgnoredLedgerRows(
+      descriptorValue(descriptors, 'beforeRows'),
+      'beforeRows',
+    );
+    for (const row of beforeRows) {
+      if (row.projection_generation !== baseGeneration) {
+        invalid('beforeRows must use the exact base generation');
+      }
+    }
+    const before = beforeRows.find((row) => (
+      row.resource_kind === kind && row.resource_uid === uid
+    ));
+    let transitionKind;
+    if (action === 'ignore_in_place') {
+      if (before === undefined) transitionKind = 'new_active';
+      else if (before.ignore_status === 'revoked') transitionKind = 'reactivate';
+      else transitionKind = 'active_noop';
+    } else {
+      if (before === undefined || before.ignore_status !== 'active') {
+        invalid('revoke_ignore requires an active exact ignored row');
+      }
+      transitionKind = 'revoke';
+    }
+
+    const validationEntries = beforeRows.map((row) => Object.freeze({
+      kind: row.resource_kind,
+      status: row === before ? 'active' : row.ignore_status,
+      uid: row.resource_uid,
+    }));
+    if (before === undefined) validationEntries.push(Object.freeze({ kind, status: 'active', uid }));
+    validationEntries.sort((left, right) => (
+      lexicographicCompare(left.kind, right.kind)
+      || lexicographicCompare(left.uid, right.uid)
+    ));
+    const preparation = Object.freeze({});
+    resolutionPreparationRecords.set(preparation, Object.freeze({
+      action,
+      baseGeneration,
+      before,
+      beforeRows,
+      kind,
+      transitionKind,
+      uid,
+      validationLedger: Object.freeze({ entries: Object.freeze(validationEntries) }),
+    }));
+    return preparation;
+  }
+
+  describeResolutionPreparation(preparation) {
+    const record = resolutionPreparationRecords.get(preparation);
+    if (record === undefined) invalid('resolution preparation must be original and module-branded');
+    return record;
+  }
+
+  finalizeResolution(input) {
+    const descriptors = exactDataDescriptors(
+      input,
+      ['preparation', 'candidate', 'targetGeneration'],
+      'finalizeResolution input',
+    );
+    const preparation = descriptorValue(descriptors, 'preparation');
+    const prepared = this.describeResolutionPreparation(preparation);
+    const candidate = descriptorValue(descriptors, 'candidate');
+    if (!Object.isFrozen(candidate)) invalid('resolution candidate must be frozen');
+    const candidateDescriptors = exactDataDescriptors(candidate, CANDIDATE_KEYS, 'resolution candidate');
+    const targetGeneration = nonNegativeInteger(
+      descriptorValue(descriptors, 'targetGeneration'),
+      'targetGeneration',
+    );
+    if (targetGeneration !== prepared.baseGeneration + 1) {
+      invalid('resolution targetGeneration must be the exact successor');
+    }
+    const observationValues = denseArrayValues(
+      descriptorValue(candidateDescriptors, 'ignoredLedgerAfter'),
+      'resolution candidate observations',
+    );
+    const observations = observationValues.map((value, index) => normalizeObservation(value, index));
+    const byIdentity = new Map();
+    for (let index = 0; index < observations.length; index += 1) {
+      const current = observations[index];
+      const key = `${current.kind}:${current.uid}`;
+      if (byIdentity.has(key)) invalid('resolution observations contain a duplicate identity');
+      byIdentity.set(key, Object.freeze({
+        normalized: current,
+        original: observationValues[index],
+      }));
+    }
+    const targetKey = `${prepared.kind}:${prepared.uid}`;
+    const targetEntry = byIdentity.get(targetKey);
+    const target = targetEntry?.normalized;
+    if (target === undefined || target.status !== 'active') {
+      invalid('resolution scan did not produce the exact pending target observation');
+    }
+    if (
+      prepared.transitionKind === 'new_active'
+      && !JSON.parse(target.memberSnapshotJson).members.every((member) => member.present === true)
+    ) {
+      invalid('resolution target members must all be present');
+    }
+    byIdentity.delete(targetKey);
+
+    const unchangedBefore = prepared.beforeRows.filter((row) => row !== prepared.before);
+    const unchangedObservations = [];
+    for (const before of unchangedBefore) {
+      const key = `${before.resource_kind}:${before.resource_uid}`;
+      const current = byIdentity.get(key);
+      if (current === undefined) invalid('resolution observations omit an existing ignored identity');
+      assertObservationMatchesRow(current.normalized, before, 'resolution observation');
+      unchangedObservations.push(current.original);
+      byIdentity.delete(key);
+    }
+    if (byIdentity.size !== 0) invalid('resolution observations contain an unrelated identity');
+    if (prepared.before !== undefined) {
+      assertObservationFactsMatchRow(target, prepared.before, 'resolution target observation');
+    }
+
+    const afterRows = this.compileAfter({
+      beforeRows: unchangedBefore,
+      observations: unchangedObservations,
+      targetGeneration,
+    }).map((row) => ({ ...row }));
+    afterRows.push(rowFromObservation(
+      target,
+      prepared.action === 'revoke_ignore' ? 'revoked' : 'active',
+      targetGeneration,
+    ));
+    const canonicalAfter = normalizeIgnoredLedgerRows(afterRows, 'resolution after rows');
+    const transition = Object.freeze({});
+    resolutionTransitionRecords.set(transition, Object.freeze({
+      action: prepared.action,
+      afterRows: canonicalAfter,
+      beforeRows: prepared.beforeRows,
+      candidate,
+      capacitySnapshot: descriptorValue(candidateDescriptors, 'capacitySnapshot'),
+      kind: prepared.kind,
+      noOp: prepared.transitionKind === 'active_noop',
+      observations: descriptorValue(candidateDescriptors, 'ignoredLedgerAfter'),
+      preparation,
+      targetGeneration,
+      transitionKind: prepared.transitionKind,
+      uid: prepared.uid,
+    }));
+    return transition;
+  }
+
+  compileResolutionAfter(input) {
+    const descriptors = exactDataDescriptors(
+      input,
+      ['transition', 'beforeRows', 'candidate', 'targetGeneration'],
+      'compileResolutionAfter input',
+    );
+    const transition = descriptorValue(descriptors, 'transition');
+    const record = resolutionTransitionRecords.get(transition);
+    if (record === undefined) invalid('resolution transition must be original and module-branded');
+    const beforeRows = normalizeIgnoredLedgerRows(
+      descriptorValue(descriptors, 'beforeRows'),
+      'beforeRows',
+    );
+    if (
+      beforeRows !== record.beforeRows
+      || descriptorValue(descriptors, 'candidate') !== record.candidate
+      || descriptorValue(descriptors, 'targetGeneration') !== record.targetGeneration
+    ) {
+      invalid('resolution transition does not match its original scan candidate');
+    }
+    return record.afterRows;
+  }
+
+  describeResolutionTransition(transition) {
+    const record = resolutionTransitionRecords.get(transition);
+    if (record === undefined) invalid('resolution transition must be original and module-branded');
+    return record;
   }
 
   serializeOpaqueMembers(input) {

@@ -5,6 +5,7 @@ import {
   type DirtyResourceIdentity,
   type JsonValue,
 } from '../src/lib/dirtyResourceRegistry.ts'
+import { createManuscriptDirtyBinding, isManuscriptSaveProtected } from '../src/lib/manuscriptDirtyResources.ts'
 
 const PROJECT_UID = '11111111-1111-4111-8111-111111111111'
 const OTHER_PROJECT_UID = '22222222-2222-4222-8222-222222222222'
@@ -238,4 +239,47 @@ test('rejects inexact identities and drafts, noncanonical values, accessors, and
     'request',
     'done' as 'saved',
   ), TypeError)
+})
+
+test('recognizes exactly the terminal manuscript save protection codes', () => {
+  assert.equal(isManuscriptSaveProtected('EXTERNAL_DRAFT_CONFLICT'), true)
+  assert.equal(isManuscriptSaveProtected('RECOVERY_REQUIRED'), true)
+  assert.equal(isManuscriptSaveProtected('external_draft_conflict'), false)
+  assert.equal(isManuscriptSaveProtected('NETWORK_ERROR'), false)
+  assert.equal(isManuscriptSaveProtected(null), false)
+  assert.equal(isManuscriptSaveProtected(undefined), false)
+})
+
+test('creates stable dirty bindings only for canonical files chapter authorities', () => {
+  const chapter = {
+    chapterUid: RESOURCE_UID,
+    manuscriptProjectUid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    projectInstanceId: PROJECT_INSTANCE_ID,
+    baseWitness: {
+      expected_data_version: 7,
+      generation: 3,
+      raw_sha256: 'a'.repeat(64),
+      sidecar_raw_sha256: 'b'.repeat(64),
+    },
+  }
+  const body = createManuscriptDirtyBinding(chapter, 'body')
+  const sidecar = createManuscriptDirtyBinding(chapter, 'sidecar')
+
+  assert.equal(body?.baseRawSha256, 'a'.repeat(64))
+  assert.equal(sidecar?.baseRawSha256, 'b'.repeat(64))
+  assert.equal(body?.identity.domain, 'body')
+  assert.equal(sidecar?.identity.domain, 'sidecar')
+  assert.equal(body?.identity.windowId, sidecar?.identity.windowId)
+  assert.equal(
+    createManuscriptDirtyBinding({ ...chapter, manuscriptProjectUid: chapter.manuscriptProjectUid.toUpperCase() }, 'body'),
+    undefined,
+  )
+  assert.equal(
+    createManuscriptDirtyBinding({
+      ...chapter,
+      baseWitness: { ...chapter.baseWitness, sidecar_raw_sha256: null },
+    }, 'sidecar'),
+    undefined,
+  )
+  assert.equal(createManuscriptDirtyBinding({ ...chapter, baseWitness: undefined }, 'body'), undefined)
 })

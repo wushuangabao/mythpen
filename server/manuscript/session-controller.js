@@ -17,6 +17,7 @@ const KNOWN_RELEASE_DISPOSITIONS = new Set([
 
 const controllerRecords = new WeakMap();
 const sessionRecords = new WeakMap();
+const retirementEpochRecords = new WeakMap();
 
 function invalid(message) {
   throw new TypeError(message);
@@ -216,6 +217,10 @@ function lifecycleKey(lifecycleIdentity) {
   return `${dev}:${ino}`;
 }
 
+function projectKey(identity) {
+  return `${identity.projectUid}:${identity.projectInstanceId}`;
+}
+
 function samePhysicalIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
@@ -233,6 +238,10 @@ function lifecycleUnavailable(_message, cause) {
   return manuscriptError('MANUSCRIPT_LIFECYCLE_UNAVAILABLE', {}, cause);
 }
 
+function retirementUnavailable() {
+  return lifecycleUnavailable('Project manuscript sessions are retiring');
+}
+
 function controllerRecord(controller) {
   const record = controllerRecords.get(controller);
   if (!record) invalid('ManuscriptSessionController receiver is invalid');
@@ -241,6 +250,91 @@ function controllerRecord(controller) {
 
 function assertControllerUsable(record) {
   if (record.fencedError) throw record.fencedError;
+}
+
+function sameProjectIdentity(left, right) {
+  return (
+    left.projectUid === right.projectUid
+    && left.projectInstanceId === right.projectInstanceId
+    && sameLifecycleBinding(left.lifecycleIdentity, right.lifecycleIdentity)
+  );
+}
+
+function ensureProjectState(record, identity) {
+  const key = projectKey(identity);
+  const existing = record.projects.get(key);
+  if (existing) {
+    if (!sameProjectIdentity(existing.identity, identity)) {
+      throw lifecycleUnavailable('Project lifecycle identity changed within this controller');
+    }
+    return existing;
+  }
+  const state = {
+    drainPromise: null,
+    drainResolve: null,
+    identity,
+    inFlight: 0,
+    key,
+    pendingOpens: 0,
+    retirement: null,
+    sessions: new Set(),
+  };
+  record.projects.set(key, state);
+  return state;
+}
+
+function assertProjectAccepting(project) {
+  if (project.retirement !== null) throw retirementUnavailable();
+}
+
+function resolveProjectDrain(project) {
+  if (
+    project.inFlight !== 0
+    || project.pendingOpens !== 0
+    || project.drainResolve === null
+  ) return;
+  const resolve = project.drainResolve;
+  project.drainPromise = null;
+  project.drainResolve = null;
+  resolve();
+}
+
+function finishPendingOpen(record, project) {
+  project.pendingOpens -= 1;
+  if (project.pendingOpens < 0) {
+    const error = lifecycleUnavailable('Project pending-open accounting underflow');
+    fenceController(record, null, error);
+    throw error;
+  }
+  resolveProjectDrain(project);
+}
+
+function retirementEpochRecord(record, epoch, phases) {
+  const epochRecord = (
+    epoch !== null
+    && typeof epoch === 'object'
+    && retirementEpochRecords.get(epoch)
+  );
+  if (
+    !epochRecord
+    || epochRecord.controller !== record
+    || epochRecord.project === null
+    || epochRecord.project.retirement !== epochRecord
+    || !phases.includes(epochRecord.phase)
+  ) invalid('retirementEpoch must be an active opaque authority minted by this controller');
+  return epochRecord;
+}
+
+function ownedRetirementEpochRecord(record, epoch) {
+  const epochRecord = (
+    epoch !== null
+    && typeof epoch === 'object'
+    && retirementEpochRecords.get(epoch)
+  );
+  if (!epochRecord || epochRecord.controller !== record) {
+    invalid('retirementEpoch must be an opaque authority minted by this controller');
+  }
+  return epochRecord;
 }
 
 function fenceController(record, entry, cause) {
@@ -392,7 +486,10 @@ function decrementSessionRef(record, entry, sessionRecord) {
     fenceController(record, entry, error);
     throw error;
   }
-  if (sessionRecord) sessionRecord.state = 'closed';
+  if (sessionRecord) {
+    sessionRecord.state = 'closed';
+    sessionRecord.project.sessions.delete(sessionRecord);
+  }
 }
 
 function startEntryCleanup(record, entry, finalSessionRecord = null) {
@@ -464,15 +561,19 @@ async function rollbackReservation(record, entry) {
   await cleanupUnusedEntry(record, entry);
 }
 
-function mintSession(record, entry) {
+function mintSession(record, entry, project) {
   entry.reservations -= 1;
   entry.sessionRefs += 1;
   const session = Object.freeze({});
-  sessionRecords.set(session, {
+  const sessionRecord = {
+    closePromise: null,
     controller: record,
     entry,
+    project,
     state: 'open',
-  });
+  };
+  sessionRecords.set(session, sessionRecord);
+  project.sessions.add(sessionRecord);
   return session;
 }
 
@@ -508,7 +609,8 @@ async function rollbackMintedSession(record, session) {
   ) return;
   sessionRecord.state = 'closing';
   try {
-    await finishSessionClose(record, sessionRecord);
+    sessionRecord.closePromise = finishSessionClose(record, sessionRecord);
+    await sessionRecord.closePromise;
   } catch {
     // The caller's registry/verifier error is authoritative. Unknown cleanup
     // disposition is retained by the controller fence instead of replacing it.
@@ -598,6 +700,7 @@ class ManuscriptSessionController {
         'start',
         'freshnessLifecycle',
       ),
+      projects: new Map(),
       verifyAfterLease: requiredMethod(
         values.routeAdmissionVerifier,
         'verifyAfterLease',
@@ -620,6 +723,8 @@ class ManuscriptSessionController {
     let callbackCalls = 0;
     let reservationTicket = null;
     let mintedSession = null;
+    let pendingOpen = false;
+    let pendingProject = null;
     try {
       const returned = await Reflect.apply(
         record.withProjectIdentity.method,
@@ -629,6 +734,11 @@ class ManuscriptSessionController {
           if (callbackCalls !== 1) invalid('registryAdmission invoked its callback more than once');
           assertControllerUsable(record);
           const identity = validateRegistryIdentity(exactFrozenIdentity);
+          const project = ensureProjectState(record, identity);
+          assertProjectAccepting(project);
+          project.pendingOpens += 1;
+          pendingOpen = true;
+          pendingProject = project;
           const entry = await reserveAfterAnyRelease(record, identity.lifecycleIdentity);
           try {
             await entry.acquirePromise;
@@ -655,7 +765,7 @@ class ManuscriptSessionController {
             }
             throw error;
           }
-          reservationTicket = Object.freeze({ entry, identity, ownerCreator });
+          reservationTicket = Object.freeze({ entry, identity, ownerCreator, project });
           return reservationTicket;
         }],
       );
@@ -672,7 +782,13 @@ class ManuscriptSessionController {
         );
         assertControllerUsable(record);
       }
-      mintedSession = mintSession(record, reservationTicket.entry);
+      mintedSession = mintSession(
+        record,
+        reservationTicket.entry,
+        reservationTicket.project,
+      );
+      finishPendingOpen(record, pendingProject);
+      pendingOpen = false;
       return mintedSession;
     } catch (error) {
       if (mintedSession) {
@@ -685,6 +801,10 @@ class ManuscriptSessionController {
           // cleanup uncertainty has already fenced the controller.
         }
       }
+      if (pendingOpen) {
+        finishPendingOpen(record, pendingProject);
+        pendingOpen = false;
+      }
       throw error;
     }
   }
@@ -694,11 +814,23 @@ class ManuscriptSessionController {
     assertControllerUsable(record);
     const sessionRecord = openSessionRecord(record, session);
     if (typeof operation !== 'function') invalid('operation must be a function');
-    return Reflect.apply(
-      record.freshnessAdmit.method,
-      record.freshnessAdmit.receiver,
-      [sessionRecord.entry.freshnessOwner, operation],
-    );
+    assertProjectAccepting(sessionRecord.project);
+    sessionRecord.project.inFlight += 1;
+    try {
+      return await Reflect.apply(
+        record.freshnessAdmit.method,
+        record.freshnessAdmit.receiver,
+        [sessionRecord.entry.freshnessOwner, operation],
+      );
+    } finally {
+      sessionRecord.project.inFlight -= 1;
+      if (sessionRecord.project.inFlight < 0) {
+        const error = lifecycleUnavailable('Project admission accounting underflow');
+        fenceController(record, sessionRecord.entry, error);
+        throw error;
+      }
+      resolveProjectDrain(sessionRecord.project);
+    }
   }
 
   async close(session) {
@@ -707,7 +839,139 @@ class ManuscriptSessionController {
     const sessionRecord = openSessionRecord(record, session);
     sessionRecord.state = 'closing';
     assertControllerUsable(record);
-    await finishSessionClose(record, sessionRecord);
+    sessionRecord.closePromise = finishSessionClose(record, sessionRecord);
+    await sessionRecord.closePromise;
+  }
+
+  beginRetiring(projectSelector) {
+    const record = controllerRecord(this);
+    assertControllerUsable(record);
+    const selector = snapshotSelector(projectSelector);
+    let callbackCalls = 0;
+    const mintedEpoch = Object.freeze({});
+    const epochRecord = {
+      beginError: null,
+      beginPromise: null,
+      controller: record,
+      phase: 'pending',
+      project: null,
+      selector,
+    };
+    retirementEpochRecords.set(mintedEpoch, epochRecord);
+    let returnedPromise;
+    try {
+      returnedPromise = Reflect.apply(
+        record.withProjectIdentity.method,
+        record.withProjectIdentity.receiver,
+        [selector, (exactFrozenIdentity) => {
+          callbackCalls += 1;
+          if (callbackCalls !== 1) invalid('registryAdmission invoked its callback more than once');
+          assertControllerUsable(record);
+          const identity = validateRegistryIdentity(exactFrozenIdentity);
+          const project = ensureProjectState(record, identity);
+          assertProjectAccepting(project);
+          epochRecord.phase = 'retiring';
+          epochRecord.project = project;
+          project.retirement = epochRecord;
+          return mintedEpoch;
+        }],
+      );
+    } catch (error) {
+      epochRecord.beginError = error;
+      epochRecord.phase = epochRecord.project === null ? 'failed' : 'failed-retiring';
+      epochRecord.beginPromise = Promise.resolve();
+      return mintedEpoch;
+    }
+    epochRecord.beginPromise = Promise.resolve(returnedPromise).then(
+      (returned) => {
+        if (callbackCalls !== 1 || returned !== mintedEpoch) {
+          invalid('registryAdmission must return its single callback result');
+        }
+      },
+      (error) => {
+        epochRecord.beginError = error;
+        epochRecord.phase = epochRecord.project === null ? 'failed' : 'failed-retiring';
+      },
+    ).catch((error) => {
+      epochRecord.beginError = error;
+      epochRecord.phase = epochRecord.project === null ? 'failed' : 'failed-retiring';
+    });
+    return mintedEpoch;
+  }
+
+  async drain(retirementEpoch) {
+    const record = controllerRecord(this);
+    assertControllerUsable(record);
+    const ownedEpoch = ownedRetirementEpochRecord(record, retirementEpoch);
+    await ownedEpoch.beginPromise;
+    if (ownedEpoch.beginError !== null) throw ownedEpoch.beginError;
+    const epochRecord = retirementEpochRecord(
+      record,
+      retirementEpoch,
+      ['retiring', 'draining', 'drained'],
+    );
+    epochRecord.phase = 'draining';
+    const { project } = epochRecord;
+    if (project.inFlight !== 0 || project.pendingOpens !== 0) {
+      project.drainPromise ||= new Promise((resolve) => {
+        project.drainResolve = resolve;
+      });
+      await project.drainPromise;
+    }
+    assertControllerUsable(record);
+    epochRecord.phase = 'drained';
+  }
+
+  async closeForRetirement(retirementEpoch, currentIdentity) {
+    const record = controllerRecord(this);
+    assertControllerUsable(record);
+    const epochRecord = retirementEpochRecord(record, retirementEpoch, ['drained']);
+    const identity = validateRegistryIdentity(currentIdentity);
+    if (!sameProjectIdentity(epochRecord.project.identity, identity)) {
+      invalid('currentIdentity does not match the retirement project');
+    }
+    if (epochRecord.project.inFlight !== 0) {
+      invalid('retirement project was not drained');
+    }
+    if (epochRecord.project.pendingOpens !== 0) {
+      invalid('retirement project still has pending opens');
+    }
+    epochRecord.phase = 'closing';
+    for (const sessionRecord of [...epochRecord.project.sessions]) {
+      if (sessionRecord.state === 'open') {
+        sessionRecord.state = 'closing';
+        sessionRecord.closePromise = finishSessionClose(record, sessionRecord);
+      }
+      if (sessionRecord.closePromise !== null) await sessionRecord.closePromise;
+    }
+    if (epochRecord.project.sessions.size !== 0) {
+      throw lifecycleUnavailable('Retirement did not close every project session');
+    }
+    epochRecord.phase = 'sealed';
+  }
+
+  completeRetirement(retirementEpoch) {
+    const record = controllerRecord(this);
+    assertControllerUsable(record);
+    const epochRecord = retirementEpochRecord(record, retirementEpoch, ['sealed']);
+    epochRecord.phase = 'completed';
+    epochRecord.project.retirement = null;
+  }
+
+  async resumeAfterRetirementFailure(retirementEpoch, currentIdentity) {
+    const record = controllerRecord(this);
+    assertControllerUsable(record);
+    const epochRecord = retirementEpochRecord(
+      record,
+      retirementEpoch,
+      ['drained', 'failed-retiring', 'sealed'],
+    );
+    const identity = validateRegistryIdentity(currentIdentity);
+    if (!sameProjectIdentity(epochRecord.project.identity, identity)) {
+      invalid('currentIdentity does not match the retirement project');
+    }
+    epochRecord.phase = 'resumed';
+    epochRecord.project.retirement = null;
   }
 }
 
