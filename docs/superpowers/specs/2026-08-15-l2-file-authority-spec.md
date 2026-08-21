@@ -1,10 +1,10 @@
-# L2 文件权威层规格（第 2.9 版）
+# L2 文件权威层规格（第 2.10 版）
 
 日期：2026-08-15
 
-状态：第 2.9 版修订稿。第 17 节产品开放项已清零；第 2.9 版已修正独立复验发现的一个 P1 与一个 P2，但修订后的最终字节尚未完成哈希绑定的再次独立复验。在该定稿门闭合前，本文尚不具备据此编写或启动分阶段实施计划的定稿状态。
+状态：第 2.10 版定稿。第 17 节产品开放项已清零；第 2.10 版只调整实施门禁的调度，不改变文件权威、耐久或默认启用标准。
 
-修订历史：[第 2 版至第 2.9 版修订、评审与证据记录](./2026-08-15-l2-file-authority-revision-history.md)
+修订历史：[第 2 版至第 2.10 版修订、评审与证据记录](./2026-08-15-l2-file-authority-revision-history.md)
 
 上游范围：`2026-08-06-manuscript-durability-and-versioning-v1-scope.md` 第 5 节
 
@@ -29,17 +29,18 @@ L2 完成后：
 
 ### 1.1 对 L1 的前置门禁
 
-L2 的投影层直接建立在 L1 的原生耐久实现之上。按 L1 收尾设计第 20 节的自述，该实现目前尚未接入生产：`server/db.js` 的 `PROJECT_SCHEMA_VERSION` 仍是 10，schema 11 只由 native 激活路径安装，而 `createNativeProjectStore()` 在生产 module graph 里是返回 `NATIVE_ACTIVATION_DISABLED` 的 stub。
+L2 的投影层直接建立在 L1 的原生耐久实现之上。2026-08-17 复核当前 `HEAD`、Windows production candidate 与外部 VM 证据后，L1 四项技术门禁中已有两项闭环：精确 Windows production candidate 已通过 `production-sidecar.js → db.js → NativeProjectStore` 的真实 open/write 路径，Windows rollback-journal 与 application-directory hard-reset 矩阵也已分别通过 13/13 与 19/19。其余两项仍未闭环：production sidecar 的编译期 activation mode 虽已是 `production`，正式 activation 也能把精确 schema 10 source 原子安装为 schema 11 native，但 `server/db.js` 的支持上限 `PROJECT_SCHEMA_VERSION` 仍是 10，只能通过 activated-evidence 特例接纳 schema 11；native benchmark 文件尚未建立或执行。
 
-因此以下五条是 L2 的**技术前置门禁**，全部满足后 L2 方可开工：
+因此以下四条改按阶段关闭：schema 11/native correctness 是 L2 correctness 实施的开工门禁；已有 production open/write 与历史 13/19 作为开发基线；native/save p95 与最终 source 的 Windows 13/19 重绑定是 `DEFAULT_READY` 和最终 production artifact 的门禁。性能尚未闭环时可以实现并合并 correctness，但 `files` 只能走显式实验入口，普通项目继续以 `sqlite` 为默认。
 
 | 前置门禁 | L2 为何需要 | 当前状态 |
 |---|---|---|
-| 生产 `db.js` 到 schema 11，native activation = production | schema 12 的 canonical trigger 继承与三方 digest 校验建立在 11 之上 | 未满足 |
-| NativeProjectStore 接入生产 open/write 路径 | 第 8.3 节的投影发布依赖它 | 未满足 |
-| native transaction p95 达标 | L2 在每次写入之上叠加文件发布，数据库侧超预算则无余量 | 未满足（既有重跑仍超 500/300 ms） |
-| 旧版本 DML 负控（v0.0.7–0.0.9 全部拒绝） | 真实用户项目升到 schema 11 后这是数据安全属性 | `DEFERRED` |
-| Windows 崩溃矩阵硬重置证据 | 第 15.3 节的 L2 故障注入建立其上 | `DEFERRED` |
+| 生产 `db.js` 到 schema 11，native activation = production | schema 12 的 canonical trigger 继承与三方 digest 校验建立在 11 之上 | **部分满足，整体未满足**：production candidate 的嵌入 mode 与正式 schema 10→11 activation 已满足，但 `PROJECT_SCHEMA_VERSION = 10`；关闭门禁时必须把支持上限安全提升为 11，同时保持 sql.js migration target 为 10，并拒绝没有完整 activated evidence/backend/gate/trigger/digest 的残缺 schema 11 |
+| NativeProjectStore 接入生产 open/write 路径 | 第 8.3 节的投影发布依赖它 | **已满足（精确 Windows profile）**：production candidate E2E 3/3，激活、两次重启和两次 native 写入均通过 |
+| native transaction p95 达标 | L2 在每次写入之上叠加文件发布，数据库侧超预算则无余量 | **DEFAULT_READY 前必须关闭**：`native-durability-benchmark.test.js` 尚不存在；既有 sql.js 重跑 1122.41/1664.70 ms 不能作为 native PASS |
+| Windows 崩溃矩阵硬重置证据 | 第 15.3 节的 L2 故障注入建立其上 | **开发基线已满足，最终 source 待一次重绑定**：历史 rollback-journal 13/13、application-directory 19/19 均为外部 VM poweroff、零 failure；不对每个开发 SHA 重跑，全部 production source 冻结后只做一次完整重绑定 |
+
+v0.0.7–v0.0.9 真实产物 DML 矩阵不再是独立前置门禁，也不要求为这三个版本维护二进制或数据库夹具。schema 11/12 仍必须通过版本无关、由 production canonical generator 派生的 downgrade DML 负控，证明无内部 capability 的 INSERT/UPDATE/DELETE 全部拒绝、数据库与 ControlStore 零修改；该要求并入 schema 与 canonical trigger 正确性验收。
 
 以下两条**不是** L2 的前置门禁，属于 L1 发布门禁，与 L2 的发布合并执行：
 
@@ -486,7 +487,7 @@ schema 12 必须继承 L1 的 native downgrade guard 和 fail-closed 上界检�
 - 每次 open、事务 preflight、commit 后验证和 identity adoption 都必须比较代码 expected digest、`project_meta` digest 和 `sqlite_schema` observed digest；
 - 任一额外、缺失或语义不同的 trigger 都必须 fail-closed；
 - schema 高于当前构建支持上限时，在 migration、recovery、普通读取和 DML 前返回 `PROJECT_SCHEMA_TOO_NEW`，且数据库、文件和 ControlStore 零修改；
-- 旧版本 DML 负控必须扩展到 schema 12，不能因表重建而失去 L1 写屏障。
+- 版本无关、由 production canonical generator 派生的 downgrade DML 负控必须扩展到 schema 12，不能因表重建而失去 L1 写屏障；不要求运行特定历史版本产物。
 
 ### 7.2 删除与复活
 
@@ -1197,7 +1198,7 @@ L2 不移动资产、不创建归档包，也不永久删除任何 files 项目�
 - `integrity_check` 与 `foreign_key_check` 通过；
 - schema 12 canonical trigger generator、`project_meta` digest 和 `sqlite_schema` digest 三方一致；
 - 四个 `manuscript_*` 保留键无法被普通业务 DML、AI 工具或业务 migration 修改；
-- 旧版本 DML、未知写表、schema too new 和 trigger 漂移全部 fail-closed 且零修改；
+- generator-derived downgrade DML、未知写表、schema too new 和 trigger 漂移全部 fail-closed 且零修改；
 - 除第 4.5 节含 `U+0000` 的只读透传例外外，`chapters.content` 与 `.md` raw bytes、hash、word count 和 generation 一致；该例外必须把 `chapters.content` 置空并标记不可用，同时保持 raw hash、word count 和 generation 正确，任何被拒绝的正文写入都不得改变文件；
 - 重复/非连续编号、未分卷、移动、重排、tombstone 和同 UID 复活下 positions 始终连续；
 - 伏笔 overdue 在「当前最大 position 等于预期位置」时即成立，且只依赖 `manuscript_position`，代码扫描不得再出现相关 `MAX(num)` 语义；
@@ -1293,7 +1294,7 @@ L2 不移动资产、不创建归档包，也不永久删除任何 files 项目�
 
 ### 15.7 回归门禁
 
-- 第 1.1 节的五条 L2 前置门禁全部满足，且状态在验收账本中逐条记账；
+- 第 1.1 节的四条 L2 前置门禁全部满足，且状态在验收账本中逐条记账；
 - L1 全部 correctness、故障注入、恢复、writer lease、canonical trigger 和 downgrade DML 测试继续通过；
 - 服务端、客户端、contracts、TypeScript、lint、构建与 Desktop smoke 全绿；
 - 增加静态门禁：文章真值 SQL 直写、受控文件直写、章节/卷物理 DELETE、`manuscript_*` 保留键的业务侧写入、未经过 freshness gate 的活跃文章查询和旧伏笔编号语义均不得新增；
@@ -1333,7 +1334,7 @@ Windows 默认激活路径不得通过每次普通读取或每次写入全量 SH
 
 显式完全刷新和启动完全校验在 L2 v1 不预先写死一个未经测量的数值，但 `DEFAULT_READY` 前必须分别在 3,000 章正常基准和第 16.2 节 10,000 章/1 GiB 边界 fixture 上完成校准，记录 p50/p95/max、文件数、字节数、冷/热缓存条件和安全软件状态，并把最终阈值以规格补丁固化。两条路径都必须在 UI 主线程之外执行，启动显示可见进度，显式刷新可取消；未校准、无进度或不可取消均不能达到 `DEFAULT_READY`。
 
-L1 的 native transaction p95 与端到端保存 p95 不适用任何 L2 延期条款。它们是第 1.1 节的开工硬门禁，必须在 L2 启动前实测通过，不存在带着未达标数字开工的选项——L2 在每次写入之上叠加文件发布，数据库侧未达标时上表的 120 ms 增量预算无从校准。
+L1 的 native transaction p95 与端到端保存 p95 不得被 L2 自身的性能数字替代或掩盖。它们是 `DEFAULT_READY` 与最终 production artifact 的硬门禁：在实测通过前，correctness 代码可以合并并经显式实验入口验证，但普通新项目与旧项目仍走 `sqlite`，也不得宣称 L2 默认就绪。最终 source 冻结后的同一次验收必须同时关闭 L1 native/save 与 L2 三项 p95，不能把成本记到另一层。
 
 ### 16.2 L2 v1 硬安全上限
 
@@ -1364,7 +1365,7 @@ L1 的 native transaction p95 与端到端保存 p95 不适用任何 L2 延期�
 
 L2 只有在以下条件同时成立时才可宣称完成：
 
-- 第 1.1 节的五条 L2 前置门禁全部满足；
+- 第 1.1 节的四条 L2 前置门禁全部满足；
 - 新项目和已迁移项目以权威文件为文章域唯一真值源；
 - 所有文章写入经 ManuscriptService、FilePublicationJournal 和 SQLiteProjectionStore；
 - 所有正常读取经 `ensureReadableProjection()` 和 ActiveManuscriptProjection；

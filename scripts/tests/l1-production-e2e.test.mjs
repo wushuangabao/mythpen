@@ -227,6 +227,7 @@ function activationEvents(dataRoot) {
 }
 
 function assertAttestedInputs() {
+  assertFrozenProductionSource()
   assert.equal(fs.existsSync(candidateExecutable), true, 'Attested production candidate is missing')
   assert.equal(fs.existsSync(reviewedManifestPath), true, 'Reviewed manifest is missing')
   assert.equal(sha256(fs.readFileSync(candidateExecutable)), expectedCandidateSha256)
@@ -288,8 +289,6 @@ async function createSchemaTenProject(session, name) {
 }
 
 test('RED: compiled production entry without a reviewed manifest fails closed with zero SQLite or activation mutation', { timeout: 120_000 }, () => {
-  assertFrozenProductionSource()
-
   const root = fs.mkdtempSync(path.join(canonicalTempRoot, 'mythpen-production-red-'))
   const profile = path.join(root, 'profile')
   const dataRoot = path.join(root, 'data')

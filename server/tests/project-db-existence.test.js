@@ -4,7 +4,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { withIsolatedDataDir } = require('./helpers/isolated-data-dir');
+const { openControlStore } = require('../control-store');
 const { canonicalDatabasePath } = require('../sqljs-atomic-store');
+const { getWasmBinary } = require('../wasm-binary');
 
 async function startServer(app) {
   return new Promise((resolve) => {
@@ -135,8 +137,160 @@ test('project connection cache uses the Windows canonical physical path key', as
   db.closeProjectDb(filePath.toUpperCase());
 });
 
-test('ordinary off-mode open still rejects schema11 without activated admission', async (t) => {
+function snapshotTree(root) {
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name, 'en'))
+    .flatMap((entry) => {
+      const entryPath = path.join(root, entry.name);
+      if (entry.isDirectory()) {
+        return [
+          { kind: 'directory', path: entry.name },
+          ...snapshotTree(entryPath).map((child) => ({
+            ...child,
+            path: path.join(entry.name, child.path),
+          })),
+        ];
+      }
+      const bytes = fs.readFileSync(entryPath);
+      return [{
+        kind: entry.isFile() ? 'file' : 'other',
+        path: entry.name,
+        bytes: bytes.length,
+        sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      }];
+    });
+}
+
+function recoveryProjectBytes(SQL, label, instanceId) {
+  const database = new SQL.Database();
+  database.run('CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  database.run('CREATE TABLE volumes (id INTEGER PRIMARY KEY, title TEXT NOT NULL)');
+  database.run("INSERT INTO project_meta (key, value) VALUES ('schema_version', '10')");
+  database.run("INSERT INTO project_meta (key, value) VALUES ('project_instance_id', ?)", [instanceId]);
+  database.run('INSERT INTO volumes (id, title) VALUES (1, ?)', [label]);
+  const bytes = Buffer.from(database.export());
+  database.close();
+  return bytes;
+}
+
+function fileIdentity(filePath) {
+  const stats = fs.lstatSync(filePath, { bigint: true });
+  return { dev: String(stats.dev), ino: String(stats.ino) };
+}
+
+function sha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+function createMissingFormalRollbackScene({ beforeBytes, candidateBytes, controlDirectory, filePath }) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, beforeBytes);
+  const publicationId = crypto.randomUUID();
+  const canonicalPath = canonicalDatabasePath(filePath);
+  const dbKey = sha256(Buffer.from(canonicalPath));
+  const backupPath = path.join(
+    controlDirectory,
+    'sqlite-recovery',
+    dbKey,
+    `${publicationId}.before.db`,
+  );
+  const candidatePath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${publicationId}.candidate.db`,
+  );
+  openControlStore(controlDirectory).append({
+    type: 'sqlite.publish.prepared',
+    payload: {
+      version: 1,
+      publicationId,
+      dbKey,
+      before: {
+        exists: true,
+        sha256: sha256(beforeBytes),
+        identity: fileIdentity(filePath),
+        backupPath,
+      },
+      candidate: { path: candidatePath, sha256: sha256(candidateBytes) },
+      after: { sha256: sha256(candidateBytes) },
+    },
+    afterPredicate: { filePath: canonicalPath, sha256: sha256(candidateBytes) },
+  });
+  fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+  fs.writeFileSync(backupPath, beforeBytes);
+  fs.unlinkSync(filePath);
+}
+
+test('ordinary sql.js create, reopen, and write remain on complete schema 10', async (t) => {
   withIsolatedDataDir(t);
+  const db = require('../db');
+  await db.initDatabase();
+  const project = 'sqljs-schema-ten';
+  const filePath = db.getProjectDbPath(project);
+  const projectDb = db.createProjectDb(project);
+  assert.equal(
+    projectDb.prepare("SELECT value FROM project_meta WHERE key = 'schema_version'").get().value,
+    '10',
+  );
+  projectDb.prepare("INSERT INTO project_meta (key, value) VALUES ('schema10_write', 'before')").run();
+  projectDb.flush();
+  db.closeProjectDb(filePath);
+
+  const reopened = db.openProjectDb(filePath);
+  assert.equal(
+    reopened.prepare("SELECT value FROM project_meta WHERE key = 'schema_version'").get().value,
+    '10',
+  );
+  reopened.prepare("UPDATE project_meta SET value = 'after' WHERE key = 'schema10_write'").run();
+  reopened.flush();
+  assert.equal(
+    reopened.prepare("SELECT value FROM project_meta WHERE key = 'schema10_write'").get().value,
+    'after',
+  );
+});
+
+test('startup preserves missing-formal schema-10 rollback diagnostics without mutation', async (t) => {
+  const { dataDir } = withIsolatedDataDir(t);
+  const db = require('../db');
+  await db.initDatabase();
+  const initSqlJs = require('sql.js');
+  const SQL = await initSqlJs({ wasmBinary: getWasmBinary() });
+  const project = 'startup-missing-formal';
+  const filePath = db.getProjectDbPath(project);
+  const dbKey = sha256(Buffer.from(canonicalDatabasePath(filePath)));
+  const controlDirectory = path.join(dataDir, 'control', 'sqlite', dbKey);
+  const instanceId = crypto.randomUUID();
+  createMissingFormalRollbackScene({
+    beforeBytes: recoveryProjectBytes(SQL, 'before', instanceId),
+    candidateBytes: recoveryProjectBytes(SQL, 'after', instanceId),
+    controlDirectory,
+    filePath,
+  });
+  db.getConfigDb().prepare(
+    'INSERT INTO recent_projects (id, name, file_path) VALUES (?, ?, ?)',
+  ).run(crypto.randomUUID(), project, filePath);
+  db.getConfigDb().flush();
+  db.configureRecoveryDiagnosticsCapabilities({
+    atomicReplace: true,
+    backend: process.platform === 'win32' ? 'win32' : 'posix',
+    directoryFsync: true,
+    exclusiveLease: true,
+    verifiedAbsentInstall: true,
+  });
+  const before = snapshotTree(dataDir);
+
+  db.inspectProjectDatabasesAtStartup();
+
+  assert.deepEqual(db.getProjectOpenState(filePath), {
+    openState: 'isolated',
+    reasonCode: 'V1_PUBLICATION_ROLLBACK_RECOVERABLE',
+    recommendedAction: 'recover_v1_publication',
+  });
+  assert.deepEqual(snapshotTree(dataDir), before);
+});
+
+test('ordinary off-mode open rejects partial schema 11 before sql.js mutation', async (t) => {
+  const { dataDir } = withIsolatedDataDir(t);
   const db = require('../db');
   await db.initDatabase();
   const project = 'schema11-without-native-admission';
@@ -147,9 +301,69 @@ test('ordinary off-mode open still rejects schema11 without activated admission'
     .run();
   projectDb.flush();
   db.closeProjectDb(filePath);
+  db.getConfigDb().prepare(
+    'INSERT INTO recent_projects (id, name, file_path) VALUES (?, ?, ?)',
+  ).run(crypto.randomUUID(), project, filePath);
+  db.getConfigDb().flush();
+  const before = snapshotTree(dataDir);
+
+  db.inspectProjectDatabasesAtStartup();
+  assert.equal(db.getProjectOpenState(filePath)?.reasonCode, 'RECOVERY_REQUIRED');
+  assert.deepEqual(snapshotTree(dataDir), before);
+  db.removeProjectOpenState(filePath);
 
   assert.throws(
     () => db.captureProjectInstance(project),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+  assert.deepEqual(snapshotTree(dataDir), before);
+});
+
+test('schema above 11 is rejected before open or DML with database and ControlStore unchanged', async (t) => {
+  const { dataDir } = withIsolatedDataDir(t);
+  const db = require('../db');
+  await db.initDatabase();
+  const project = 'schema-too-new';
+  const filePath = db.getProjectDbPath(project);
+  const projectDb = db.createProjectDb(project);
+  projectDb.prepare("UPDATE project_meta SET value = '12' WHERE key = 'schema_version'").run();
+  projectDb.flush();
+  db.closeProjectDb(filePath);
+  db.getConfigDb().prepare(
+    'INSERT INTO recent_projects (id, name, file_path) VALUES (?, ?, ?)',
+  ).run(crypto.randomUUID(), project, filePath);
+  db.getConfigDb().flush();
+  const before = snapshotTree(dataDir);
+
+  db.inspectProjectDatabasesAtStartup();
+  assert.equal(db.getProjectOpenState(filePath)?.reasonCode, 'PROJECT_SCHEMA_TOO_NEW');
+  assert.deepEqual(snapshotTree(dataDir), before);
+  db.removeProjectOpenState(filePath);
+
+  const diagnostics = db.inspectRegisteredProject(project);
+  assert.equal(diagnostics.state, 'isolated');
+  assert.equal(diagnostics.reasonCode, 'PROJECT_SCHEMA_TOO_NEW');
+  assert.equal(diagnostics.canAutoRecover, false);
+  assert.deepEqual(snapshotTree(dataDir), before);
+  assert.throws(
+    () => db.recoverRegisteredProject(project, {
+      action: 'recover_v1_publication',
+      snapshot: diagnostics.snapshot,
+    }),
     (error) => error?.code === 'PROJECT_SCHEMA_TOO_NEW',
   );
+  assert.deepEqual(snapshotTree(dataDir), before);
+  db.removeProjectOpenState(filePath);
+
+  for (const operation of [
+    () => db.openProjectDb(filePath),
+    () => db.captureProjectInstance(project),
+    () => db.projectExecute(
+      project,
+      "INSERT INTO project_meta (key, value) VALUES ('must_not_write', '1')",
+    ),
+  ]) {
+    assert.throws(operation, (error) => error?.code === 'PROJECT_SCHEMA_TOO_NEW');
+    assert.deepEqual(snapshotTree(dataDir), before);
+  }
 });

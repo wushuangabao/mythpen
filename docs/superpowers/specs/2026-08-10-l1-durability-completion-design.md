@@ -1,6 +1,6 @@
 # L1 耐久性收尾设计：原生项目 SQLite 与用户可恢复入口
 
-日期：2026-08-10（第 8 版修订：2026-08-11）
+日期：2026-08-10（第 8 版修订：2026-08-11；状态复核：2026-08-17）
 
 状态：已确认的设计基线（第 8 版；实施状态见 §20）
 
@@ -126,7 +126,7 @@ facade runtime authorization 禁止普通 projectExecute、ManuscriptService 业
 
 只检查 trigger 名称、数量或 durability_trigger_version 不足以通过。schema migration 新增可写业务表时，必须在同一个 migration 事务中把该表登记进 generator、安装 INSERT/UPDATE/DELETE 屏障并更新 version/digest。schema audit 还必须枚举全部非 SQLite 内部表：任何不在 generator writable set 或显式 internal/read-only allowlist 的表都使 migration 测试失败，避免“新表根本没有登记”绕过 digest。
 
-v0.0.9 及更早版本不理解 native ControlStore evidence，但其普通 INSERT、UPDATE、DELETE 会被 schema 11 trigger 拒绝。测试必须证明拒绝后数据库文件字节和 ControlStore 都不变。
+不具备 native capability 的旧写入客户端不理解 ControlStore evidence，但其普通 INSERT、UPDATE、DELETE 必须被 schema 11 trigger 拒绝。负控语句与可写表集合从 production canonical generator 派生，并证明拒绝后数据库文件字节和 ControlStore 都不变；该正确性证明不再绑定 v0.0.7–v0.0.9 三个真实历史二进制或数据库夹具。
 
 任何 open、migration、recovery 或 DML 在接触项目写路径前都必须拒绝高于当前 PROJECT_SCHEMA_VERSION 的 schema，返回 PROJECT_SCHEMA_TOO_NEW；不得尝试降级、修 trigger 或把高版本文件误判为普通损坏。
 
@@ -1315,11 +1315,12 @@ SQLite schema/backend/trigger/gate 在同一事务中，正常 crash 不应产�
 
 ### 11.4 降级行为
 
-真实 v0.0.7、v0.0.8、v0.0.9 产物必须作为负对照：
+降级负控采用版本无关的 generator-derived harness：
 
-- schema 10 项目可以执行其历史业务 DML；
+- schema 10 项目仍可在激活前执行正常业务 DML；
 - schema 11 项目的可写表清单、每表 INSERT/UPDATE/DELETE 语句和 expected trigger rows 都从 production canonical trigger generator 派生，测试不得手写第二份表清单；
-- 每条旧版本 DML 都失败；旧进程关闭后，项目数据库文件逐字节等于测试前快照，ControlStore 目录文件集合与全部字节也完全不变。
+- harness 在不持内部耐久 capability 的连接上执行每条普通业务 DML并全部失败；关闭连接后，项目数据库文件逐字节等于测试前快照，ControlStore 目录文件集合与全部字节也完全不变；
+- 不要求获取、运行或长期维护 v0.0.7、v0.0.8、v0.0.9 的真实产物与数据库夹具。
 
 未来兼容版本在 schema > 自身上限时应显示“项目需要更高版本”，但用户是否安装过该版本不是 native 激活前置条件。
 
@@ -1650,7 +1651,7 @@ shutdown 不输出 snapshotCreated 或 restoreBasisCreated，因为本协议不�
 - 高于 PROJECT_SCHEMA_VERSION 的项目在 migration/recovery/DML 前返回 PROJECT_SCHEMA_TOO_NEW 且文件、ControlStore 零修改；
 - schema/backend/seq、trigger version 或 expected/project_meta/sqlite_schema digest 任一不一致都 fail-closed；
 - migration schema audit 对 generator 未登记且不在 internal/read-only allowlist 的业务表失败；
-- v0.0.7-v0.0.9 的表/DML 矩阵由 production canonical generator 派生，全部业务 DML 被拒绝，关闭旧进程后项目数据库与 ControlStore 逐字节不变；
+- 版本无关的 downgrade harness 从 production canonical generator 派生表/DML 矩阵，不持内部 capability 的全部业务 DML 被拒绝，关闭连接后项目数据库与 ControlStore 逐字节不变；
 - 用户可从任意 clean schema 10 项目直接升级，不要求中间版本 readiness。
 
 ### 17.4 checkpoint
@@ -1751,11 +1752,10 @@ native activation 固定 off。完成服务端、客户端、桌面和手工测�
   下表的 before 或 after；不得用 throw 模拟进程崩溃，也不得漏掉 Task 3 的九个冻结点；
 - Windows NTFS 的 VM 硬重置崩溃矩阵按真实 evidence 通过；
 - ControlStore append 对已 checkpoint 历史保持有界；
-- schema 11 gate/triggers 阻止真实旧版本业务 DML，v0.0.7–0.0.9 负控矩阵全部通过且字节不变；
 - off、fixture_only、production 三种编译期 activation mode 无 runtime 旁路；
 - packaged sidecar 通过 nonce 认证的 ready/build.info 报告编译模式、source commit 和 target triple；
 - schema 高于当前支持值时在 migration/recovery/DML 前 fail-closed 并给出更新版本出口；
-- canonical trigger generator、project_meta digest 与 sqlite_schema observed digest 三方一致，generator 未登记业务表和旧版本 DML 字节变化测试均会失败；
+- canonical trigger generator、project_meta digest 与 sqlite_schema observed digest 三方一致，generator 未登记业务表测试会失败；版本无关的无 capability DML 负控全部拒绝且项目数据库与 ControlStore 字节不变；
 - same-path identity adoption 只在用户确认和协议一致性检查后发生，并明确不保证字节相同；
 - native 项目存在时 data-root/path 迁移零修改拒绝；
 - native transaction p95 < 500 ms，端到端保存 p95 < 300 ms，八段耗时可核对；
@@ -1840,9 +1840,13 @@ build-sidecars 合同测试 `10/10`；但冻结计划要求的 fixture event-typ
 仍未满足，安全审查确认 testing factory/verifier 不在 graph、Critical 0、authority leak 0，
 本轮不为该非安全关键 token 重构核心 ControlStore。
 
-production `db.js` 仍是 schema 10，production factory/open/write wiring 与 native activation
-保持 off。Stage C/D、旧版本 DML 负控、性能与平台矩阵继续 `DEFERRED`；Windows installer、
-Linux、macOS、push、tag 和 release 为 `NOT_RUN`。既有性能重跑仍超过 500/300 ms 原始阈值，
-不得宣称性能或完整 L1 已完成；第 19 节完成定义保持未满足。
+production `db.js` 仍是 schema 10，普通项目仍先以 schema 10/sql.js 打开并依赖显式启用；
+production candidate 的编译期 activation mode 已是 `production`。精确 Windows production
+candidate 已完成真实 production controller、NativeProjectStore open/write、
+两次重启与保留写入的 E2E；Windows rollback-journal 13/13 与 application-directory 19/19
+hard-reset 矩阵也已通过。native 性能验收继续 `DEFERRED / NOT_RUN`；
+Windows installer、Linux、macOS、push、tag 和 release 为 `NOT_RUN`。既有 sql.js 性能重跑
+仍超过 500/300 ms 原始阈值，且不能替代尚未建立的 native benchmark；不得宣称性能或完整
+L1 已完成，第 19 节完成定义保持未满足。
 
-补记（2026-08-15）：第 19 节已按两级门禁重排，以对齐 `2026-08-15-l2-file-authority-spec.md` 第 1.1 节。按新的划分，当前状态是**一级技术门禁未满足**——生产 schema、生产 wiring、native 性能、旧版本 DML 负控和 Windows 硬重置矩阵五项均未闭环，因此 L2 不具备开工条件。二级发布门禁整体 `NOT_RUN`，但按新划分它不再是 L2 的前置条件，将与 L2 的稿件存储迁移合并发布。本次重排只改变记账方式和门禁归属，不放宽任何一条既有技术要求，也不改变任何已确认的设计决策。
+复核（2026-08-17）：第 19 节已按两级门禁重排，以对齐 `2026-08-15-l2-file-authority-spec.md` 第 1.1 节。四项 L2 技术前置中，NativeProjectStore 生产 open/write 接线与 Windows hard-reset 证据两项已闭环；生产 schema 11 基线（其中 production 编译模式已满足）与 native p95 两项仍未闭环，因此 L2 产品代码仍不具备开工条件。经产品决定，v0.0.7–v0.0.9 真实产物 DML 矩阵不再作为独立门禁；版本无关的 generator-derived downgrade guard 正确性测试仍属于 schema 11/12 验收。二级发布门禁整体 `NOT_RUN`，但按新划分它不再是 L2 的前置条件，将与 L2 的稿件存储迁移合并发布。本次复核只校正当前状态与门禁归属，不放宽 canonical trigger、digest 三方一致或无 capability DML 零修改要求。

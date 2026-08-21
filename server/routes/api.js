@@ -293,9 +293,10 @@ router.post('/projects/by-name/:name/durability/native', async (req, res, next) 
   if (!hasEmptyQuery(req) || !hasExactKeys(req.body, [])) {
     return invalidDiagnosticsParams(res);
   }
+  const expectedInstanceId = req.get(PROJECT_INSTANCE_HEADER) || '';
+  if (!expectedInstanceId) return invalidDiagnosticsParams(res);
   try {
-    db.assertProjectInstance(req.params.name, req.get(PROJECT_INSTANCE_HEADER) || '');
-    return res.json(await db.enableNativeProject(req.params.name));
+    return res.json(await db.enableNativeProject(req.params.name, expectedInstanceId));
   } catch (error) {
     return next(error);
   }

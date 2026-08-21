@@ -8,6 +8,27 @@ const { createNativeDbAdapter } = require('../native/native-db-adapter');
 const { createManuscriptService } = require('../manuscript-service');
 const { openControlStore } = require('../control-store');
 
+test('cached native adapter admission rechecks controller, evidence, and the full schema-11 contract', () => {
+  const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+  const identityStart = dbSource.indexOf('function assertMythpenProjectIdentity');
+  const identityEnd = dbSource.indexOf('\nfunction recoveryControlDirectory', identityStart);
+  const identitySource = dbSource.slice(identityStart, identityEnd);
+  assert.ok(identityStart >= 0 && identityEnd > identityStart);
+  assert.match(identitySource, /nativeActivationAdmissionMode\(\)/);
+  assert.match(identitySource, /assertActivatedNativeEvidence/);
+  assert.match(identitySource, /inspectSchema11BytesContract/);
+
+  const openStart = dbSource.indexOf('function openProjectDb');
+  const openEnd = dbSource.indexOf('\nfunction closeProjectDb', openStart);
+  const openSource = dbSource.slice(openStart, openEnd);
+  assert.ok(openStart >= 0 && openEnd > openStart);
+  assert.ok(
+    openSource.indexOf('assertMythpenProjectIdentity(pathState.filePath)')
+      < openSource.indexOf('projectConnections.has(cacheKey)'),
+    'cached adapter lookup must occur only after the joint read-only admission preflight',
+  );
+});
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }

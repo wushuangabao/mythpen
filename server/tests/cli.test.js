@@ -669,7 +669,7 @@ test('copy and manifest failures leave configuration unchanged and the same targ
   }
 });
 
-test('cleanup warnings are printed after the verified path is persisted', async () => {
+test('cleanup warnings are printed after the verified path is persisted', { timeout: 30_000 }, async () => {
   for (const cleanupFailure of ['child', 'container']) {
     const source = tempDir(`${cleanupFailure}-cleanup-cli-source`);
     const parent = tempDir(`${cleanupFailure}-cleanup-cli-target-parent`);
@@ -731,7 +731,7 @@ test('cleanup warnings are printed after the verified path is persisted', async 
   }
 });
 
-test('stdout failures after a committed migration cannot prevent configuration persistence', async () => {
+test('stdout failures after a committed migration cannot prevent configuration persistence', { timeout: 30_000 }, async () => {
   for (const throwOnWrite of [1, 2, 3]) {
     const source = tempDir(`stdout-${throwOnWrite}-source`);
     const target = path.join(tempDir(`stdout-${throwOnWrite}-target-parent`), 'data');
@@ -763,7 +763,7 @@ test('stdout failures after a committed migration cannot prevent configuration p
   }
 });
 
-test('migration publishes through the Windows atomic helper boundary', async () => {
+test('migration publishes through the Windows atomic helper boundary', { timeout: 30_000 }, async () => {
   for (const externalType of ['file', 'directory', 'junction']) {
     const source = tempDir(`${externalType}-atomic-boundary-source`);
     const parent = tempDir(`${externalType}-atomic-boundary-parent`);

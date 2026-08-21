@@ -26,6 +26,7 @@ const {
 const { isOfflineSeedBootstrapActive } = require('./offline-seed-capability');
 const { classifyChapterBodyMutation } = require('./manuscript-sql-guard');
 const { createNativeDbAdapter } = require('./native/native-db-adapter');
+const { inspectSchema11Contract } = require('./native/durability-schema');
 const {
   isTestManuscriptBootstrapActive,
   registerDatabaseInternals,
@@ -213,6 +214,22 @@ function installNativeActivationController(controller) {
   return true;
 }
 
+function nativeActivationAdmissionMode() {
+  if (!nativeActivationController) return null;
+  const buildMode = require('./build-info').getBuildInfo().nativeActivationMode;
+  if (buildMode !== 'production' && buildMode !== 'fixture_only') return null;
+  try {
+    const {
+      assertNativeActivationControllerForBuild,
+    } = require('./native/native-activation-controller');
+    return assertNativeActivationControllerForBuild(nativeActivationController) === nativeActivationController
+      ? buildMode
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function getStoragePaths() {
   assertStorageAvailable();
   return storagePaths || configureStorage();
@@ -223,7 +240,12 @@ function getStoragePaths() {
 // ═══════════════════════════════════════════════════════════════
 
 const CONFIG_SCHEMA_VERSION = 1;
-const PROJECT_SCHEMA_VERSION = 10;
+// PROJECT_SCHEMA_VERSION is the highest project schema this build can admit.
+// SQL.js remains the schema-10 authority; schema 11 is installed only by the
+// native activation transaction and is never a sql.js migration target.
+const PROJECT_SCHEMA_VERSION = 11;
+const SQLJS_PROJECT_SCHEMA_VERSION = 10;
+const NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION = 10;
 const STARTUP_RECOVERY_MAX_PROJECTS = 10_000;
 
 // ═══════════════════════════════════════════════════════════════
@@ -1190,7 +1212,13 @@ function runMigrations(db, migrations, targetVersion, getVersionFn, setVersionFn
   let currentVersion = getVersionFn(db);
   if (currentVersion >= targetVersion) return;
   for (let v = currentVersion; v < targetVersion; v++) {
-    if (migrations[v]) migrations[v](db);
+    const migration = migrations[v];
+    if (typeof migration !== 'function') {
+      const error = new Error(`Schema migration step ${v} -> ${v + 1} is missing`);
+      error.code = 'SCHEMA_MIGRATION_MISSING';
+      throw error;
+    }
+    migration(db);
     setVersionFn(db, v + 1);
   }
 }
@@ -1425,15 +1453,20 @@ function _createProjectConnection(filePath, options) {
         error.code = 'NATIVE_ACTIVATION_DISABLED';
         throw error;
       }
-      const nativeStore = nativeActivationController.activate({
-        assertConfigLifecycleLease: () => configLifecycleLease.assertHeld(),
-        assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(filePath),
-        controlDirectory,
-        controlStore,
-        databasePath: filePath,
-        dbKey,
-        sqlModule: SQL,
-      });
+      let nativeStore;
+      try {
+        nativeStore = nativeActivationController.activate({
+          assertConfigLifecycleLease: () => configLifecycleLease.assertHeld(),
+          assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(filePath),
+          controlDirectory,
+          controlStore,
+          databasePath: filePath,
+          dbKey,
+          sqlModule: SQL,
+        });
+      } catch (cause) {
+        throw nativeProjectAdmissionError(filePath, cause);
+      }
       return createNativeDbAdapter({
         controlStore,
         coordinator: projectWriteCoordinator,
@@ -1470,6 +1503,32 @@ function _createProjectConnection(filePath, options) {
   }
 }
 
+function nativeProjectAdmissionError(filePath, cause) {
+  if (cause?.code === 'RECOVERY_REQUIRED' || cause?.code === 'NATIVE_STORE_DISPOSITION_UNKNOWN') {
+    return cause;
+  }
+  return projectDatabaseError(
+    'RECOVERY_REQUIRED',
+    `Native project evidence does not match the admitted schema-11 database: ${filePath}`,
+    { cause },
+  );
+}
+
+function assertCachedNativeProjectAdmission(filePath, cacheKey, projectDb) {
+  if (typeof projectDb?.runManuscriptTransaction !== 'function') return projectDb;
+  try {
+    // The native store projects the complete authenticated suffix before every
+    // business read. Use that same authority before a cached adapter escapes.
+    projectDb.prepare('SELECT 1 AS native_admission_probe').get();
+    return projectDb;
+  } catch (cause) {
+    projectConnections.delete(cacheKey);
+    const error = nativeProjectAdmissionError(filePath, cause);
+    recordProjectOpenFailure(filePath, error);
+    throw error;
+  }
+}
+
 function openProjectDb(filePath) {
   assertStorageAvailable();
   const existing = pathExistsStrict(filePath);
@@ -1481,10 +1540,20 @@ function openProjectDb(filePath) {
   if (pathState.exists) assertMythpenProjectIdentity(pathState.filePath);
   const cacheKey = canonicalDbPath(filePath);
   if (projectConnections.has(cacheKey)) {
-    return projectConnections.get(cacheKey);
+    return assertCachedNativeProjectAdmission(
+      filePath,
+      cacheKey,
+      projectConnections.get(cacheKey),
+    );
   }
   return projectWriteCoordinator.withProjectWriteSync(filePath, () => {
-    if (projectConnections.has(cacheKey)) return projectConnections.get(cacheKey);
+    if (projectConnections.has(cacheKey)) {
+      return assertCachedNativeProjectAdmission(
+        filePath,
+        cacheKey,
+        projectConnections.get(cacheKey),
+      );
+    }
     const wrapped = _createProjectConnection(filePath, {
       explicitCreate: !pathExistsStrict(filePath),
     });
@@ -1501,14 +1570,19 @@ function closeProjectDb(filePath) {
   }
 }
 
-async function enableNativeProject(name) {
-  if (!nativeActivationController) {
+async function enableNativeProject(name, expectedInstanceId) {
+  if (!nativeActivationController || nativeActivationAdmissionMode() === null) {
     const error = new Error('Native project activation is disabled in this build');
     error.code = 'NATIVE_ACTIVATION_DISABLED';
     throw error;
   }
   if (typeof name !== 'string' || name.length === 0) {
     const error = new Error('Project name is required');
+    error.code = 'INVALID_PARAMS';
+    throw error;
+  }
+  if (typeof expectedInstanceId !== 'string' || expectedInstanceId.length === 0) {
+    const error = new Error('Project instance is required for native activation');
     error.code = 'INVALID_PARAMS';
     throw error;
   }
@@ -1527,37 +1601,45 @@ async function enableNativeProject(name) {
   return projectWriteCoordinator.withProjectWriteSync(filePath, (writeContext) => {
     writeContext.assertLease();
     configLifecycleLease.assertHeld();
-    let cached = projectConnections.get(cacheKey) || null;
-    if (cached?.runManuscriptTransaction) {
-      return Object.freeze({
-        activated: false,
-        backend: 'native',
-        name,
-        schemaVersion: 11,
-      });
-    }
-
-    if (!cached) {
-      cached = _createProjectConnection(filePath, { explicitCreate: false });
-      projectConnections.set(cacheKey, cached);
-    }
-    const schemaVersion = getProjectVersion(cached);
-    if (schemaVersion !== PROJECT_SCHEMA_VERSION) {
-      const error = new Error(`Project ${name} is not an exact schema-${PROJECT_SCHEMA_VERSION} activation source`);
-      error.code = schemaVersion > PROJECT_SCHEMA_VERSION
+    assertControlledProjectDatabasePath(filePath, { allowMissing: false });
+    const sourceInspection = assertMythpenProjectIdentity(filePath);
+    if (sourceInspection.schema !== NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION) {
+      const error = new Error(
+        `Project ${name} is not an exact schema-${NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION} activation source`,
+      );
+      error.code = sourceInspection.schema > PROJECT_SCHEMA_VERSION
         ? 'PROJECT_SCHEMA_TOO_NEW'
         : 'RECOVERY_REQUIRED';
       throw error;
     }
+    const expectedInstanceIdSha256 = createHash('sha256')
+      .update(expectedInstanceId, 'utf8')
+      .digest('hex');
+    if (sourceInspection.projectInstanceIdSha256 !== expectedInstanceIdSha256) {
+      throw projectInstanceMismatchError(name);
+    }
+    let cached = projectConnections.get(cacheKey) || null;
+    if (cached) {
+      const schemaVersion = getProjectVersion(cached);
+      if (schemaVersion !== NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION) {
+        const error = new Error(
+          `Project ${name} is not an exact schema-${NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION} activation source`,
+        );
+        error.code = schemaVersion > PROJECT_SCHEMA_VERSION
+          ? 'PROJECT_SCHEMA_TOO_NEW'
+          : 'RECOVERY_REQUIRED';
+        throw error;
+      }
 
-    try {
-      cached._flushInProjectWrite();
-      cached.close();
-      projectConnections.delete(cacheKey);
-    } catch (error) {
-      projectConnections.delete(cacheKey);
-      recordProjectOpenFailure(filePath, error);
-      throw error;
+      try {
+        cached._flushInProjectWrite();
+        cached.close();
+        projectConnections.delete(cacheKey);
+      } catch (error) {
+        projectConnections.delete(cacheKey);
+        recordProjectOpenFailure(filePath, error);
+        throw error;
+      }
     }
 
     const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
@@ -1678,6 +1760,50 @@ function assertControlledProjectDatabasePath(filePath, {
   return { exists: true, filePath: exactPath };
 }
 
+function inspectSchema11BytesContract(bytes) {
+  const database = new SQL.Database(bytes);
+  const query = (sql) => {
+    const all = (...params) => {
+      const statement = database.prepare(sql);
+      try {
+        if (params.length > 0) statement.bind(params.map((value) => (
+          value === undefined ? null : value
+        )));
+        const rows = [];
+        while (statement.step()) rows.push(statement.getAsObject());
+        return rows;
+      } finally {
+        statement.free();
+      }
+    };
+    return Object.freeze({
+      all,
+      get(...params) { return all(...params)[0] || null; },
+    });
+  };
+  try {
+    const committedSeqText = query(
+      "SELECT value FROM project_meta WHERE key = 'durability_commit_seq'",
+    ).get()?.value;
+    if (typeof committedSeqText !== 'string' || !/^(?:0|[1-9]\d*)$/.test(committedSeqText)) {
+      throw projectDatabaseError(
+        'RECOVERY_REQUIRED',
+        'Activated durability commit sequence is not canonical',
+      );
+    }
+    const expectedFinalSeq = Number(committedSeqText);
+    if (!Number.isSafeInteger(expectedFinalSeq) || expectedFinalSeq < 0) {
+      throw projectDatabaseError(
+        'RECOVERY_REQUIRED',
+        'Activated durability commit sequence is outside the safe range',
+      );
+    }
+    return inspectSchema11Contract(Object.freeze({ query }), { expectedFinalSeq });
+  } finally {
+    database.close();
+  }
+}
+
 function assertMythpenProjectIdentity(filePath, { startup = false } = {}) {
   try {
     let bytes;
@@ -1698,17 +1824,22 @@ function assertMythpenProjectIdentity(filePath, { startup = false } = {}) {
       );
     }
     let admittedActivatedSchema = false;
-    if (
-      !startup
-      && inspection.schema === 11
-      && nativeActivationController
-    ) {
+    if (inspection.schema === PROJECT_SCHEMA_VERSION && nativeActivationAdmissionMode() !== null) {
       const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
       const controlDirectory = path.join(getStoragePaths().dataDir, 'control', 'sqlite', dbKey);
       try {
         const { assertActivatedNativeEvidence } = require('./native/native-activation');
-        assertActivatedNativeEvidence({ controlDirectory, dbKey });
-        admittedActivatedSchema = true;
+        const activated = assertActivatedNativeEvidence({ controlDirectory, dbKey });
+        const contract = inspectSchema11BytesContract(bytes);
+        admittedActivatedSchema = (
+          contract.backend === activated.backend
+          && contract.gateEmpty === activated.gateEmpty
+          && contract.projectInstanceIdSha256 === activated.projectInstanceIdSha256
+          && contract.projectInstanceIdSha256 === inspection.projectInstanceIdSha256
+          && contract.schemaVersion === activated.schemaVersion
+          && contract.triggerSetDigest === activated.triggerSetDigest
+          && contract.triggerVersion === activated.triggerVersion
+        );
       } catch {
         admittedActivatedSchema = false;
       }
@@ -1719,6 +1850,16 @@ function assertMythpenProjectIdentity(filePath, { startup = false } = {}) {
         `Project database schema is newer than this build supports: ${filePath}`,
       );
     }
+    if (inspection.schema === PROJECT_SCHEMA_VERSION && !admittedActivatedSchema) {
+      throw projectDatabaseError(
+        'RECOVERY_REQUIRED',
+        `Project schema ${PROJECT_SCHEMA_VERSION} lacks exact native activation admission: ${filePath}`,
+      );
+    }
+    return Object.freeze({
+      projectInstanceIdSha256: inspection.projectInstanceIdSha256,
+      schema: inspection.schema,
+    });
   } catch (cause) {
     if (
       cause?.code === 'STARTUP_RECOVERY_NOT_PROJECT'
@@ -1795,7 +1936,7 @@ function recoveryDiagnosticsDependencies() {
     platformCapabilities: recoveryDiagnosticsPlatformCapabilities,
     recoverV1Publication,
     sqlModule: SQL,
-    supportedSchemaVersion: PROJECT_SCHEMA_VERSION,
+    supportedSchemaVersion: SQLJS_PROJECT_SCHEMA_VERSION,
     withProjectRecoveryLease: (filePath, callback) => (
       projectWriteCoordinator.withProjectRecoveryLeaseSync(filePath, callback)
     ),
@@ -1880,20 +2021,22 @@ function inspectProjectDatabasesAtStartup({ maxProjects = STARTUP_RECOVERY_MAX_P
       const hasActivated = nativeEvidence.some((event) => (
         event.type === 'sqlite.native.activation.activated'
       ));
-      if (nativeActivationController && hasPrepared && hasActivated) {
-        projectWriteCoordinator.withProjectRecoveryLeaseSync(row.file_path, () => {
-          const connection = _createProjectConnection(row.file_path, { explicitCreate: false });
-          connection.close();
-        });
-        setProjectOpenState(row.file_path, {
-          openState: 'ready',
-          reasonCode: null,
-          recommendedAction: null,
-        });
-        continue;
-      }
       if (hasPrepared || hasActivated) {
-        setProjectOpenState(row.file_path, {
+        const pathState = assertControlledProjectDatabasePath(row.file_path, { startup: true });
+        assertMythpenProjectIdentity(pathState.filePath, { startup: true });
+        if (nativeActivationAdmissionMode() !== null && hasPrepared && hasActivated) {
+          projectWriteCoordinator.withProjectRecoveryLeaseSync(pathState.filePath, () => {
+            const connection = _createProjectConnection(pathState.filePath, { explicitCreate: false });
+            connection.close();
+          });
+          setProjectOpenState(pathState.filePath, {
+            openState: 'ready',
+            reasonCode: null,
+            recommendedAction: null,
+          });
+          continue;
+        }
+        setProjectOpenState(pathState.filePath, {
           openState: 'isolated',
           reasonCode: 'RECOVERY_REQUIRED',
           recommendedAction: null,
@@ -1901,6 +2044,10 @@ function inspectProjectDatabasesAtStartup({ maxProjects = STARTUP_RECOVERY_MAX_P
         continue;
       }
       const diagnostics = inspectRegisteredProject(row.name);
+      if (diagnostics.reasonCode === 'PROJECT_SCHEMA_TOO_NEW') {
+        const pathState = assertControlledProjectDatabasePath(row.file_path, { startup: true });
+        assertMythpenProjectIdentity(pathState.filePath, { startup: true });
+      }
       setProjectOpenState(row.file_path, {
         openState: diagnostics.state === 'ready' ? 'ready' : 'isolated',
         reasonCode: diagnostics.reasonCode,
@@ -1994,7 +2141,11 @@ function getProjectDb(name) {
   // on its scheduled flush. That live connection is the intentional project
   // instance and must remain usable during this short window.
   if (projectConnections.has(cacheKey)) {
-    const projectDb = projectConnections.get(cacheKey);
+    const projectDb = assertCachedNativeProjectAdmission(
+      filePath,
+      cacheKey,
+      projectConnections.get(cacheKey),
+    );
     const context = projectInstanceContext.getStore();
     if (context?.name === name) validateProjectInstance(projectDb, name, context.expectedInstanceId);
     return projectDb;
@@ -2205,7 +2356,13 @@ function runManuscriptTransaction(projectName, intent, callback) {
   if (typeof callback !== 'function') throw new TypeError('Manuscript transaction callback must be a function');
   const filePath = getProjectDbPath(projectName);
   const cacheKey = canonicalDbPath(filePath);
-  const cached = projectConnections.get(cacheKey);
+  const cached = projectConnections.has(cacheKey)
+    ? assertCachedNativeProjectAdmission(
+      filePath,
+      cacheKey,
+      projectConnections.get(cacheKey),
+    )
+    : null;
   if (typeof cached?.runManuscriptTransaction === 'function') {
     return cached.runManuscriptTransaction(projectName, intent, callback);
   }
@@ -2624,7 +2781,13 @@ const getProjectVersion = makeVersionGetter('project_meta');
 const setProjectVersion = makeVersionSetter('project_meta');
 
 function migrateProject(db) {
-  runMigrations(db, projectMigrations, PROJECT_SCHEMA_VERSION, getProjectVersion, setProjectVersion);
+  runMigrations(
+    db,
+    projectMigrations,
+    SQLJS_PROJECT_SCHEMA_VERSION,
+    getProjectVersion,
+    setProjectVersion,
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════

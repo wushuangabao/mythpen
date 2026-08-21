@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -71,6 +71,12 @@ const ABORTED_KEYS = [
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function projectInstanceId(projectDb) {
+  return projectDb
+    .prepare("SELECT value FROM project_meta WHERE key = 'project_instance_id'")
+    .get().value;
 }
 
 function canonicalJson(value) {
@@ -308,6 +314,424 @@ test('Stage C-B happy activation binds v1 evidence and reopens without mutation'
   assert.equal(canonicalJson(activationEvents(fixture)), evidenceBytes);
   assert.deepEqual(sentinelSnapshot(fixture), expectedSentinel);
   reopened.close();
+});
+
+test('db activation admission requires an exact schema-10 source and rejects repeat or off-mode activation', {
+  timeout: 120_000,
+}, async (t) => {
+  const repositoryRoot = path.resolve(__dirname, '..', '..');
+  const buildInfoPath = require.resolve('../build-info');
+  const dbPath = require.resolve('../db');
+  const buildInfo = require(buildInfoPath);
+  const originalGetBuildInfo = buildInfo.getBuildInfo;
+  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
+  const previousExportDir = process.env.MYTHPEN_EXPORT_DIR;
+  buildInfo.getBuildInfo = () => Object.freeze({
+    nativeActivationMode: 'fixture_only',
+    sourceCommit: 'a'.repeat(40),
+    targetTriple: 'x86_64-pc-windows-msvc',
+  });
+
+  const base = require('../testing/native-stage-c-fixture').createNativeStageCFixture();
+  const root = base.root;
+  const receipt = require('../native/native-activation-authority')
+    .authorizeNativeActivation({ root })
+    .consume();
+  process.env.MYTHPEN_DATA_DIR = root;
+  process.env.MYTHPEN_EXPORT_DIR = path.join(root, 'exports');
+  const controller = require('../testing/fixture-native-activation-controller')
+    .createFixtureNativeActivationController({ receipt, root });
+  let activeDb = null;
+  t.after(() => {
+    try {
+      activeDb?.closeAllDatabases();
+    } catch {
+      // Preserve the primary assertion failure.
+    }
+    delete require.cache[dbPath];
+    buildInfo.getBuildInfo = originalGetBuildInfo;
+    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
+    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
+    if (previousExportDir === undefined) delete process.env.MYTHPEN_EXPORT_DIR;
+    else process.env.MYTHPEN_EXPORT_DIR = previousExportDir;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const loadFixtureDb = async () => {
+    delete require.cache[dbPath];
+    const database = require(dbPath);
+    database.installFixtureNativeActivationController(controller);
+    database.configureStorage({ dataDir: root });
+    await database.initDatabase();
+    activeDb = database;
+    return database;
+  };
+
+  const database = await loadFixtureDb();
+  const registerProject = (name, filePath) => {
+    database.getConfigDb().prepare(
+      'INSERT INTO recent_projects (id, name, file_path) VALUES (?, ?, ?)',
+    ).run(randomUUID(), name, filePath);
+    database.getConfigDb().flush();
+  };
+
+  const driftName = 'controller-mode-drift';
+  const driftPath = database.getProjectDbPath(driftName);
+  const drift = database.createProjectDb(driftName);
+  const driftInstanceId = projectInstanceId(drift);
+  registerProject(driftName, driftPath);
+  database.closeProjectDb(driftPath);
+  const activationCore = require('../native/native-activation');
+  const originalActivateNativeProjectCore = activationCore.activateNativeProjectCore;
+  let driftCoreCalls = 0;
+  activationCore.activateNativeProjectCore = (...args) => {
+    driftCoreCalls += 1;
+    return originalActivateNativeProjectCore(...args);
+  };
+  buildInfo.getBuildInfo = () => Object.freeze({
+    nativeActivationMode: 'off',
+    sourceCommit: 'a'.repeat(40),
+    targetTriple: 'x86_64-pc-windows-msvc',
+  });
+  const driftBefore = exactTreeSnapshot(root);
+  try {
+    await assert.rejects(
+      database.enableNativeProject(driftName, driftInstanceId),
+      (error) => error?.code === 'NATIVE_ACTIVATION_DISABLED',
+    );
+    assert.equal(driftCoreCalls, 0);
+    assert.equal(exactTreeSnapshot(root), driftBefore);
+  } finally {
+    activationCore.activateNativeProjectCore = originalActivateNativeProjectCore;
+    buildInfo.getBuildInfo = () => Object.freeze({
+      nativeActivationMode: 'fixture_only',
+      sourceCommit: 'a'.repeat(40),
+      targetTriple: 'x86_64-pc-windows-msvc',
+    });
+    database.closeProjectDb(driftPath);
+  }
+
+  const futureName = 'controller-schema-twelve';
+  const futurePath = database.getProjectDbPath(futureName);
+  const future = database.createProjectDb(futureName);
+  const futureInstanceId = projectInstanceId(future);
+  registerProject(futureName, futurePath);
+  future.prepare("UPDATE project_meta SET value = '12' WHERE key = 'schema_version'").run();
+  future.flush();
+  database.closeProjectDb(futurePath);
+  const futureBefore = exactTreeSnapshot(root);
+  await assert.rejects(
+    database.enableNativeProject(futureName, futureInstanceId),
+    (error) => error?.code === 'PROJECT_SCHEMA_TOO_NEW',
+  );
+  assert.equal(exactTreeSnapshot(root), futureBefore);
+
+  const legacyName = 'schema-nine-source';
+  const legacyPath = database.getProjectDbPath(legacyName);
+  const legacy = database.createProjectDb(legacyName);
+  const legacyInstanceId = projectInstanceId(legacy);
+  registerProject(legacyName, legacyPath);
+  legacy.prepare("UPDATE project_meta SET value = '9' WHERE key = 'schema_version'").run();
+  legacy.flush();
+  database.closeProjectDb(legacyPath);
+  const legacyBefore = exactTreeSnapshot(root);
+  await assert.rejects(
+    database.enableNativeProject(legacyName, legacyInstanceId),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+  assert.equal(exactTreeSnapshot(root), legacyBefore);
+  const legacyInspection = new Database(legacyPath, { create: false, readonly: true, strict: true });
+  assert.equal(
+    legacyInspection.query("SELECT value FROM project_meta WHERE key = 'schema_version'").get().value,
+    '9',
+  );
+  legacyInspection.close();
+
+  const nativeName = 'fixture-brand-admission';
+  const nativePath = database.getProjectDbPath(nativeName);
+  const native = database.createProjectDb(nativeName);
+  const nativeInstanceId = projectInstanceId(native);
+  registerProject(nativeName, nativePath);
+  const wrongInstanceBefore = exactTreeSnapshot(root);
+  await assert.rejects(
+    database.enableNativeProject(nativeName, randomUUID()),
+    (error) => error?.code === 'PROJECT_INSTANCE_MISMATCH',
+  );
+  assert.equal(exactTreeSnapshot(root), wrongInstanceBefore);
+  await assert.rejects(
+    database.enableNativeProject(nativeName, ''),
+    (error) => error?.code === 'INVALID_PARAMS',
+  );
+  assert.equal(exactTreeSnapshot(root), wrongInstanceBefore);
+  const enabled = await database.enableNativeProject(nativeName, nativeInstanceId);
+  assert.equal(enabled.activated, true);
+  const cachedBefore = exactTreeSnapshot(root);
+  await assert.rejects(
+    database.enableNativeProject(nativeName, nativeInstanceId),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+  assert.equal(exactTreeSnapshot(root), cachedBefore);
+
+  database.closeProjectDb(nativePath);
+  const fixtureReopen = database.openProjectDb(nativePath);
+  assert.equal(typeof fixtureReopen.runManuscriptTransaction, 'function');
+  database.closeProjectDb(nativePath);
+  const reopenedBefore = exactTreeSnapshot(root);
+  await assert.rejects(
+    database.enableNativeProject(nativeName, nativeInstanceId),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+  assert.equal(exactTreeSnapshot(root), reopenedBefore);
+  database.closeProjectDb(nativePath);
+  database.closeAllDatabases();
+  activeDb = null;
+
+  const offBefore = exactTreeSnapshot(root);
+  const offScript = [
+    "const path = require('node:path')",
+    "const db = require('./server/db')",
+    'db.configureStorage({ dataDir: process.argv[1] })',
+    'await db.initDatabase()',
+    'let code = null',
+    'try { db.openProjectDb(path.join(process.argv[1], \'projects\', `${process.argv[2]}.mythpen.db`)) } catch (error) { code = error.code }',
+    'db.closeAllDatabases()',
+    "process.stdout.write(`OFF_ADMISSION=${code}\\n`)",
+  ].join(';');
+  const offResult = require('node:child_process').spawnSync(
+    process.execPath,
+    ['-e', offScript, root, nativeName],
+    {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        MYTHPEN_DATA_DIR: root,
+        MYTHPEN_EXPORT_DIR: path.join(root, 'exports'),
+      },
+      windowsHide: true,
+    },
+  );
+  assert.equal(offResult.status, 0, offResult.stderr || offResult.stdout);
+  assert.match(offResult.stdout, /OFF_ADMISSION=RECOVERY_REQUIRED/);
+  assert.equal(exactTreeSnapshot(root), offBefore);
+
+  const corrupted = new Database(nativePath, { create: false, strict: true });
+  try {
+    corrupted.query('INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)').run();
+    corrupted.query("UPDATE project_meta SET value = 'tampered' WHERE key = 'durability_backend'").run();
+    corrupted.query('DELETE FROM "_durability_write_gate" WHERE "gate_id" = 1').run();
+  } finally {
+    corrupted.close();
+  }
+  const corruptBefore = exactTreeSnapshot(root);
+  const reopenedDatabase = await loadFixtureDb();
+  assert.throws(
+    () => reopenedDatabase.openProjectDb(nativePath),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+  assert.equal(exactTreeSnapshot(root), corruptBefore);
+});
+
+test('db startup and open jointly reject each incomplete schema-11 contract without mutation', {
+  timeout: 180_000,
+}, async (t) => {
+  const buildInfoPath = require.resolve('../build-info');
+  const dbPath = require.resolve('../db');
+  const buildInfo = require(buildInfoPath);
+  const originalGetBuildInfo = buildInfo.getBuildInfo;
+  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
+  const previousExportDir = process.env.MYTHPEN_EXPORT_DIR;
+  const roots = [];
+  buildInfo.getBuildInfo = () => Object.freeze({
+    nativeActivationMode: 'fixture_only',
+    sourceCommit: 'b'.repeat(40),
+    targetTriple: 'x86_64-pc-windows-msvc',
+  });
+  let activeDb = null;
+  t.after(() => {
+    try {
+      activeDb?.closeAllDatabases();
+    } catch {
+      // Preserve the primary assertion failure.
+    }
+    delete require.cache[dbPath];
+    buildInfo.getBuildInfo = originalGetBuildInfo;
+    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
+    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
+    if (previousExportDir === undefined) delete process.env.MYTHPEN_EXPORT_DIR;
+    else process.env.MYTHPEN_EXPORT_DIR = previousExportDir;
+    for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  for (const fault of ['backend', 'gate', 'trigger', 'digest', 'sequence']) {
+    const base = require('../testing/native-stage-c-fixture').createNativeStageCFixture();
+    const root = base.root;
+    roots.push(root);
+    const receipt = require('../native/native-activation-authority')
+      .authorizeNativeActivation({ root })
+      .consume();
+    process.env.MYTHPEN_DATA_DIR = root;
+    process.env.MYTHPEN_EXPORT_DIR = path.join(root, 'exports');
+    const controller = require('../testing/fixture-native-activation-controller')
+      .createFixtureNativeActivationController({ receipt, root });
+
+    delete require.cache[dbPath];
+    const database = require(dbPath);
+    activeDb = database;
+    database.installFixtureNativeActivationController(controller);
+    database.configureStorage({ dataDir: root });
+    await database.initDatabase();
+    const name = `schema11-${fault}`;
+    const databasePath = database.getProjectDbPath(name);
+    const project = database.createProjectDb(name);
+    const instanceId = projectInstanceId(project);
+    database.getConfigDb().prepare(
+      'INSERT INTO recent_projects (id, name, file_path) VALUES (?, ?, ?)',
+    ).run(randomUUID(), name, databasePath);
+    database.getConfigDb().flush();
+    assert.equal((await database.enableNativeProject(name, instanceId)).activated, true);
+
+    const nativeDatabase = new Database(databasePath, { create: false, strict: true });
+    try {
+      if (fault === 'gate') {
+        nativeDatabase.query('INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)').run();
+      } else if (fault === 'trigger') {
+        const trigger = nativeDatabase.query(
+          "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '_mythpen_downgrade_guard__%' ORDER BY name LIMIT 1",
+        ).get();
+        assert.ok(trigger?.name);
+        nativeDatabase.exec(`DROP TRIGGER "${trigger.name.replaceAll('"', '""')}"`);
+      } else {
+        nativeDatabase.query('INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)').run();
+        const key = fault === 'backend'
+          ? 'durability_backend'
+          : fault === 'digest'
+            ? 'durability_trigger_set_digest'
+            : 'durability_commit_seq';
+        const value = fault === 'sequence' ? '7' : 'tampered';
+        nativeDatabase.query('UPDATE project_meta SET value = ? WHERE key = ?').run(value, key);
+        nativeDatabase.query('DELETE FROM "_durability_write_gate" WHERE "gate_id" = 1').run();
+      }
+    } finally {
+      nativeDatabase.close();
+    }
+    const before = exactTreeSnapshot(root);
+    assert.throws(
+      () => database.openProjectDb(databasePath),
+      (error) => error?.code === 'RECOVERY_REQUIRED',
+      `${fault}: cached admission`,
+    );
+    assert.equal(exactTreeSnapshot(root), before, `${fault}: cached admission bytes`);
+    database.closeAllDatabases();
+    activeDb = null;
+
+    delete require.cache[dbPath];
+    const reopened = require(dbPath);
+    activeDb = reopened;
+    reopened.installFixtureNativeActivationController(controller);
+    reopened.configureStorage({ dataDir: root });
+    await reopened.initDatabase();
+    reopened.inspectProjectDatabasesAtStartup();
+    assert.equal(reopened.getProjectOpenState(databasePath)?.reasonCode, 'RECOVERY_REQUIRED', fault);
+    assert.equal(exactTreeSnapshot(root), before, `${fault}: startup bytes`);
+    reopened.removeProjectOpenState(databasePath);
+    assert.throws(
+      () => reopened.openProjectDb(databasePath),
+      (error) => error?.code === 'RECOVERY_REQUIRED',
+      fault,
+    );
+    assert.equal(exactTreeSnapshot(root), before, `${fault}: open bytes`);
+    reopened.closeAllDatabases();
+    activeDb = null;
+  }
+});
+
+test('db startup and open reject a valid prepared-only schema-11 admission without mutation', {
+  timeout: 120_000,
+}, async (t) => {
+  const crash = await runUntilCrash({
+    script: CRASH_WORKER,
+    faults: { [FAULT_POINTS.NATIVE_ACTIVATION_AFTER_PREPARED_POSTCHECK]: { crash: true } },
+    env: { MYTHPEN_NATIVE_ACTIVATION_CRASH_SCENARIO: 'db-prepared-only-admission' },
+    timeoutMs: 60_000,
+  });
+  t.after(() => crash.cleanup());
+  const fixture = crash.artifacts.fixture;
+  const databasePath = fixture.databasePath;
+  const preparedEvents = openControlStore(fixture.controlDirectory).read()
+    .filter((event) => event.type.startsWith('sqlite.native.activation.'));
+  assert.deepEqual(preparedEvents.map((event) => event.type), [
+    'sqlite.native.activation.prepared',
+  ]);
+  const partial = new Database(databasePath, { create: false, strict: true });
+  partial.query("UPDATE project_meta SET value = '11' WHERE key = 'schema_version'").run();
+  partial.close();
+
+  const buildInfoPath = require.resolve('../build-info');
+  const dbPath = require.resolve('../db');
+  const buildInfo = require(buildInfoPath);
+  const originalGetBuildInfo = buildInfo.getBuildInfo;
+  const previousDataDir = process.env.MYTHPEN_DATA_DIR;
+  const previousExportDir = process.env.MYTHPEN_EXPORT_DIR;
+  buildInfo.getBuildInfo = () => Object.freeze({
+    nativeActivationMode: 'fixture_only',
+    sourceCommit: 'c'.repeat(40),
+    targetTriple: 'x86_64-pc-windows-msvc',
+  });
+  const authorityBase = require('../testing/native-stage-c-fixture').createNativeStageCFixture();
+  const authorityRoot = authorityBase.root;
+  const authorityReceipt = require('../native/native-activation-authority')
+    .authorizeNativeActivation({ root: authorityRoot })
+    .consume();
+  const controller = require('../testing/fixture-native-activation-controller')
+    .createFixtureNativeActivationController({ receipt: authorityReceipt, root: authorityRoot });
+  process.env.MYTHPEN_DATA_DIR = fixture.root;
+  process.env.MYTHPEN_EXPORT_DIR = path.join(fixture.root, 'exports');
+  let activeDb = null;
+  t.after(() => {
+    try {
+      activeDb?.closeAllDatabases();
+    } catch {
+      // Preserve the primary assertion failure.
+    }
+    delete require.cache[dbPath];
+    buildInfo.getBuildInfo = originalGetBuildInfo;
+    if (previousDataDir === undefined) delete process.env.MYTHPEN_DATA_DIR;
+    else process.env.MYTHPEN_DATA_DIR = previousDataDir;
+    if (previousExportDir === undefined) delete process.env.MYTHPEN_EXPORT_DIR;
+    else process.env.MYTHPEN_EXPORT_DIR = previousExportDir;
+    fs.rmSync(authorityRoot, { recursive: true, force: true });
+  });
+
+  delete require.cache[dbPath];
+  const registrationDb = require(dbPath);
+  activeDb = registrationDb;
+  registrationDb.installFixtureNativeActivationController(controller);
+  registrationDb.configureStorage({ dataDir: fixture.root });
+  await registrationDb.initDatabase();
+  registrationDb.getConfigDb().prepare(
+    'INSERT INTO recent_projects (id, name, file_path) VALUES (?, ?, ?)',
+  ).run(randomUUID(), fixture.name, databasePath);
+  registrationDb.getConfigDb().flush();
+  registrationDb.closeAllDatabases();
+  activeDb = null;
+  const before = exactTreeSnapshot(fixture.root);
+
+  delete require.cache[dbPath];
+  const reopened = require(dbPath);
+  activeDb = reopened;
+  reopened.installFixtureNativeActivationController(controller);
+  reopened.configureStorage({ dataDir: fixture.root });
+  await reopened.initDatabase();
+  reopened.inspectProjectDatabasesAtStartup();
+  assert.equal(reopened.getProjectOpenState(databasePath)?.reasonCode, 'RECOVERY_REQUIRED');
+  assert.equal(exactTreeSnapshot(fixture.root), before);
+  reopened.removeProjectOpenState(databasePath);
+  assert.throws(
+    () => reopened.openProjectDb(databasePath),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+  assert.equal(exactTreeSnapshot(fixture.root), before);
 });
 
 test('Stage C-B aborts a prepared attempt after clean v1 progress and activates from its new anchor', {

@@ -1,8 +1,8 @@
 # L2 文件权威层规格修订历史
 
-对应主规格：[L2 文件权威层规格（第 2.9 版）](./2026-08-15-l2-file-authority-spec.md)
+对应主规格：[L2 文件权威层规格（第 2.10 版）](./2026-08-15-l2-file-authority-spec.md)
 
-本文保留主规格原 §19 编号，记录第 2 版至第 2.9 版的修订、评审与证据演进。本文仅用于审计和设计溯源；实施约束、验收标准与完成定义以主规格 §1–§18 为准。
+本文保留主规格原 §19 编号，记录第 2 版至第 2.10 版的修订、评审与证据演进。本文仅用于审计和设计溯源；实施约束、验收标准与完成定义以主规格 §1–§18 为准。
 
 ## 19. 第 2 版修订清单
 
@@ -133,9 +133,22 @@
 
 ### 19.9 第 2.9 版独立复验修订
 
-独立 sub-agent 对第 2.8 版 SHA-256 `A7FE7594E33A8882067AD43F059B926424CA89DB3745EC3AFD0321715FA65A8C` 复验后确认第 19.8 节的原始一个 P0、六个 P1 与一个 P2 均已闭合，但另发现一个退役锁序 P1 和一个 reservation 命名空间 P2；第 2.9 版继续修正如下，并以修订后哈希的再次独立复验为定稿门：
+独立 sub-agent 对第 2.8 版 SHA-256 `A7FE7594E33A8882067AD43F059B926424CA89DB3745EC3AFD0321715FA65A8C` 复验后确认第 19.8 节的原始一个 P0、六个 P1 与一个 P2 均已闭合，但另发现一个退役锁序 P1 和一个 reservation 命名空间 P2；第 2.9 版继续修正如下，并按现有复验结论定稿，不再要求修订后哈希的再次独立复验作为定稿门：
 
 | # | 级别 | 缺陷 | 位置 | 修正 |
 |---|---|---|---|---|
 | 1 | P1 | 退役先持 writer lease 再排空本进程在途请求，会与已经 admission、尚未申请 writer 的请求互相等待 | 9.1、13、15.6、18 | 退役在 registry/config lease 下先把 controller 切为 `retiring` 并关闭新请求 admission，随后释放该 lease并无锁排空已经 admission 的请求，归零后重新取得 registry/config、复核并取得 writer；exclusive 竞争失败时零路由副作用恢复 controller，并增加 admission 到 registry/writer 之间暂停的确定性交错 |
 | 2 | P2 | 保留期内 MigrationJournal 的“全部 reservation 参与碰撞”没有明确 chapter/volume 的命名空间与普通创建覆盖 | 12.6、15.5、18 | project reservation 进入全局项目 UID 集合，chapter/volume reservation 进入同一 L1 项目控制身份的对应种类集合；迁移和普通创建都扫描，枚举不完整 fail-closed，并增加成功/中止终态保留期注入测试 |
+
+### 19.10 2026-08-17 L1 前置门禁记账调整
+
+产品决定不再要求获取、运行或长期维护 v0.0.7、v0.0.8、v0.0.9 三个真实历史产物的 DML 负控矩阵，因此该矩阵从 L2 独立前置门禁与 Stage 0 实施任务中删除。schema 11/12 的 downgrade guard 本身不删除：可写表、INSERT/UPDATE/DELETE 与 expected trigger rows 继续由 production canonical generator 派生，使用无内部 capability 的版本无关 harness 验证全部拒绝、项目数据库与 ControlStore 零修改，并继续执行 expected/project_meta/sqlite_schema digest 三方一致检查。
+
+### 19.11 第 2.10 版实施门禁调度精简
+
+为避免在每个开发 SHA 上重复构建 production 证据平台和运行耗时 VM 矩阵，本版只调整门禁的执行时点，不降低产品合同：
+
+- Task 1A 仅关闭 schema 11/native correctness 与现有 contracts 回归；L2 correctness 实施随后可以先行，但 `files` 保持显式实验入口，普通项目继续默认 `sqlite`。
+- L1 native/save p95 仍是 `DEFAULT_READY` 硬门禁，只是与 L2 三项 p95 一起延后到最终 production source 验收，不再要求为此新增八段 production timing control protocol。
+- 历史 Windows 13/13 与 19/19 作为开发基线；所有 L2 production source 和默认路由决定提交、冻结后，只对最终 SHA 做一次完整 VM 重绑定与 candidate/E2E/benchmark/desktop smoke。
+- 删除通用 evidence publisher、build/execution receipt 与 attestation 平台的实施要求；最终证据沿用既有 reviewed-manifest trust boundary，并由独立 reviewer 核对原始日志、真实退出码和 SHA-256 后写入仓库账本。

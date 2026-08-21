@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -78,6 +79,82 @@ function schemaSnapshot(database) {
       "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
     ).all(),
   };
+}
+
+function byteTreeSnapshot(root) {
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root, { withFileTypes: true })
+    .sort((left, right) => utf8Compare(left.name, right.name))
+    .flatMap((entry) => {
+      const entryPath = path.join(root, entry.name);
+      if (entry.isDirectory()) {
+        return [
+          { kind: 'directory', path: entry.name },
+          ...byteTreeSnapshot(entryPath).map((child) => ({
+            ...child,
+            path: path.join(entry.name, child.path),
+          })),
+        ];
+      }
+      const bytes = fs.readFileSync(entryPath);
+      return [{
+        kind: entry.isFile() ? 'file' : 'other',
+        path: entry.name,
+        bytes: bytes.toString('base64'),
+      }];
+    });
+}
+
+function runDowngradeGuardWorker(databasePath, mode) {
+  const script = String.raw`
+    const { Database } = require('bun:sqlite');
+    const { WRITABLE_PROJECT_TABLES, canonicalTriggerDefinitions } = require('./server/native/durability-schema');
+    const database = new Database(process.argv[1], { create: false, strict: true });
+    const quote = (value) => '"' + String(value).replaceAll('"', '""') + '"';
+    if (process.argv[2] === 'seed') {
+      database.exec('PRAGMA foreign_keys = OFF');
+      database.exec('PRAGMA ignore_check_constraints = ON');
+      database.exec('BEGIN EXCLUSIVE');
+      database.query('INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)').run();
+      for (const table of WRITABLE_PROJECT_TABLES) {
+        if (database.query('SELECT COUNT(*) AS count FROM ' + quote(table)).get().count > 0) continue;
+        const required = database.query('PRAGMA table_info(' + quote(table) + ')').all()
+          .filter((column) => column.notnull === 1 && column.dflt_value === null
+            && !(column.pk === 1 && /INT/i.test(column.type || '')));
+        const columns = required.map((column) => quote(column.name));
+        const values = required.map((column) => /INT|REAL|NUM|DEC|FLOAT|DOUBLE/i.test(column.type || '')
+          ? 1 : 'guard-' + table + '-' + column.name);
+        const sql = columns.length === 0
+          ? 'INSERT INTO ' + quote(table) + ' DEFAULT VALUES'
+          : 'INSERT INTO ' + quote(table) + ' (' + columns.join(', ') + ') VALUES ('
+            + values.map(() => '?').join(', ') + ')';
+        database.query(sql).run(...values);
+      }
+      database.query('DELETE FROM "_durability_write_gate" WHERE "gate_id" = 1').run();
+      database.exec('COMMIT');
+    } else {
+      for (const definition of canonicalTriggerDefinitions()) {
+        const sql = definition.operation === 'INSERT'
+          ? 'INSERT INTO ' + quote(definition.table) + ' DEFAULT VALUES'
+          : definition.operation === 'UPDATE'
+            ? 'UPDATE ' + quote(definition.table) + ' SET rowid = rowid'
+            : 'DELETE FROM ' + quote(definition.table);
+        let rejected = false;
+        try { database.exec(sql); }
+        catch (error) { rejected = /MYTHPEN_DURABILITY_WRITE_GATE_CLOSED/.test(String(error.message)); }
+        if (!rejected) throw new Error(definition.operation + ' ' + definition.table + ' was not rejected');
+      }
+    }
+    if (database.inTransaction) throw new Error('downgrade guard worker left a transaction open');
+    database.close(true);
+  `;
+  const result = spawnSync(process.execPath, ['-e', script, databasePath, mode], {
+    cwd: path.join(__dirname, '..', '..'),
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
 function interceptDatabase(database, intercept) {
@@ -245,6 +322,19 @@ test('closed gate rejects ordinary DML and an open gate admits it', (t) => {
   database.query('DELETE FROM "_durability_write_gate" WHERE "gate_id" = 1').run();
   database.exec('COMMIT');
   assert.equal(database.query("SELECT COUNT(*) AS count FROM project_meta WHERE key = 'gate_probe'").get().count, 0);
+});
+
+test('generator-derived downgrade guards reject INSERT UPDATE and DELETE on every writable table without byte mutation', (t) => {
+  const fixture = createNativeStageBFixture({ name: 'schema11-all-downgrade-dml' });
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  runDowngradeGuardWorker(fixture.databasePath, 'seed');
+
+  const beforeDatabase = fs.readFileSync(fixture.databasePath);
+  const beforeControl = byteTreeSnapshot(fixture.controlDirectory);
+  runDowngradeGuardWorker(fixture.databasePath, 'verify');
+
+  assert.deepEqual(fs.readFileSync(fixture.databasePath), beforeDatabase);
+  assert.deepEqual(byteTreeSnapshot(fixture.controlDirectory), beforeControl);
 });
 
 test('manifest audit rejects unknown application tables', (t) => {
@@ -465,8 +555,18 @@ test('a genesis failure destroys the unpublished fixture', () => {
   assert.equal(fs.existsSync(failedRoot), false);
 });
 
-test('Task 1 does not wire schema 11 into production db.js', () => {
+test('production db separates schema 11 admission from the schema 10 sql.js migration target', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
-  assert.match(source, /const PROJECT_SCHEMA_VERSION = 10;/);
-  assert.doesNotMatch(source, /durability-schema|installSchema11Contract/);
+  assert.match(source, /const PROJECT_SCHEMA_VERSION = 11;/);
+  assert.match(source, /const SQLJS_PROJECT_SCHEMA_VERSION = 10;/);
+  assert.match(source, /const NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION = 10;/);
+  assert.match(
+    source,
+    /runMigrations\(\s*db,\s*projectMigrations,\s*SQLJS_PROJECT_SCHEMA_VERSION,\s*getProjectVersion,\s*setProjectVersion,?\s*\)/,
+  );
+  assert.match(source, /typeof migration !== ['"]function['"]/);
+  assert.match(source, /schema migration step .* is missing/i);
+  assert.match(source, /schemaVersion !== NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION/);
+  assert.doesNotMatch(source, /projectMigrations\[10\]\s*=/);
+  assert.doesNotMatch(source, /installSchema11Contract/);
 });

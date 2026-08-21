@@ -24,6 +24,14 @@ import {
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+function windowsPowerShellSelfTestEnvironment(sourceEnvironment) {
+  const childEnvironment = { ...sourceEnvironment }
+  for (const key of Object.keys(childEnvironment)) {
+    if (key.toLowerCase() === 'psmodulepath') delete childEnvironment[key]
+  }
+  return childEnvironment
+}
+
 function reviewedManifest() {
   return {
     version: 1, type: 'mythpen.windows-l1-reviewed-manifest.v1',
@@ -60,6 +68,31 @@ test('production build uses only the production entry and deterministic reviewed
   assert.throws(
     () => compileProductionSidecarArguments('server/index.js', output, sourceCommit, triple, reviewedManifest()),
     /only entry/i,
+  )
+})
+
+test('Windows PowerShell SelfTest child environment removes every PSModulePath alias only', () => {
+  const sourceEnvironment = {
+    PATH: 'sentinel-path',
+    PSModulePath: 'pwsh-modules',
+    PSMODULEPATH: 'upper-modules',
+    psmodulepath: 'lower-modules',
+    psMODULEpath: 'mixed-modules',
+    MYTHPEN_SENTINEL: 'preserved-byte-for-byte',
+  }
+  const before = { ...sourceEnvironment }
+
+  const childEnvironment = windowsPowerShellSelfTestEnvironment(sourceEnvironment)
+
+  assert.notEqual(childEnvironment, sourceEnvironment)
+  assert.deepEqual(sourceEnvironment, before)
+  assert.deepEqual(childEnvironment, {
+    PATH: 'sentinel-path',
+    MYTHPEN_SENTINEL: 'preserved-byte-for-byte',
+  })
+  assert.equal(
+    Object.keys(childEnvironment).some((key) => key.toLowerCase() === 'psmodulepath'),
+    false,
   )
 })
 
@@ -406,6 +439,7 @@ test('production project writes cannot create an event-loop-observable slow drai
 
 test('the desktop lifecycle smoke SelfTest executes successfully on Windows PowerShell', {
   skip: process.platform !== 'win32' ? 'Windows PowerShell product harness' : false,
+  timeout: 35_000,
 }, () => {
   const smokePath = join(repositoryRoot, 'scripts', 'tests', 'desktop-lifecycle-smoke.ps1')
   const result = spawnSync('powershell.exe', [
@@ -416,6 +450,7 @@ test('the desktop lifecycle smoke SelfTest executes successfully on Windows Powe
   ], {
     cwd: repositoryRoot,
     encoding: 'utf8',
+    env: windowsPowerShellSelfTestEnvironment(process.env),
     timeout: 30_000,
   })
 

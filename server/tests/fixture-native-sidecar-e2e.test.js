@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { randomBytes } = require('node:crypto');
+const { createHash, randomBytes, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -8,6 +8,28 @@ const test = require('node:test');
 
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const CONTROL_CHANNEL = 'mythpen.sidecar.v1';
+
+function projectDurabilitySnapshot(root, databasePath) {
+  const paths = [databasePath];
+  const controlRoot = path.join(root, 'control', 'sqlite');
+  const visit = (directory) => {
+    if (!fs.existsSync(directory)) return;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(entryPath);
+      else if (entry.isFile()) paths.push(entryPath);
+    }
+  };
+  visit(controlRoot);
+  return paths
+    .filter((filePath) => fs.existsSync(filePath))
+    .sort()
+    .map((filePath) => {
+      const bytes = fs.readFileSync(filePath);
+      return `${path.relative(root, filePath)}:${bytes.length}:${createHash('sha256').update(bytes).digest('hex')}`;
+    })
+    .join('\n');
+}
 
 function waitForFrame(child, type, timeoutMs = 30_000) {
   return new Promise((resolve, reject) => {
@@ -216,6 +238,27 @@ test('compiled fixture-only sidecar provides authenticated REST activation and n
   }, instanceId);
   assert.equal(v1Write.status, 200, JSON.stringify(v1Write.payload));
 
+  const databasePath = path.join(fixtureRoot, 'projects', 'fixture-e2e.mythpen.db');
+  const rejectedActivationBefore = projectDurabilitySnapshot(fixtureRoot, databasePath);
+  const missingInstance = await request(
+    first,
+    'POST',
+    '/api/projects/by-name/fixture-e2e/durability/native',
+    {},
+  );
+  assert.equal(missingInstance.status, 400, JSON.stringify(missingInstance.payload));
+  assert.equal(missingInstance.payload.error.code, 'INVALID_PARAMS');
+  const wrongInstance = await request(
+    first,
+    'POST',
+    '/api/projects/by-name/fixture-e2e/durability/native',
+    {},
+    randomUUID(),
+  );
+  assert.equal(wrongInstance.status, 409, JSON.stringify(wrongInstance.payload));
+  assert.equal(wrongInstance.payload.error.code, 'PROJECT_INSTANCE_MISMATCH');
+  assert.equal(projectDurabilitySnapshot(fixtureRoot, databasePath), rejectedActivationBefore);
+
   const enabled = await request(
     first,
     'POST',
@@ -230,6 +273,18 @@ test('compiled fixture-only sidecar provides authenticated REST activation and n
     name: 'fixture-e2e',
     schemaVersion: 11,
   });
+
+  const repeatedBefore = projectDurabilitySnapshot(fixtureRoot, databasePath);
+  const repeated = await request(
+    first,
+    'POST',
+    '/api/projects/by-name/fixture-e2e/durability/native',
+    {},
+    instanceId,
+  );
+  assert.equal(repeated.status, 409, JSON.stringify(repeated.payload));
+  assert.equal(repeated.payload.error.code, 'RECOVERY_REQUIRED');
+  assert.equal(projectDurabilitySnapshot(fixtureRoot, databasePath), repeatedBefore);
 
   const nativeRead = await request(first, 'GET', `/api/fixture-e2e/chapters/1?chapter_id=${chapter.payload.id}`, undefined, instanceId);
   assert.equal(nativeRead.status, 200, JSON.stringify(nativeRead.payload));
@@ -246,7 +301,6 @@ test('compiled fixture-only sidecar provides authenticated REST activation and n
   );
   await shutdown(first, 1);
 
-  const databasePath = path.join(fixtureRoot, 'projects', 'fixture-e2e.mythpen.db');
   assert.deepEqual(inspectSchema(databasePath), [
     { key: 'durability_backend', value: 'native-sqlite-v2' },
     { key: 'schema_version', value: '11' },
@@ -265,6 +319,17 @@ test('compiled fixture-only sidecar provides authenticated REST activation and n
 
   const second = await startFixtureSidecar(executable, fixtureRoot, built);
   sessions.push(second);
+  const coldRepeatBefore = projectDurabilitySnapshot(fixtureRoot, databasePath);
+  const coldRepeat = await request(
+    second,
+    'POST',
+    '/api/projects/by-name/fixture-e2e/durability/native',
+    {},
+    instanceId,
+  );
+  assert.equal(coldRepeat.status, 409, JSON.stringify(coldRepeat.payload));
+  assert.equal(coldRepeat.payload.error.code, 'RECOVERY_REQUIRED');
+  assert.equal(projectDurabilitySnapshot(fixtureRoot, databasePath), coldRepeatBefore);
   const reopened = await request(second, 'GET', `/api/fixture-e2e/chapters/1?chapter_id=${chapter.payload.id}`, undefined, instanceId);
   assert.equal(reopened.status, 200, JSON.stringify(reopened.payload));
   assert.equal(reopened.payload.content, 'native-before-restart');

@@ -139,6 +139,7 @@ test('missing compile-time profile rejects before filesystem, db, lease, Control
 test('production graph owns its entry and db validation has no fixture-controller dependency', () => {
   const root = path.join(__dirname, '..');
   const dbSource = fs.readFileSync(path.join(root, 'db.js'), 'utf8');
+  const routeSource = fs.readFileSync(path.join(root, 'routes', 'api.js'), 'utf8');
   const entrySource = fs.readFileSync(path.join(root, 'production-sidecar.js'), 'utf8');
   const productionSource = fs.readFileSync(
     path.join(root, 'native', 'production-native-activation-controller.js'),
@@ -150,4 +151,33 @@ test('production graph owns its entry and db validation has no fixture-controlle
   assert.doesNotMatch(productionSource, /server[\\/]testing|\.\.\/[\\]?testing|\.\.\/testing/);
   assert.ok(entrySource.indexOf('createProductionNativeActivationController') < entrySource.indexOf("require('./db')"));
   assert.ok(entrySource.indexOf('installNativeActivationController') < entrySource.indexOf("require('./index')"));
+
+  const enableStart = dbSource.indexOf('async function enableNativeProject(name, expectedInstanceId)');
+  const enableEnd = dbSource.indexOf('\nfunction captureProjectInstance', enableStart);
+  const enableSource = dbSource.slice(enableStart, enableEnd);
+  assert.ok(enableStart >= 0 && enableEnd > enableStart);
+  assert.ok(
+    enableSource.indexOf('nativeActivationAdmissionMode() === null')
+      < enableSource.indexOf('assertMythpenProjectIdentity(filePath)'),
+    'installed controller brand/mode must be checked before source or evidence reads',
+  );
+  const beforeControllerActivation = enableSource.slice(
+    0,
+    enableSource.indexOf('nativeActivationController.activate'),
+  );
+  assert.doesNotMatch(
+    beforeControllerActivation,
+    /_createProjectConnection/,
+    'no-cache activation must enter the native controller without prior sql.js open/recovery',
+  );
+  const routeStart = routeSource.indexOf("router.post('/projects/by-name/:name/durability/native'");
+  const routeEnd = routeSource.indexOf("\nrouter.get('/projects/by-name/:name/diagnostics'", routeStart);
+  const activationRoute = routeSource.slice(routeStart, routeEnd);
+  assert.ok(routeStart >= 0 && routeEnd > routeStart);
+  assert.doesNotMatch(activationRoute, /assertProjectInstance|openProjectDb|migrateProject/);
+  assert.match(
+    activationRoute,
+    /enableNativeProject\(req\.params\.name, expectedInstanceId\)/,
+    'the route must delegate the mandatory instance token to the closed-source preflight',
+  );
 });
