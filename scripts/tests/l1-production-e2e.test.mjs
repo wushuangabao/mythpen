@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
-import test from 'node:test'
+import test, { after } from 'node:test'
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..')
 const targetTriple = 'x86_64-pc-windows-msvc'
@@ -17,7 +17,99 @@ const controlChannel = 'mythpen.sidecar.v1'
 const require = createRequire(import.meta.url)
 const candidateExecutable = process.env.MYTHPEN_L1_PRODUCTION_CANDIDATE || ''
 const reviewedManifestPath = process.env.MYTHPEN_L1_REVIEWED_MANIFEST || ''
-const acceptanceTest = candidateExecutable && reviewedManifestPath ? test : test.skip
+const buildReceiptPath = process.env.MYTHPEN_L1_BUILD_RECEIPT || ''
+const e2eResultPath = process.env.MYTHPEN_L1_E2E_RESULT || ''
+const L1_PRODUCTION_CASE_IDS = Object.freeze([
+  'missing-manifest-zero-mutation',
+  'activate-and-retain-two-restarts',
+  'off-sidecar-zero-mutation',
+  'profile-mismatch-zero-mutation',
+])
+const L1_E2E_RESULT_TYPE = 'mythpen.windows-l1-production-e2e-result.v1'
+const requiredAcceptanceInputs = Object.freeze({
+  MYTHPEN_L1_PRODUCTION_CANDIDATE: candidateExecutable,
+  MYTHPEN_L1_REVIEWED_MANIFEST: reviewedManifestPath,
+  MYTHPEN_L1_BUILD_RECEIPT: buildReceiptPath,
+  MYTHPEN_L1_E2E_RESULT: e2eResultPath,
+})
+const configuredAcceptanceInputs = Object.values(requiredAcceptanceInputs).filter(Boolean).length
+const acceptanceInputsComplete = configuredAcceptanceInputs === Object.keys(requiredAcceptanceInputs).length
+const acceptanceTest = acceptanceInputsComplete ? test : test.skip
+
+function assertExactKeys(value, expected, label) {
+  assert.equal(value !== null && typeof value === 'object' && !Array.isArray(value), true, label)
+  assert.deepEqual(Object.keys(value).sort(), [...expected].sort(), `${label} keys`)
+}
+
+function assertArtifactReference(value, label) {
+  assertExactKeys(value, ['path', 'sha256'], label)
+  assert.equal(path.isAbsolute(value.path), true, `${label} path`)
+  assert.match(value.sha256, /^[0-9a-f]{64}$/, `${label} sha256`)
+}
+
+function assertCandidateReference(value) {
+  assertExactKeys(value, ['path', 'sha256', 'bytes'], 'candidate')
+  assert.equal(path.isAbsolute(value.path), true, 'candidate path')
+  assert.match(value.sha256, /^[0-9a-f]{64}$/, 'candidate sha256')
+  assert.equal(Number.isSafeInteger(value.bytes) && value.bytes > 0, true, 'candidate bytes')
+}
+
+function assertL1ResultSchema(result) {
+  assertExactKeys(result, [
+    'version', 'type', 'status', 'sourceCommit', 'targetTriple', 'candidate',
+    'reviewedManifest', 'buildReceipt', 'suite', 'cases',
+  ], 'L1 E2E result')
+  assert.equal(result.version, 1)
+  assert.equal(result.type, L1_E2E_RESULT_TYPE)
+  assert.equal(result.status, 'PASS')
+  assert.match(result.sourceCommit, /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+  assert.match(result.targetTriple, /^[A-Za-z0-9_]+(?:-[A-Za-z0-9_.]+){2,}$/)
+  assertCandidateReference(result.candidate)
+  assertArtifactReference(result.reviewedManifest, 'reviewed manifest')
+  assertArtifactReference(result.buildReceipt, 'build receipt')
+  assert.deepEqual(result.suite, { total: 4, passed: 4, failed: 0, skipped: 0 })
+  assert.deepEqual(result.cases.map((entry) => entry.id), L1_PRODUCTION_CASE_IDS)
+  for (const entry of result.cases) {
+    assertExactKeys(entry, ['id', 'status'], `L1 E2E case ${entry.id}`)
+    assert.equal(entry.status, 'PASS')
+  }
+}
+
+test('production acceptance harness source contract', () => {
+  assert.deepEqual(L1_PRODUCTION_CASE_IDS, [
+    'missing-manifest-zero-mutation',
+    'activate-and-retain-two-restarts',
+    'off-sidecar-zero-mutation',
+    'profile-mismatch-zero-mutation',
+  ])
+  assert.deepEqual(Object.keys(requiredAcceptanceInputs), [
+    'MYTHPEN_L1_PRODUCTION_CANDIDATE',
+    'MYTHPEN_L1_REVIEWED_MANIFEST',
+    'MYTHPEN_L1_BUILD_RECEIPT',
+    'MYTHPEN_L1_E2E_RESULT',
+  ])
+  assert.equal(L1_E2E_RESULT_TYPE, 'mythpen.windows-l1-production-e2e-result.v1')
+  assert.equal(typeof assertL1ResultSchema, 'function')
+})
+
+test('L1 production E2E partial acceptance configuration fails closed', {
+  skip: configuredAcceptanceInputs === 0 || acceptanceInputsComplete
+    ? 'configuration is complete or absent'
+    : false,
+}, () => {
+  assert.fail('L1_PRODUCTION_E2E_INPUTS_INCOMPLETE')
+})
+
+after(() => {
+  if (!acceptanceInputsComplete) return
+  assert.equal(path.isAbsolute(buildReceiptPath), true, 'Build receipt path must be absolute')
+  assert.equal(path.isAbsolute(e2eResultPath), true, 'E2E result path must be absolute')
+  assert.equal(
+    fs.existsSync(e2eResultPath),
+    true,
+    'Canonical publisher did not create the required L1 E2E result',
+  )
+})
 
 function runBun(args, options = {}) {
   const result = spawnSync('bun', args, {
@@ -92,6 +184,10 @@ function compileUnauthorizedProductionSidecar(executable, sourceCommit) {
     `__MYTHPEN_TARGET_TRIPLE__=${JSON.stringify(targetTriple)}`,
     '--define',
     '__MYTHPEN_NATIVE_ACTIVATION_MODE__="production"',
+    '--define',
+    '__MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__=true',
+    '--define',
+    '__MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__=true',
     '--outfile',
     executable,
   ])
@@ -164,6 +260,9 @@ async function startSidecar(executable, dataRoot, expectedMode) {
     assert.equal(ready.nativeActivationMode, expectedMode)
     assert.equal(ready.sourceCommit, sourceCommit)
     assert.equal(ready.targetTriple, targetTriple)
+    const expectedCapability = expectedMode === 'production'
+    assert.equal(ready.manuscriptLifecycleLease, expectedCapability)
+    assert.equal(ready.manuscriptChangeNotification, expectedCapability)
     const buildInfoPromise = waitForFrame(child, 'build.info')
     child.stdin.write(`${JSON.stringify({
       channel: controlChannel,
@@ -174,6 +273,8 @@ async function startSidecar(executable, dataRoot, expectedMode) {
     assert.equal(buildInfo.nativeActivationMode, expectedMode)
     assert.equal(buildInfo.sourceCommit, sourceCommit)
     assert.equal(buildInfo.targetTriple, targetTriple)
+    assert.equal(buildInfo.manuscriptLifecycleLease, expectedCapability)
+    assert.equal(buildInfo.manuscriptChangeNotification, expectedCapability)
     return { child, nonce, port: ready.port, profile, stderr: () => stderr }
   } catch (error) {
     if (child.exitCode === null) child.kill()

@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  buildProductionSidecar,
+  createProductionBuildReceipt,
   compileProductionSidecarArguments,
   compileFixtureOnlySidecarArguments,
   compileSidecarArguments,
@@ -13,7 +15,11 @@ import {
   compileWindowsNativeRollbackProbeArguments,
   compileWindowsNativeDirectoryProbeArguments,
   parseRustcHostTriple,
+  parseProductionBuildArguments,
+  prepareProductionBuildDestinations,
+  productionFilePublisherArguments,
   productionSidecarOutputPath,
+  publishProductionBuild,
   sidecarOutputPaths,
   validateBunVersion,
   validateSourceCommit,
@@ -69,6 +75,320 @@ test('production build uses only the production entry and deterministic reviewed
     () => compileProductionSidecarArguments('server/index.js', output, sourceCommit, triple, reviewedManifest()),
     /only entry/i,
   )
+})
+
+test('production build destinations are external create-new siblings with a run-owned staging path', () => {
+  const destination = prepareProductionBuildDestinations({
+    repositoryRoot: 'C:\\repo',
+    l1ManifestPath: 'D:\\evidence\\l1-manifest.json',
+    l2ManifestPath: 'D:\\evidence\\l2-manifest.json',
+    productionOutputPath: 'D:\\evidence\\candidate.exe',
+    productionBuildReceiptPath: 'D:\\evidence\\build-receipt.json',
+  }, {
+    exists: () => false,
+    randomId: () => '0123456789abcdef0123456789abcdef',
+  })
+
+  assert.equal(destination.outputPath, 'D:\\evidence\\candidate.exe')
+  assert.equal(destination.receiptPath, 'D:\\evidence\\build-receipt.json')
+  assert.equal(
+    destination.stagingPath,
+    'D:\\evidence\\.candidate.exe.0123456789abcdef0123456789abcdef.staging',
+  )
+  assert.deepEqual(productionFilePublisherArguments('C:\\repo', destination, 'a'.repeat(64)), [
+    'C:\\repo\\scripts\\production-evidence-publisher.js',
+    'publish-file',
+    '--staging',
+    destination.stagingPath,
+    '--output',
+    destination.outputPath,
+    '--sha256',
+    'a'.repeat(64),
+  ])
+
+  assert.throws(() => prepareProductionBuildDestinations({
+    repositoryRoot: 'C:\\repo',
+    l1ManifestPath: 'D:\\evidence\\l1-manifest.json',
+    l2ManifestPath: 'D:\\evidence\\l2-manifest.json',
+    productionOutputPath: 'C:\\repo\\src-tauri\\target\\production-sidecars\\candidate.exe',
+    productionBuildReceiptPath: 'D:\\evidence\\build-receipt.json',
+  }, { exists: () => false }), /external|same directory/i)
+  assert.throws(() => prepareProductionBuildDestinations({
+    repositoryRoot: 'C:\\repo',
+    l1ManifestPath: 'D:\\evidence\\l1-manifest.json',
+    l2ManifestPath: 'D:\\evidence\\l2-manifest.json',
+    productionOutputPath: 'D:\\evidence\\candidate.exe',
+    productionBuildReceiptPath: 'D:\\other\\build-receipt.json',
+  }, { exists: () => false }), /same directory/i)
+  assert.throws(() => prepareProductionBuildDestinations({
+    repositoryRoot: 'C:\\repo',
+    l1ManifestPath: 'D:\\evidence\\l1-manifest.json',
+    l2ManifestPath: 'D:\\evidence\\l2-manifest.json',
+    productionOutputPath: 'D:\\evidence\\candidate.exe',
+    productionBuildReceiptPath: 'D:\\evidence\\build-receipt.json',
+  }, { exists: (filePath) => filePath.endsWith('candidate.exe') }), /already exists/i)
+  assert.throws(() => prepareProductionBuildDestinations({
+    repositoryRoot: 'C:\\repo',
+    l1ManifestPath: 'D:\\evidence\\l1-manifest.json',
+    l2ManifestPath: 'D:\\evidence\\candidate.exe',
+    productionOutputPath: 'D:\\evidence\\candidate.exe',
+    productionBuildReceiptPath: 'D:\\evidence\\build-receipt.json',
+  }, { exists: () => false }), /distinct/i)
+  assert.throws(() => prepareProductionBuildDestinations({
+    repositoryRoot: 'C:\\repo',
+    l1ManifestPath: 'C:\\repo\\l1-manifest.json',
+    l2ManifestPath: 'D:\\evidence\\l2-manifest.json',
+    productionOutputPath: 'D:\\evidence\\candidate.exe',
+    productionBuildReceiptPath: 'D:\\evidence\\build-receipt.json',
+  }, { exists: () => false }), /external|same directory/i)
+})
+
+test('production build receipt is derived only from bound manifests publication and compiled smoke', () => {
+  const sourceCommit = 'a'.repeat(40)
+  const targetTriple = 'x86_64-pc-windows-msvc'
+  const receipt = createProductionBuildReceipt({
+    sourceCommit,
+    targetTriple,
+    l1Manifest: { path: 'D:\\evidence\\l1-manifest.json', sha256: 'b'.repeat(64) },
+    l2Manifest: { path: 'D:\\evidence\\l2-manifest.json', sha256: 'c'.repeat(64) },
+    candidatePath: 'D:\\evidence\\candidate.exe',
+    publication: {
+      bytes: 456,
+      identity: { dev: '7', ino: '11' },
+      parentFlush: 'complete',
+      protocol: 'same-directory-createhardlinkw-v1',
+      sha256: 'd'.repeat(64),
+      stagingCleanup: 'complete',
+    },
+    smokeBuildInfo: {
+      nativeActivationMode: 'production',
+      sourceCommit,
+      targetTriple,
+      manuscriptLifecycleLease: true,
+      manuscriptChangeNotification: true,
+    },
+  })
+
+  assert.deepEqual(receipt, {
+    version: 1,
+    type: 'mythpen.windows-production-build-receipt.v1',
+    sourceCommit,
+    targetTriple,
+    l1Manifest: { path: 'D:\\evidence\\l1-manifest.json', sha256: 'b'.repeat(64) },
+    l2Manifest: { path: 'D:\\evidence\\l2-manifest.json', sha256: 'c'.repeat(64) },
+    candidate: {
+      path: 'D:\\evidence\\candidate.exe',
+      bytes: 456,
+      identity: { dev: '7', ino: '11' },
+      sha256: 'd'.repeat(64),
+    },
+    compiledSmoke: { nativeActivationMode: 'production', sourceCommit, targetTriple },
+    protocol: 'same-directory-createhardlinkw-v1',
+    stagingCleanup: 'complete',
+    parentFlush: 'complete',
+  })
+  assert.throws(() => createProductionBuildReceipt({
+    sourceCommit,
+    targetTriple,
+    l1Manifest: receipt.l1Manifest,
+    l2Manifest: receipt.l2Manifest,
+    candidatePath: receipt.candidate.path,
+    publication: {
+      bytes: receipt.candidate.bytes,
+      identity: receipt.candidate.identity,
+      parentFlush: receipt.parentFlush,
+      protocol: receipt.protocol,
+      sha256: receipt.candidate.sha256,
+      stagingCleanup: receipt.stagingCleanup,
+    },
+    smokeBuildInfo: { ...receipt.compiledSmoke, sourceCommit: 'e'.repeat(40) },
+  }), /smoke.*binding/i)
+})
+
+test('production build CLI requires both manifests external output and receipt exactly once', () => {
+  const args = [
+    '--production-reviewed-manifest', 'D:\\evidence\\l1.json',
+    '--l2-reviewed-manifest', 'D:\\evidence\\l2.json',
+    '--production-output', 'D:\\evidence\\candidate.exe',
+    '--production-build-receipt', 'D:\\evidence\\receipt.json',
+  ]
+  assert.deepEqual(parseProductionBuildArguments(args), {
+    l1ManifestPath: 'D:\\evidence\\l1.json',
+    l2ManifestPath: 'D:\\evidence\\l2.json',
+    productionOutputPath: 'D:\\evidence\\candidate.exe',
+    productionBuildReceiptPath: 'D:\\evidence\\receipt.json',
+  })
+  assert.throws(() => parseProductionBuildArguments(args.slice(0, -2)), /arguments/i)
+  assert.throws(() => parseProductionBuildArguments([
+    ...args,
+    '--production-output', 'D:\\evidence\\replacement.exe',
+  ]), /arguments/i)
+})
+
+test('production build publication is ordered and receipt failure preserves the published candidate', () => {
+  const sourceCommit = 'a'.repeat(40)
+  const targetTriple = 'x86_64-pc-windows-msvc'
+  const destination = {
+    l1ManifestPath: 'D:\\evidence\\l1.json',
+    l2ManifestPath: 'D:\\evidence\\l2.json',
+    outputPath: 'D:\\evidence\\candidate.exe',
+    receiptPath: 'D:\\evidence\\receipt.json',
+    stagingPath: 'D:\\evidence\\.candidate.exe.0123456789abcdef0123456789abcdef.staging',
+  }
+  const calls = []
+  const input = {
+    sourceCommit,
+    targetTriple,
+    destination,
+    l1Manifest: { path: destination.l1ManifestPath, sha256: 'b'.repeat(64) },
+    l2Manifest: { path: destination.l2ManifestPath, sha256: 'c'.repeat(64) },
+  }
+  const dependencies = {
+    compile(stagingPath) { calls.push(['compile', stagingPath]) },
+    smoke(stagingPath) {
+      calls.push(['smoke', stagingPath])
+      return {
+        nativeActivationMode: 'production', sourceCommit, targetTriple,
+        manuscriptLifecycleLease: true, manuscriptChangeNotification: true,
+      }
+    },
+    hash(stagingPath) { calls.push(['hash', stagingPath]); return 'd'.repeat(64) },
+    publishFile(request) {
+      calls.push(['publish-file', request])
+      return {
+        bytes: 456,
+        identity: { dev: '7', ino: '11' },
+        parentFlush: 'complete',
+        protocol: 'same-directory-createhardlinkw-v1',
+        sha256: request.sha256,
+        stagingCleanup: 'complete',
+      }
+    },
+    publishReceipt(request) { calls.push(['publish-receipt', request]) },
+    cleanupOwnedStaging(stagingPath) { calls.push(['cleanup-staging', stagingPath]) },
+  }
+
+  const result = publishProductionBuild(input, dependencies)
+  assert.deepEqual(calls.map(([kind]) => kind), [
+    'compile', 'smoke', 'hash', 'publish-file', 'publish-receipt',
+  ])
+  assert.equal(result.candidate.path, destination.outputPath)
+  assert.equal(result.receiptPath, destination.receiptPath)
+  assert.equal(calls.some(([kind]) => kind === 'cleanup-staging'), false)
+
+  const failedCalls = []
+  assert.throws(() => publishProductionBuild(input, {
+    ...dependencies,
+    compile() { failedCalls.push('compile') },
+    smoke: dependencies.smoke,
+    hash: dependencies.hash,
+    publishFile(request) { failedCalls.push('publish-file'); return dependencies.publishFile(request) },
+    publishReceipt() { failedCalls.push('publish-receipt'); throw new Error('receipt fail') },
+    cleanupOwnedStaging() { failedCalls.push('cleanup-staging') },
+  }), /receipt fail/)
+  assert.deepEqual(failedCalls, ['compile', 'publish-file', 'publish-receipt'])
+})
+
+test('production build publication cleans its owned staging only before candidate publication', () => {
+  const destination = {
+    l1ManifestPath: 'D:\\evidence\\l1.json',
+    l2ManifestPath: 'D:\\evidence\\l2.json',
+    outputPath: 'D:\\evidence\\candidate.exe',
+    receiptPath: 'D:\\evidence\\receipt.json',
+    stagingPath: 'D:\\evidence\\.candidate.exe.0123456789abcdef0123456789abcdef.staging',
+  }
+  const cleaned = []
+  assert.throws(() => publishProductionBuild({
+    sourceCommit: 'a'.repeat(40),
+    targetTriple: 'x86_64-pc-windows-msvc',
+    destination,
+    l1Manifest: { path: destination.l1ManifestPath, sha256: 'b'.repeat(64) },
+    l2Manifest: { path: destination.l2ManifestPath, sha256: 'c'.repeat(64) },
+  }, {
+    compile() {},
+    smoke() { throw new Error('smoke fail') },
+    hash() { throw new Error('unexpected hash') },
+    publishFile() { throw new Error('unexpected publish') },
+    publishReceipt() { throw new Error('unexpected receipt') },
+    cleanupOwnedStaging(stagingPath) { cleaned.push(stagingPath) },
+  }), /smoke fail/)
+  assert.deepEqual(cleaned, [destination.stagingPath])
+})
+
+test('production build entrypoint compiles only external staging and publishes one bound receipt', () => {
+  const sourceCommit = 'a'.repeat(40)
+  const targetTriple = 'x86_64-pc-windows-msvc'
+  const l1ManifestPath = 'D:\\evidence\\l1.json'
+  const l2ManifestPath = 'D:\\evidence\\l2.json'
+  const productionOutputPath = 'D:\\evidence\\candidate.exe'
+  const productionBuildReceiptPath = 'D:\\evidence\\receipt.json'
+  const l1Manifest = reviewedManifest()
+  const l2Manifest = { sourceCommit, targetTriple }
+  const calls = []
+  const result = buildProductionSidecar('C:\\repo', {
+    l1ManifestPath,
+    l2ManifestPath,
+    productionOutputPath,
+    productionBuildReceiptPath,
+  }, {
+    platform: 'win32',
+    bunExecutable: 'C:\\tools\\bun.exe',
+    exists: () => false,
+    randomId: () => '0123456789abcdef0123456789abcdef',
+    run(command, args) {
+      calls.push(['run', command, args])
+      if (command === 'rustc') return `rustc 1.0\nhost: ${targetTriple}\n`
+      if (command === 'git') return `${sourceCommit}\n`
+      if (command === 'C:\\tools\\bun.exe' && args[0] === '--version') return '1.3.14\n'
+      return ''
+    },
+    readJson(filePath) {
+      if (filePath === l1ManifestPath) return l1Manifest
+      if (filePath === l2ManifestPath) return l2Manifest
+      throw new Error(`unexpected JSON path: ${filePath}`)
+    },
+    validateL2Manifest(value) { assert.equal(value, l2Manifest) },
+    hashFile(filePath) {
+      if (filePath === l1ManifestPath) return 'b'.repeat(64)
+      if (filePath === l2ManifestPath) return 'c'.repeat(64)
+      assert.match(filePath, /\.candidate\.exe\.[0-9a-f]{32}\.staging$/)
+      return 'd'.repeat(64)
+    },
+    smoke(stagingPath) {
+      calls.push(['smoke', stagingPath])
+      return {
+        nativeActivationMode: 'production', sourceCommit, targetTriple,
+        manuscriptLifecycleLease: true, manuscriptChangeNotification: true,
+      }
+    },
+    publishFile(request) {
+      calls.push(['publish-file', request])
+      return {
+        bytes: 456,
+        identity: { dev: '7', ino: '11' },
+        parentFlush: 'complete',
+        protocol: 'same-directory-createhardlinkw-v1',
+        sha256: request.sha256,
+        stagingCleanup: 'complete',
+      }
+    },
+    publishReceipt(request) { calls.push(['publish-receipt', request]) },
+    cleanupOwnedStaging(stagingPath) { calls.push(['cleanup-staging', stagingPath]) },
+  })
+
+  const compileCall = calls.find(([kind, command, args]) => (
+    kind === 'run' && command === 'C:\\tools\\bun.exe' && args[0] === 'build'
+  ))
+  assert.ok(compileCall)
+  const compileOutput = compileCall[2][compileCall[2].indexOf('--outfile') + 1]
+  assert.equal(compileOutput, 'D:\\evidence\\.candidate.exe.0123456789abcdef0123456789abcdef.staging')
+  assert.doesNotMatch(compileOutput, /src-tauri[\\/]target[\\/]production-sidecars/)
+  assert.equal(result.server, productionOutputPath)
+  assert.equal(result.buildReceipt, productionBuildReceiptPath)
+  const publishedReceipt = calls.find(([kind]) => kind === 'publish-receipt')[1].value
+  assert.equal(publishedReceipt.l1Manifest.sha256, 'b'.repeat(64))
+  assert.equal(publishedReceipt.l2Manifest.sha256, 'c'.repeat(64))
+  assert.equal(publishedReceipt.candidate.sha256, 'd'.repeat(64))
 })
 
 test('manuscript capability build-info source contract', () => {

@@ -1,11 +1,30 @@
 #!/usr/bin/env node
 import { createHash, randomBytes } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import {
+  WINDOWS_PRODUCTION_BUILD_RECEIPT_TYPE,
+  canonicalJsonBytes,
+  validateL2ReviewedManifest,
+} from './production-evidence-publisher.js'
 
 const REQUIRED_BUN_VERSION = '1.3.14'
 const require = createRequire(import.meta.url)
@@ -166,6 +185,301 @@ export function productionSidecarOutputPath(repositoryRoot, triple) {
     'production-sidecars',
     `mythpen-server-production-${triple}.exe`,
   )
+}
+
+function exactAbsoluteBuildPath(value, label) {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.includes('\0')
+    || !isAbsolute(value)
+    || resolve(value) !== value
+  ) throw new Error(`${label} must be one normalized absolute path.`)
+  return value
+}
+
+function isWithin(root, candidate) {
+  const relation = relative(root, candidate)
+  return relation === '' || (!relation.startsWith(`..${sep}`) && relation !== '..' && !isAbsolute(relation))
+}
+
+export function prepareProductionBuildDestinations({
+  repositoryRoot,
+  l1ManifestPath,
+  l2ManifestPath,
+  productionOutputPath,
+  productionBuildReceiptPath,
+}, overrides = {}) {
+  const root = exactAbsoluteBuildPath(repositoryRoot, 'repositoryRoot')
+  const outputPath = exactAbsoluteBuildPath(productionOutputPath, 'productionOutputPath')
+  const receiptPath = exactAbsoluteBuildPath(
+    productionBuildReceiptPath,
+    'productionBuildReceiptPath',
+  )
+  const l1Path = exactAbsoluteBuildPath(l1ManifestPath, 'l1ManifestPath')
+  const l2Path = exactAbsoluteBuildPath(l2ManifestPath, 'l2ManifestPath')
+  const parent = dirname(outputPath)
+  const evidencePaths = [outputPath, receiptPath, l1Path, l2Path]
+  if (
+    new Set(evidencePaths).size !== evidencePaths.length
+    || [receiptPath, l1Path, l2Path].some((filePath) => dirname(filePath) !== parent)
+  ) throw new Error('Production evidence paths must be distinct files in the same directory.')
+  if (evidencePaths.some((filePath) => isWithin(root, filePath))) {
+    throw new Error('Production build evidence must be external to the repository.')
+  }
+  const randomId = (overrides.randomId ?? (() => randomBytes(16).toString('hex')))()
+  if (!/^[0-9a-f]{32}$/.test(randomId)) throw new Error('Production build run identity is invalid.')
+  const stagingPath = join(parent, `.${basename(outputPath)}.${randomId}.staging`)
+  const exists = overrides.exists ?? existsSync
+  for (const finalPath of [outputPath, receiptPath, stagingPath]) {
+    if (exists(finalPath)) throw new Error(`Production build destination already exists: ${finalPath}`)
+  }
+  return Object.freeze({
+    l1ManifestPath: l1Path,
+    l2ManifestPath: l2Path,
+    outputPath,
+    receiptPath,
+    stagingPath,
+  })
+}
+
+export function productionFilePublisherArguments(repositoryRoot, destination, sha256) {
+  const root = exactAbsoluteBuildPath(repositoryRoot, 'repositoryRoot')
+  if (!/^[0-9a-f]{64}$/.test(sha256 || '')) throw new Error('Candidate SHA-256 is invalid.')
+  return [
+    join(root, 'scripts', 'production-evidence-publisher.js'),
+    'publish-file',
+    '--staging',
+    exactAbsoluteBuildPath(destination?.stagingPath, 'stagingPath'),
+    '--output',
+    exactAbsoluteBuildPath(destination?.outputPath, 'outputPath'),
+    '--sha256',
+    sha256,
+  ]
+}
+
+export function parseProductionBuildArguments(args) {
+  if (!Array.isArray(args) || args.length !== 8) {
+    throw new Error('Invalid production build arguments.')
+  }
+  const allowed = new Set([
+    '--production-reviewed-manifest',
+    '--l2-reviewed-manifest',
+    '--production-output',
+    '--production-build-receipt',
+  ])
+  const values = {}
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index]
+    const value = args[index + 1]
+    if (!allowed.has(flag) || Object.hasOwn(values, flag) || typeof value !== 'string' || value.length === 0) {
+      throw new Error('Invalid production build arguments.')
+    }
+    values[flag] = value
+  }
+  if (Object.keys(values).length !== allowed.size) throw new Error('Invalid production build arguments.')
+  return {
+    l1ManifestPath: values['--production-reviewed-manifest'],
+    l2ManifestPath: values['--l2-reviewed-manifest'],
+    productionOutputPath: values['--production-output'],
+    productionBuildReceiptPath: values['--production-build-receipt'],
+  }
+}
+
+function exactArtifactReference(value, label) {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'path,sha256'
+    || !/^[0-9a-f]{64}$/.test(value.sha256 || '')
+  ) throw new Error(`${label} reference is inexact.`)
+  return Object.freeze({
+    path: exactAbsoluteBuildPath(value.path, `${label} path`),
+    sha256: value.sha256,
+  })
+}
+
+export function createProductionBuildReceipt({
+  sourceCommit,
+  targetTriple,
+  l1Manifest,
+  l2Manifest,
+  candidatePath,
+  publication,
+  smokeBuildInfo,
+}) {
+  const source = validateSourceCommit(sourceCommit)
+  const triple = validateTargetTriple(targetTriple)
+  if (
+    smokeBuildInfo?.nativeActivationMode !== 'production'
+    || smokeBuildInfo.sourceCommit !== source
+    || smokeBuildInfo.targetTriple !== triple
+    || smokeBuildInfo.manuscriptLifecycleLease !== true
+    || smokeBuildInfo.manuscriptChangeNotification !== true
+  ) throw new Error('Compiled smoke binding is inexact.')
+  if (
+    !Number.isSafeInteger(publication?.bytes)
+    || publication.bytes <= 0
+    || !/^[0-9a-f]{64}$/.test(publication.sha256 || '')
+    || publication?.identity === null
+    || typeof publication?.identity !== 'object'
+    || Array.isArray(publication.identity)
+    || Object.keys(publication.identity).sort().join(',') !== 'dev,ino'
+    || typeof publication.identity.dev !== 'string'
+    || typeof publication.identity.ino !== 'string'
+    || publication.protocol !== 'same-directory-createhardlinkw-v1'
+    || publication.stagingCleanup !== 'complete'
+    || publication.parentFlush !== 'complete'
+  ) throw new Error('Candidate publication receipt is inexact.')
+  return Object.freeze({
+    version: 1,
+    type: WINDOWS_PRODUCTION_BUILD_RECEIPT_TYPE,
+    sourceCommit: source,
+    targetTriple: triple,
+    l1Manifest: exactArtifactReference(l1Manifest, 'L1 manifest'),
+    l2Manifest: exactArtifactReference(l2Manifest, 'L2 manifest'),
+    candidate: Object.freeze({
+      path: exactAbsoluteBuildPath(candidatePath, 'candidatePath'),
+      bytes: publication.bytes,
+      identity: Object.freeze({ ...publication.identity }),
+      sha256: publication.sha256,
+    }),
+    compiledSmoke: Object.freeze({
+      nativeActivationMode: 'production',
+      sourceCommit: source,
+      targetTriple: triple,
+    }),
+    protocol: publication.protocol,
+    stagingCleanup: publication.stagingCleanup,
+    parentFlush: publication.parentFlush,
+  })
+}
+
+export function publishProductionBuild({
+  sourceCommit,
+  targetTriple,
+  destination,
+  l1Manifest,
+  l2Manifest,
+}, dependencies) {
+  for (const operation of [
+    'compile', 'smoke', 'hash', 'publishFile', 'publishReceipt', 'cleanupOwnedStaging',
+  ]) {
+    if (typeof dependencies?.[operation] !== 'function') {
+      throw new Error(`Production build dependency is missing: ${operation}`)
+    }
+  }
+  let candidatePublished = false
+  try {
+    dependencies.compile(destination.stagingPath)
+    const smokeBuildInfo = dependencies.smoke(destination.stagingPath)
+    const candidateSha256 = dependencies.hash(destination.stagingPath)
+    let publication
+    try {
+      publication = dependencies.publishFile({
+        stagingPath: destination.stagingPath,
+        outputPath: destination.outputPath,
+        sha256: candidateSha256,
+      })
+      candidatePublished = true
+    } catch (error) {
+      candidatePublished = error?.published === true
+      throw error
+    }
+    const receipt = createProductionBuildReceipt({
+      sourceCommit,
+      targetTriple,
+      l1Manifest,
+      l2Manifest,
+      candidatePath: destination.outputPath,
+      publication,
+      smokeBuildInfo,
+    })
+    dependencies.publishReceipt({ outputPath: destination.receiptPath, value: receipt })
+    return Object.freeze({ ...receipt, receiptPath: destination.receiptPath })
+  } catch (error) {
+    if (!candidatePublished) {
+      try {
+        dependencies.cleanupOwnedStaging(destination.stagingPath)
+      } catch (cleanupError) {
+        error.stagingCleanupError = cleanupError
+      }
+    }
+    throw error
+  }
+}
+
+function hashFileContents(filePath) {
+  const hash = createHash('sha256')
+  const handle = openSync(filePath, 'r')
+  const buffer = Buffer.allocUnsafe(64 * 1024)
+  try {
+    for (;;) {
+      const count = readSync(handle, buffer, 0, buffer.length, null)
+      if (count === 0) break
+      hash.update(buffer.subarray(0, count))
+    }
+  } finally {
+    closeSync(handle)
+  }
+  return hash.digest('hex')
+}
+
+function inspectPublishedCandidate(filePath) {
+  const stats = lstatSync(filePath, { bigint: true })
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw new Error('Published production candidate is not a plain file.')
+  }
+  return {
+    bytes: Number(stats.size),
+    identity: { dev: String(stats.dev), ino: String(stats.ino) },
+    links: Number(stats.nlink),
+    sha256: hashFileContents(filePath),
+  }
+}
+
+function compiledSmokeBuildInfo(smokeResult) {
+  const buildInfo = smokeResult?.frames?.find((frame) => frame.type === 'build.info')
+  if (!buildInfo) throw new Error('Production compiled smoke did not return build info.')
+  return buildInfo
+}
+
+function publishReceiptWithPublisher({
+  bun,
+  repositoryRoot,
+  outputPath,
+  value,
+  runCommand,
+}) {
+  const payloadPath = join(
+    dirname(outputPath),
+    `.${basename(outputPath)}.${randomBytes(16).toString('hex')}.payload`,
+  )
+  writeFileSync(payloadPath, canonicalJsonBytes(value), { flag: 'wx', mode: 0o600 })
+  let primaryError = null
+  try {
+    runCommand(bun, [
+      join(repositoryRoot, 'scripts', 'production-evidence-publisher.js'),
+      'publish-json',
+      '--profile',
+      'production-build-receipt',
+      '--input',
+      payloadPath,
+      '--output',
+      outputPath,
+    ], { cwd: repositoryRoot, label: 'Production build receipt publication' })
+  } catch (error) {
+    primaryError = error
+    throw error
+  } finally {
+    try {
+      if (existsSync(payloadPath)) unlinkSync(payloadPath)
+    } catch (cleanupError) {
+      if (!primaryError) throw cleanupError
+      primaryError.payloadCleanupError = cleanupError
+    }
+  }
 }
 
 export function windowsNativeRollbackProbeOutputPath(repositoryRoot, triple) {
@@ -414,54 +728,129 @@ export function buildFixtureOnlySidecar(
 
 export function buildProductionSidecar(
   repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..'),
-  reviewedManifestPath,
+  options,
+  overrides = {},
 ) {
-  if (process.platform !== 'win32') throw new Error('Production native sidecar requires Windows.')
-  if (typeof reviewedManifestPath !== 'string' || reviewedManifestPath.length === 0) {
-    throw new Error('An explicit external reviewed manifest path is required.')
-  }
-  const bun = prepareBunExecutable(resolveBunExecutable(), repositoryRoot)
-  const triple = validateTargetTriple(parseRustcHostTriple(run('rustc', ['-vV'], {
+  const platform = overrides.platform ?? process.platform
+  if (platform !== 'win32') throw new Error('Production native sidecar requires Windows.')
+  const destination = prepareProductionBuildDestinations({ repositoryRoot, ...options }, overrides)
+  const runCommand = overrides.run ?? run
+  const bun = overrides.bunExecutable
+    ?? prepareBunExecutable(resolveBunExecutable(), repositoryRoot)
+  const triple = validateTargetTriple(parseRustcHostTriple(runCommand('rustc', ['-vV'], {
     cwd: repositoryRoot,
     capture: true,
     label: 'rustc',
   })))
-  const sourceCommit = validateSourceCommit(run('git', ['rev-parse', 'HEAD'], {
+  const sourceCommit = validateSourceCommit(runCommand('git', ['rev-parse', 'HEAD'], {
     cwd: repositoryRoot,
     capture: true,
     label: 'git',
   }))
-  validateBunVersion(run(bun, ['--version'], {
+  validateBunVersion(runCommand(bun, ['--version'], {
     cwd: repositoryRoot,
     capture: true,
     label: 'Bun',
   }))
-  let reviewedManifest
+  const readJson = overrides.readJson ?? ((filePath) => JSON.parse(readFileSync(filePath, 'utf8')))
+  let l1Manifest
+  let l2Manifest
   try {
-    reviewedManifest = JSON.parse(readFileSync(resolve(reviewedManifestPath), 'utf8'))
+    l1Manifest = readJson(destination.l1ManifestPath)
+    l2Manifest = readJson(destination.l2ManifestPath)
   } catch (error) {
-    throw new Error(`Unable to read the external reviewed manifest: ${error.message}`)
+    throw new Error(`Unable to read the external reviewed manifests: ${error.message}`)
   }
-  run(process.execPath, ['scripts/embed-wasm.mjs'], {
+  const compileArguments = compileProductionSidecarArguments(
+    'server/production-sidecar.js',
+    destination.stagingPath,
+    sourceCommit,
+    triple,
+    l1Manifest,
+  )
+  const validateL2Manifest = overrides.validateL2Manifest ?? validateL2ReviewedManifest
+  validateL2Manifest(l2Manifest)
+  if (l2Manifest?.sourceCommit !== sourceCommit || l2Manifest?.targetTriple !== triple) {
+    throw new Error('L2 reviewed manifest does not bind the production source and target.')
+  }
+  const hashFile = overrides.hashFile ?? hashFileContents
+  const l1ManifestReference = Object.freeze({
+    path: destination.l1ManifestPath,
+    sha256: hashFile(destination.l1ManifestPath),
+  })
+  const l2ManifestReference = Object.freeze({
+    path: destination.l2ManifestPath,
+    sha256: hashFile(destination.l2ManifestPath),
+  })
+  runCommand(process.execPath, ['scripts/embed-wasm.mjs'], {
     cwd: repositoryRoot,
     label: 'WASM embedding',
   })
-  const server = productionSidecarOutputPath(repositoryRoot, triple)
-  mkdirSync(dirname(server), { recursive: true })
-  run(bun, compileProductionSidecarArguments(
-    'server/production-sidecar.js',
-    server,
-    sourceCommit,
-    triple,
-    reviewedManifest,
-  ), { cwd: repositoryRoot, label: 'Bun compile (production native server)' })
-  smokeCompiledServer({
-    executable: server,
+  const smoke = overrides.smoke ?? ((stagingPath) => compiledSmokeBuildInfo(smokeCompiledServer({
+    executable: stagingPath,
     nativeActivationMode: 'production',
     sourceCommit,
     targetTriple: triple,
+  })))
+  const publication = publishProductionBuild({
+    sourceCommit,
+    targetTriple: triple,
+    destination,
+    l1Manifest: l1ManifestReference,
+    l2Manifest: l2ManifestReference,
+  }, {
+    compile() {
+      runCommand(bun, compileArguments, {
+        cwd: repositoryRoot,
+        label: 'Bun compile (production native server staging)',
+      })
+    },
+    smoke,
+    hash: hashFile,
+    publishFile: overrides.publishFile ?? ((request) => {
+      try {
+        runCommand(bun, productionFilePublisherArguments(
+          repositoryRoot,
+          { stagingPath: request.stagingPath, outputPath: request.outputPath },
+          request.sha256,
+        ), { cwd: repositoryRoot, label: 'Production candidate publication' })
+      } catch (error) {
+        if (existsSync(request.outputPath)) error.published = true
+        throw error
+      }
+      const facts = inspectPublishedCandidate(request.outputPath)
+      if (facts.links !== 1 || facts.sha256 !== request.sha256) {
+        const error = new Error('Published production candidate facts are inexact.')
+        error.published = true
+        throw error
+      }
+      return {
+        bytes: facts.bytes,
+        identity: facts.identity,
+        parentFlush: 'complete',
+        protocol: 'same-directory-createhardlinkw-v1',
+        sha256: facts.sha256,
+        stagingCleanup: 'complete',
+      }
+    }),
+    publishReceipt: overrides.publishReceipt ?? ((request) => publishReceiptWithPublisher({
+      bun,
+      repositoryRoot,
+      outputPath: request.outputPath,
+      value: request.value,
+      runCommand,
+    })),
+    cleanupOwnedStaging: overrides.cleanupOwnedStaging ?? ((stagingPath) => {
+      if (existsSync(stagingPath)) unlinkSync(stagingPath)
+    }),
   })
-  return Object.freeze({ server, sourceCommit, triple })
+  return Object.freeze({
+    server: destination.outputPath,
+    buildReceipt: destination.receiptPath,
+    candidate: publication.candidate,
+    sourceCommit,
+    triple,
+  })
 }
 
 export function buildWindowsNativeRollbackProbe(
@@ -507,15 +896,17 @@ export function buildWindowsNativeDirectoryProbe(
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : ''
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
-    if (process.argv[2] === '--production-reviewed-manifest' && process.argv.length === 4) {
+    if (process.argv.length > 2) {
       buildProductionSidecar(
         resolve(dirname(fileURLToPath(import.meta.url)), '..'),
-        process.argv[3],
+        parseProductionBuildArguments(process.argv.slice(2)),
       )
     } else if (process.argv.length === 2) {
       buildSidecars()
     } else {
-      throw new Error('Usage: build-sidecars.mjs [--production-reviewed-manifest <external-path>]')
+      throw new Error(
+        'Usage: build-sidecars.mjs [--production-reviewed-manifest <path> --l2-reviewed-manifest <path> --production-output <path> --production-build-receipt <path>]',
+      )
     }
   } catch (error) {
     console.error(`Sidecar build failed: ${error.message}`)

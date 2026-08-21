@@ -1,10 +1,19 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const test = require('node:test');
+const { after } = test;
 
 const { createCapacityAccumulator } = require('../manuscript/capacity');
 const { LIMITS } = require('../manuscript/contracts');
+const {
+  createPassedCase,
+  writeL2RawMatrixFromEnvironment,
+} = require('./fixtures/l2-raw-evidence');
+
+const repositoryRoot = path.resolve(__dirname, '..', '..');
+const passedCases = new Map();
 
 const L2_CAPACITY_CASE_IDS = Object.freeze([
   'chapter_identities_10000',
@@ -43,6 +52,21 @@ function assertLatched(accumulator, error) {
   const repeated = accumulator.snapshot();
   assert.equal(repeated.error, error);
   assert.deepEqual(repeated, terminal);
+}
+
+function recordPassedCase(id, evidence) {
+  assert.equal(passedCases.has(id), false, `duplicate capacity evidence case ${id}`);
+  passedCases.set(id, createPassedCase(id, evidence));
+}
+
+function capacityEvidence(accumulator, error) {
+  const snapshot = accumulator.snapshot();
+  return {
+    state: snapshot.state,
+    measurements: snapshot.measurements,
+    counters: snapshot.counters,
+    error: { code: error.code, details: error.details },
+  };
 }
 
 test('L2 capacity matrix freezes every normative dimension and its exact limit', () => {
@@ -92,6 +116,7 @@ for (const testCase of [
       allowed,
     );
     assertLatched(accumulator, error);
+    recordPassedCase(testCase.caseId, capacityEvidence(accumulator, error));
   });
 }
 
@@ -111,6 +136,7 @@ test('controlled_files_25000 stops before any later probe or content open', () =
     LIMITS.controlledFiles,
   );
   assertLatched(accumulator, error);
+  recordPassedCase('controlled_files_25000', capacityEvidence(accumulator, error));
 });
 
 test('chapter_directory_entries_20000 stops on the first extra enumeration result', () => {
@@ -126,6 +152,7 @@ test('chapter_directory_entries_20000 stops on the first extra enumeration resul
   );
   assert.equal(accumulator.snapshot().counters.directoryEntries, LIMITS.chapterDirectoryEntries + 1);
   assertLatched(accumulator, error);
+  recordPassedCase('chapter_directory_entries_20000', capacityEvidence(accumulator, error));
 });
 
 for (const testCase of [
@@ -150,6 +177,7 @@ for (const testCase of [
     assert.equal(overflow.snapshot().counters.contentOpens, 0);
     assert.equal(overflow.snapshot().counters.contentBytes, 0);
     assertLatched(overflow, error);
+    recordPassedCase(testCase.caseId, capacityEvidence(overflow, error));
   });
 }
 
@@ -169,6 +197,14 @@ test('controlled_bytes_1gib is measured arithmetically without allocating body b
     LIMITS.controlledBytes,
   );
   assertLatched(accumulator, error);
+  recordPassedCase('controlled_bytes_1gib', capacityEvidence(accumulator, error));
+});
+
+after(() => {
+  if (!String(process.env.MYTHPEN_L2_EVIDENCE_OUTPUT || '').trim()) return;
+  assert.deepEqual([...passedCases.keys()].sort(), [...L2_CAPACITY_CASE_IDS].sort());
+  const cases = L2_CAPACITY_CASE_IDS.map((id) => passedCases.get(id));
+  writeL2RawMatrixFromEnvironment({ cases, matrix: 'capacity', repositoryRoot });
 });
 
 module.exports = { L2_CAPACITY_CASE_IDS };
