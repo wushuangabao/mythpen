@@ -1,9 +1,16 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const test = require('node:test');
 
 const { LIMITS } = require('../manuscript/contracts');
+const { serializeCanonicalJson } = require('../manuscript/format');
+const {
+  SQLiteProjectionStore,
+  canonicalIgnoredLedgerDigest,
+  canonicalProjectionBasisDigest,
+} = require('../manuscript/projection-store');
 const storeModule = require('../manuscript/store');
 const { ManuscriptStore } = storeModule;
 const {
@@ -51,6 +58,97 @@ function validationOptions(fixture, overrides = {}) {
   };
 }
 
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function deepFreeze(value) {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const nested of Object.values(value)) deepFreeze(nested);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function stagedFact(templateFact, ino) {
+  return Object.freeze({
+    ref: templateFact.ref,
+    byteSize: templateFact.byteSize,
+    rawSha256: templateFact.rawSha256,
+    fileIdentity: Object.freeze({ dev: templateFact.parentIdentity.dev, ino: String(ino) }),
+    parentIdentity: templateFact.parentIdentity,
+  });
+}
+
+function currentProjectionFor(candidate) {
+  const chapters = candidate.chapters.map((chapter, index) => ({
+    id: index + 1,
+    uid: chapter.chapterUid,
+    volumeId: chapter.volumeUid === null ? null : 1,
+    num: 1,
+    isPresent: 1,
+    deletedAt: null,
+    chapterPosition: chapter.chapterPosition,
+    manuscriptPosition: chapter.manuscriptPosition,
+    bodyRawSha256: chapter.bodyRawSha256,
+    status: chapter.status,
+  }));
+  const material = {
+    domain: 'mythpen.manuscript.projection-basis',
+    version: 1,
+    sourceKind: 'schema12',
+    baseGeneration: 1,
+    volumes: [{
+      id: 1,
+      uid: VOLUME_UID,
+      sortOrder: 1,
+      isPresent: 1,
+      deletedAt: null,
+    }],
+    chapters,
+    sqliteSequence: [
+      { name: 'chapters', seq: chapters.length },
+      { name: 'volumes', seq: 1 },
+    ],
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest([]),
+    pendingProposals: [],
+    basisDigest: '0'.repeat(64),
+  };
+  material.basisDigest = canonicalProjectionBasisDigest(deepFreeze({
+    ...material,
+    chapters: material.chapters.map((chapter) => ({ ...chapter })),
+    pendingProposals: [],
+    sqliteSequence: material.sqliteSequence.map((row) => ({ ...row })),
+    volumes: material.volumes.map((volume) => ({ ...volume })),
+  }));
+  return deepFreeze({
+    projectUid: PROJECT_UID,
+    projectInstanceId: '77777777-7777-4777-8777-777777777777',
+    basis: material,
+  });
+}
+
+function reuseIdentityPlan(candidate) {
+  return deepFreeze([
+    ...candidate.chapters.map((chapter, index) => ({
+      assignmentKind: 'reuse_uid',
+      objectKind: 'chapter',
+      uid: chapter.chapterUid,
+      id: index + 1,
+      num: 1,
+    })),
+    ...candidate.volumes.map((volume, index) => ({
+      assignmentKind: 'reuse_uid',
+      objectKind: 'volume',
+      uid: volume.volumeUid,
+      id: index + 1,
+    })),
+  ].sort((left, right) => (
+    Buffer.compare(Buffer.from(left.objectKind), Buffer.from(right.objectKind))
+    || Buffer.compare(Buffer.from(left.uid), Buffer.from(right.uid))
+  )));
+}
+
 test('ManuscriptStore exposes only explicit read capabilities and has no filesystem fallback', () => {
   assert.equal(typeof ManuscriptStore, 'function');
   assert.equal(storeModule.createFileBoundaryCapability, undefined);
@@ -75,7 +173,264 @@ test('ManuscriptStore exposes only explicit read capabilities and has no filesys
     TypeError,
   );
   const store = createStore(fixture);
-  assert.equal(store.buildClosure, undefined);
+  assert.equal(typeof store.buildClosure, 'function');
+  assert.equal(typeof store.finalizeCandidate, 'function');
+});
+
+test('buildClosure rereads only the changed body and finalizeCandidate injects its staged identity', async () => {
+  const fixture = createManuscriptTreeFixture();
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+  const beforeCandidate = await store.buildProjectionCandidate(snapshot);
+  const readsBefore = fixture.controls.calls().contentReads;
+
+  const content = '替换后的正文';
+  const afterBytes = Buffer.from(content, 'utf8');
+  const buildResult = await store.buildClosure(snapshot, {
+    kind: 'chapter.replace_body',
+    bodyRef: fixture.refs.chapterBody,
+    content,
+  });
+
+  assert.equal(fixture.controls.calls().contentReads, readsBefore + 1);
+  assert.equal(Object.isFrozen(buildResult), true);
+  assert.equal(Object.isFrozen(buildResult.closure), true);
+  assert.equal(Object.isFrozen(buildResult.candidateTemplate), true);
+  assert.equal(buildResult.closure.length, 1);
+  assert.deepEqual(buildResult.closure[0].ref, fixture.refs.chapterBody);
+  assert.equal(buildResult.closure[0].before.bytes.toString('utf8'), '第一章正文');
+  assert.equal(buildResult.closure[0].before.rawSha256, beforeCandidate.chapters[0].bodyRawSha256);
+  assert.equal(buildResult.closure[0].after.bytes.equals(afterBytes), true);
+  assert.equal(buildResult.closure[0].after.rawSha256, sha256(afterBytes));
+
+  const templateFact = buildResult.candidateTemplate.controlledFiles.find(
+    (fact) => fact.role === 'chapter_body' && fact.resourceUid === CHAPTER_UID,
+  );
+  const templateChapter = buildResult.candidateTemplate.chapters.find(
+    (chapter) => chapter.chapterUid === CHAPTER_UID,
+  );
+  assert.equal(templateFact.fileIdentity, null);
+  assert.equal(templateChapter.bodyFileIdentity, null);
+  assert.equal(templateChapter.content, content);
+  assert.equal(templateChapter.bodyRawSha256, sha256(afterBytes));
+
+  const candidate = store.finalizeCandidate(buildResult, Object.freeze([
+    stagedFact(templateFact, 9001),
+  ]));
+  const finalFact = candidate.controlledFiles.find(
+    (fact) => fact.role === 'chapter_body' && fact.resourceUid === CHAPTER_UID,
+  );
+  const finalChapter = candidate.chapters.find((chapter) => chapter.chapterUid === CHAPTER_UID);
+  assert.deepEqual(finalFact.fileIdentity, { dev: templateFact.parentIdentity.dev, ino: '9001' });
+  assert.equal(finalChapter.bodyFileIdentity, finalFact.fileIdentity);
+  assert.equal(Object.isFrozen(candidate), true);
+  assert.equal(Object.isFrozen(finalFact.fileIdentity), true);
+
+  const currentProjection = currentProjectionFor(beforeCandidate);
+  assert.doesNotThrow(() => new SQLiteProjectionStore().buildTarget({
+    candidate,
+    currentProjection,
+    targetGeneration: 2,
+    projectedAt: '2026-08-18T00:00:00.000Z',
+    ignoredLedger: deepFreeze([]),
+    localIdentityPlan: reuseIdentityPlan(beforeCandidate),
+  }));
+});
+
+test('buildClosure compiles sidecar, combined, and volume metadata updates with canonical bytes', async () => {
+  const rows = [
+    {
+      name: 'sidecar',
+      mutation(fixture) {
+        return {
+          kind: 'chapter.patch_sidecar',
+          sidecarRef: fixture.refs.chapterSidecar,
+          patch: { title: '新章名', status: 'writing' },
+        };
+      },
+      expectedRoles: ['chapter_sidecar'],
+    },
+    {
+      name: 'body plus sidecar',
+      mutation(fixture) {
+        return {
+          kind: 'chapter.replace_body_and_sidecar',
+          bodyRef: fixture.refs.chapterBody,
+          sidecarRef: fixture.refs.chapterSidecar,
+          content: '组合正文',
+          patch: { summary: '组合摘要' },
+        };
+      },
+      expectedRoles: ['chapter_body', 'chapter_sidecar'],
+    },
+    {
+      name: 'volume metadata',
+      mutation(fixture) {
+        return {
+          kind: 'volume.patch_metadata',
+          volumeRef: fixture.refs.volume,
+          patch: { title: '第二卷名', summary: '第二卷摘要' },
+        };
+      },
+      expectedRoles: ['volume_index'],
+    },
+  ];
+
+  for (const row of rows) {
+    const fixture = createManuscriptTreeFixture();
+    const store = createStore(fixture);
+    const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+    const buildResult = await store.buildClosure(snapshot, row.mutation(fixture));
+    assert.deepEqual(buildResult.closure.map((member) => member.ref.role), row.expectedRoles, row.name);
+    assert.equal(
+      fixture.controls.calls().contentReads,
+      7 + row.expectedRoles.length,
+      row.name,
+    );
+    if (row.name === 'volume metadata') {
+      const expected = serializeCanonicalJson('volume_index', {
+        ...fixture.values.volume,
+        title: '第二卷名',
+        summary: '第二卷摘要',
+      });
+      assert.equal(buildResult.closure[0].after.bytes.equals(expected), true);
+      assert.deepEqual(
+        buildResult.candidateTemplate.volumes[0],
+        {
+          summary: '第二卷摘要',
+          title: '第二卷名',
+          volumePosition: 1,
+          volumeUid: VOLUME_UID,
+        },
+      );
+    }
+  }
+});
+
+test('buildClosure rejects copied or foreign snapshots, unsupported markdown, and exact-before drift', async () => {
+  const fixture = createManuscriptTreeFixture();
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+  const mutation = {
+    kind: 'chapter.replace_body',
+    bodyRef: fixture.refs.chapterBody,
+    content: '合法正文',
+  };
+  await assert.rejects(store.buildClosure({ ...snapshot }, mutation), TypeError);
+
+  const otherFixture = createManuscriptTreeFixture({
+    dataRoot: fixture.dataRoot.replace('mythpen-store-fixture', 'mythpen-store-foreign'),
+  });
+  const otherStore = createStore(otherFixture);
+  await assert.rejects(otherStore.buildClosure(snapshot, mutation), TypeError);
+
+  await assertCode(store.buildClosure(snapshot, {
+    ...mutation,
+    content: '- unsupported list',
+  }), 'UNSUPPORTED_MARKDOWN_FOR_BODY_WRITE');
+
+  fixture.controls.setBytes(fixture.refs.chapterBody, Buffer.from('原地改正文', 'utf8'));
+  await assertCode(store.buildClosure(snapshot, mutation), 'EXTERNAL_CHANGE_CONFLICT');
+});
+
+test('buildClosure rejects a body write from read-only Markdown before opening closure bytes', async () => {
+  const fixture = createManuscriptTreeFixture();
+  fixture.controls.setBytes(fixture.refs.chapterBody, Buffer.from('- existing list', 'utf8'));
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+  const readsBefore = fixture.controls.calls().contentReads;
+
+  await assertCode(store.buildClosure(snapshot, {
+    kind: 'chapter.replace_body',
+    bodyRef: fixture.refs.chapterBody,
+    content: '转换为可视正文',
+  }), 'UNSUPPORTED_MARKDOWN_FOR_BODY_WRITE');
+  assert.equal(fixture.controls.calls().contentReads, readsBefore);
+});
+
+test('buildClosure recomputes capacity from final controlled facts plus active ignored metadata', async () => {
+  const fixture = createManuscriptTreeFixture();
+  fixture.controls.setBytes(fixture.refs.chapterBody, Buffer.from('A'.repeat(100), 'utf8'));
+  const ignored = fixture.controls.addChapter(UNKNOWN_CHAPTER_UID, {
+    body: 'I'.repeat(80),
+  });
+  const ignoredLedger = deepFreeze({
+    entries: [{ kind: 'chapter', status: 'active', uid: UNKNOWN_CHAPTER_UID }],
+  });
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(
+    fixture.projectBinding,
+    validationOptions(fixture, { ignoredLedger }),
+  );
+
+  const result = await store.buildClosure(snapshot, {
+    kind: 'chapter.replace_body',
+    bodyRef: fixture.refs.chapterBody,
+    content: 'x',
+  });
+  const ignoredMembers = snapshot.ignoredMemberObservations
+    .flatMap((observation) => observation.members)
+    .filter((member) => member.present);
+  const allFinalSizes = [
+    ...result.candidateTemplate.controlledFiles.map((fact) => ({
+      byteSize: fact.byteSize,
+      role: fact.role,
+    })),
+    ...ignoredMembers,
+  ];
+  const measurements = result.candidateTemplate.capacitySnapshot.measurements;
+  assert.equal(measurements.markdownBytes, 80);
+  assert.equal(measurements.controlledFiles, allFinalSizes.length);
+  assert.equal(
+    measurements.controlledBytes,
+    allFinalSizes.reduce((sum, member) => sum + member.byteSize, 0),
+  );
+  assert.equal(result.candidateTemplate.controlledFiles.some(
+    (fact) => fact.ref === ignored.bodyRef || fact.ref === ignored.sidecarRef,
+  ), false);
+});
+
+test('buildClosure no-op stays read-free and finalizeCandidate rejects every inexact staged fact set', async () => {
+  const fixture = createManuscriptTreeFixture();
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+  const readsBefore = fixture.controls.calls().contentReads;
+  const noOp = await store.buildClosure(snapshot, {
+    kind: 'chapter.patch_sidecar',
+    sidecarRef: fixture.refs.chapterSidecar,
+    patch: { title: fixture.values.chapter.title },
+  });
+  assert.deepEqual(noOp.closure, []);
+  assert.equal(fixture.controls.calls().contentReads, readsBefore);
+  assert.doesNotThrow(() => store.finalizeCandidate(noOp, Object.freeze([])));
+
+  const buildResult = await store.buildClosure(snapshot, {
+    kind: 'chapter.replace_body_and_sidecar',
+    bodyRef: fixture.refs.chapterBody,
+    sidecarRef: fixture.refs.chapterSidecar,
+    content: '严格合并正文',
+    patch: { title: '严格合并章名' },
+  });
+  const templates = buildResult.candidateTemplate.controlledFiles.filter(
+    (fact) => fact.fileIdentity === null,
+  );
+  const good = templates.map((fact, index) => stagedFact(fact, 9100 + index));
+
+  assert.throws(() => store.finalizeCandidate({ ...buildResult }, Object.freeze(good)), TypeError);
+  assert.throws(() => store.finalizeCandidate(buildResult, Object.freeze(good.slice(0, 1))), TypeError);
+  assert.throws(() => store.finalizeCandidate(buildResult, Object.freeze([...good, good[0]])), TypeError);
+  assert.throws(() => store.finalizeCandidate(buildResult, Object.freeze([
+    Object.freeze({ ...good[0], rawSha256: '0'.repeat(64) }),
+    good[1],
+  ])), TypeError);
+  assert.throws(() => store.finalizeCandidate(buildResult, Object.freeze([
+    Object.freeze({
+      ...good[0],
+      parentIdentity: Object.freeze({ dev: '1', ino: '999999' }),
+    }),
+    good[1],
+  ])), TypeError);
+  assert.doesNotThrow(() => store.finalizeCandidate(buildResult, Object.freeze(good)));
 });
 
 test('full validation builds one immutable file-fact projection with canonical positions', async () => {
