@@ -1,6 +1,10 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const {
+  IgnoredIdentityLedger,
+  normalizeIgnoredLedgerRows,
+} = require('./ignored-ledger');
 const { assertControlledFileRef } = require('./paths');
 
 const PROJECTION_BASIS_DOMAIN = 'mythpen.manuscript.projection-basis';
@@ -76,11 +80,6 @@ const CANDIDATE_CONTROLLED_FILE_KEYS = Object.freeze([
   ...CONTROLLED_FILE_FACT_KEYS,
   'ref',
 ]);
-const IGNORED_ROW_KEYS = Object.freeze([
-  'resource_kind', 'resource_uid', 'ignore_status', 'opaque_container_kind',
-  'opaque_container_uid', 'is_currently_referenced', 'member_snapshot_json',
-  'projection_generation',
-]);
 const CANDIDATE_KEYS = Object.freeze([
   'capacitySnapshot', 'chapters', 'controlledFiles', 'diagnostics',
   'ignoredLedgerAfter', 'projectUid', 'volumeOrder', 'volumes', 'warnings',
@@ -106,6 +105,8 @@ const TARGET_KEYS = Object.freeze([
   'ignoredLedger', 'capacitySnapshot', 'proposalInvalidations',
   'localIdentityPlan',
 ]);
+const ignoredIdentityLedger = new IgnoredIdentityLedger();
+const BUILT_TARGET_AUTHORITY = Symbol('built projection target authority');
 
 function invalid(message) {
   throw new TypeError(message);
@@ -177,7 +178,7 @@ function assertDenseArray(value, label) {
 }
 
 function assertPlainTree(value, options = {}, active = new WeakSet()) {
-  const { requireFrozen = false, label = 'value' } = options;
+  const { requireFrozen = false, label = 'value', trustedValues = null } = options;
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isSafeInteger(value) || Object.is(value, -0)) {
@@ -187,6 +188,10 @@ function assertPlainTree(value, options = {}, active = new WeakSet()) {
   }
   if (typeof value !== 'object' || active.has(value)) {
     invalid(`${label} must be finite acyclic plain data`);
+  }
+  if (trustedValues !== null && trustedValues.has(value)) {
+    if (requireFrozen && !Object.isFrozen(value)) invalid(`${label} must be deeply frozen`);
+    return value;
   }
   if (requireFrozen && !Object.isFrozen(value)) invalid(`${label} must be deeply frozen`);
   active.add(value);
@@ -367,61 +372,6 @@ function validateCapacitySnapshot(value, label) {
   return snapshot;
 }
 
-function normalizeIgnoredRows(rows, label) {
-  assertDenseArray(rows, label);
-  const seen = new Set();
-  const normalized = rows.map((row, index) => {
-    const result = normalizeRow(row, IGNORED_ROW_KEYS, `${label}[${index}]`);
-    if (result.resource_kind !== 'chapter' && result.resource_kind !== 'volume') {
-      invalid(`${label}[${index}].resource_kind is invalid`);
-    }
-    canonicalUuid(result.resource_uid, `${label}[${index}].resource_uid`);
-    if (result.ignore_status !== 'active' && result.ignore_status !== 'revoked') {
-      invalid(`${label}[${index}].ignore_status is invalid`);
-    }
-    if (result.opaque_container_kind !== null) {
-      if (result.opaque_container_kind !== 'unassigned' && result.opaque_container_kind !== 'volume') {
-        invalid(`${label}[${index}].opaque_container_kind is invalid`);
-      }
-    }
-    if (result.opaque_container_uid !== null) {
-      canonicalUuid(result.opaque_container_uid, `${label}[${index}].opaque_container_uid`);
-    }
-    zeroOrOne(result.is_currently_referenced, `${label}[${index}].is_currently_referenced`);
-    stringValue(result.member_snapshot_json, `${label}[${index}].member_snapshot_json`);
-    try {
-      JSON.parse(result.member_snapshot_json);
-    } catch {
-      invalid(`${label}[${index}].member_snapshot_json is invalid JSON`);
-    }
-    if (result.is_currently_referenced === 0) {
-      if (result.opaque_container_kind !== null || result.opaque_container_uid !== null) {
-        invalid(`${label}[${index}] detached container state is inconsistent`);
-      }
-    } else if (
-      !(
-        result.opaque_container_kind === 'unassigned'
-        && result.opaque_container_uid === null
-      )
-      && !(
-        result.opaque_container_kind === 'volume'
-        && result.opaque_container_uid !== null
-      )
-    ) {
-      invalid(`${label}[${index}] referenced container state is inconsistent`);
-    }
-    nonNegativeInteger(result.projection_generation, `${label}[${index}].projection_generation`);
-    const key = `${result.resource_kind}:${result.resource_uid}`;
-    if (seen.has(key)) invalid(`${label} contains a duplicate resource`);
-    seen.add(key);
-    return result;
-  });
-  return normalized.sort((left, right) => (
-    utf8Compare(left.resource_kind, right.resource_kind)
-    || utf8Compare(left.resource_uid, right.resource_uid)
-  ));
-}
-
 function normalizeBasis(basis) {
   const descriptors = assertExactKeys(basis, BASIS_KEYS, 'projection basis');
   const sourceKind = descriptors.sourceKind.value;
@@ -572,9 +522,8 @@ function normalizeBasis(basis) {
 }
 
 function canonicalIgnoredLedgerDigest(rows) {
-  const normalized = normalizeIgnoredRows(rows, 'ignored ledger');
-  const material = normalized.map((row) => canonicalRow(row, IGNORED_ROW_KEYS));
-  return createHash('sha256').update(JSON.stringify(material), 'utf8').digest('hex');
+  const normalized = normalizeIgnoredLedgerRows(rows, 'ignored ledger');
+  return createHash('sha256').update(JSON.stringify(normalized), 'utf8').digest('hex');
 }
 
 function digestNormalizedBasis(normalized) {
@@ -672,6 +621,7 @@ function normalizeCandidate(value) {
     volumeOrder,
     controlledFiles,
     capacitySnapshot: descriptors.capacitySnapshot.value,
+    ignoredLedgerAfter: descriptors.ignoredLedgerAfter.value,
   };
 }
 
@@ -1125,9 +1075,25 @@ function validateControlledFileCoverage(controlledFiles, volumes, chapters) {
   }
 }
 
-function normalizeTarget(target) {
-  assertPlainTree(target, { requireFrozen: true, label: 'projection target' });
+function normalizeTarget(target, authority = null) {
+  const trustedIgnoredLedger = authority === BUILT_TARGET_AUTHORITY
+    ? target.ignoredLedger
+    : null;
+  const trustedValues = trustedIgnoredLedger === null
+    ? null
+    : new WeakSet([trustedIgnoredLedger]);
+  assertPlainTree(target, {
+    requireFrozen: true,
+    label: 'projection target',
+    trustedValues,
+  });
   const descriptors = assertExactKeys(target, TARGET_KEYS, 'projection target');
+  if (
+    authority === BUILT_TARGET_AUTHORITY
+    && descriptors.ignoredLedger.value !== trustedIgnoredLedger
+  ) {
+    invalid('built projection target ignoredLedger authority is inconsistent');
+  }
   if (descriptors.domain.value !== PROJECTION_TARGET_DOMAIN) invalid('projection target domain is invalid');
   if (descriptors.version.value !== PROJECTION_TARGET_VERSION) invalid('projection target version is invalid');
   canonicalUuid(descriptors.projectUid.value, 'projection target projectUid');
@@ -1195,16 +1161,26 @@ function normalizeTarget(target) {
     invalid('projection target controlledFiles are not canonically ordered');
   }
   validateControlledFileCoverage(controlledFiles, volumes, chapters);
-  const ignoredLedger = normalizeIgnoredRows(
-    descriptors.ignoredLedger.value,
+  const ignoredLedgerInput = descriptors.ignoredLedger.value;
+  const ignoredLedger = normalizeIgnoredLedgerRows(
+    ignoredLedgerInput,
     'projection target ignoredLedger',
   );
-  if (ignoredLedger.some((row, index) => row !== descriptors.ignoredLedger.value[index])) {
-    invalid('projection target ignoredLedger is not canonically ordered');
-  }
-  for (const row of ignoredLedger) {
-    if (row.projection_generation !== targetGeneration) {
-      invalid('projection target ignoredLedger generation is inconsistent');
+  if (trustedIgnoredLedger !== null) {
+    if (ignoredLedger !== trustedIgnoredLedger) {
+      invalid('built projection target ignoredLedger brand is inconsistent');
+    }
+  } else {
+    if (ignoredLedger.some((row, index) => (
+      row.resource_kind !== ignoredLedgerInput[index].resource_kind
+      || row.resource_uid !== ignoredLedgerInput[index].resource_uid
+    ))) {
+      invalid('projection target ignoredLedger is not canonically ordered');
+    }
+    for (const row of ignoredLedger) {
+      if (row.projection_generation !== targetGeneration) {
+        invalid('projection target ignoredLedger generation is inconsistent');
+      }
     }
   }
   validateCapacitySnapshot(descriptors.capacitySnapshot.value, 'projection target capacitySnapshot');
@@ -1241,16 +1217,26 @@ class SQLiteProjectionStore {
     );
     if (targetGeneration <= current.basis.baseGeneration) invalid('targetGeneration must exceed the base generation');
     const projectedAt = canonicalTime(descriptors.projectedAt.value);
-    assertPlainTree(descriptors.ignoredLedger.value, {
-      requireFrozen: true,
-      label: 'ignoredLedger',
-    });
-    const ignoredLedger = normalizeIgnoredRows(descriptors.ignoredLedger.value, 'ignoredLedger');
-    for (const row of ignoredLedger) {
-      if (row.projection_generation !== targetGeneration) {
-        invalid('ignoredLedger rows must use the target generation');
+    const ignoredLedgerBefore = normalizeIgnoredLedgerRows(
+      descriptors.ignoredLedger.value,
+      'ignoredLedger',
+    );
+    if (
+      canonicalIgnoredLedgerDigest(ignoredLedgerBefore)
+      !== current.basis.ignoredBeforeDigest
+    ) {
+      invalid('ignoredLedger does not match the projection basis');
+    }
+    for (const row of ignoredLedgerBefore) {
+      if (row.projection_generation !== current.basis.baseGeneration) {
+        invalid('ignoredLedger rows must use the base generation');
       }
     }
+    const ignoredLedger = ignoredIdentityLedger.compileAfter({
+      beforeRows: ignoredLedgerBefore,
+      observations: candidateValue.ignoredLedgerAfter,
+      targetGeneration,
+    });
     const localIdentityPlan = normalizeIdentityPlan(descriptors.localIdentityPlan.value);
     validateIdentityCoverage(
       current.basis,
@@ -1287,7 +1273,7 @@ class SQLiteProjectionStore {
       proposalInvalidations,
       localIdentityPlan,
     };
-    return normalizeTarget(deepFreeze(target));
+    return normalizeTarget(deepFreeze(target), BUILT_TARGET_AUTHORITY);
   }
 
   validateTarget(target) {

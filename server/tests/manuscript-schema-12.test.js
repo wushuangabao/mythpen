@@ -195,6 +195,89 @@ test('schema 12 freezes the complete v2 manifest and uniquely generative object 
   });
 });
 
+test('schema 12 ignored ledger descriptor freezes resource-specific indexed containers', () => {
+  const ignoredResources = SCHEMA12_CONTRACT.tables.manuscript_ignored_resources;
+  const containerKind = ignoredResources.columns.find(
+    ({ name }) => name === 'opaque_container_kind',
+  );
+  const containerUid = ignoredResources.columns.find(
+    ({ name }) => name === 'opaque_container_uid',
+  );
+  const hex = '[0-9a-f]';
+  const canonicalUuidGlob = `${hex.repeat(8)}-${hex.repeat(4)}-4${hex.repeat(3)}-[89ab]${hex.repeat(3)}-${hex.repeat(12)}`;
+
+  assert.deepEqual(
+    {
+      containerKindCheck: containerKind.checkSql,
+      containerUidCheck: containerUid.checkSql,
+      tableConstraints: ignoredResources.tableConstraints,
+    },
+    {
+      containerKindCheck: '"opaque_container_kind" IS NULL OR "opaque_container_kind" IN (\'manuscript\', \'unassigned\', \'volume\')',
+      containerUidCheck: '"opaque_container_uid" IS NULL OR (length("opaque_container_uid") = 36 AND lower("opaque_container_uid") = "opaque_container_uid" AND "opaque_container_uid" GLOB '
+        + `'${canonicalUuidGlob}')`,
+      tableConstraints: [
+        'PRIMARY KEY ("resource_kind", "resource_uid")',
+        'CHECK (("is_currently_referenced" = 0 AND "opaque_container_kind" IS NULL AND "opaque_container_uid" IS NULL) OR ("is_currently_referenced" = 1 AND "opaque_container_kind" IS NOT NULL AND (("resource_kind" = \'volume\' AND "opaque_container_kind" = \'manuscript\' AND "opaque_container_uid" IS NULL) OR ("resource_kind" = \'chapter\' AND (("opaque_container_kind" = \'unassigned\' AND "opaque_container_uid" IS NULL) OR ("opaque_container_kind" = \'volume\' AND "opaque_container_uid" IS NOT NULL))))))',
+      ],
+    },
+  );
+});
+
+test('schema 12 ignored ledger rejects referenced rows without an indexed container in SQLite', async () => {
+  const initSqlJs = require('sql.js');
+  const { getWasmBinary } = require('../wasm-binary');
+  const SQL = await initSqlJs({ wasmBinary: getWasmBinary() });
+  const database = new SQL.Database();
+  const uid = (suffix) => `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
+  const insert = ([kind, suffix, containerKind, containerUid, referenced]) => database.run(`
+    INSERT INTO manuscript_ignored_resources (
+      resource_kind,
+      resource_uid,
+      ignore_status,
+      opaque_container_kind,
+      opaque_container_uid,
+      is_currently_referenced,
+      member_snapshot_json,
+      projection_generation
+    ) VALUES (?, ?, 'active', ?, ?, ?, '{"version":1,"members":[]}', 0)
+  `, [kind, uid(suffix), containerKind, containerUid, referenced]);
+
+  try {
+    database.exec(SCHEMA12_CONTRACT.tables.manuscript_ignored_resources.createSql);
+    for (const row of [
+      ['volume', 1, 'manuscript', null, 1],
+      ['chapter', 2, 'unassigned', null, 1],
+      ['chapter', 3, 'volume', uid(100), 1],
+      ['volume', 4, null, null, 0],
+    ]) {
+      insert(row);
+    }
+
+    const invalidOutcomes = [
+      ['chapter', 5, null, null, 1],
+      ['volume', 6, null, null, 1],
+    ].map((row) => {
+      try {
+        insert(row);
+        return 'accepted';
+      } catch (error) {
+        return /check constraint failed/i.test(error.message) ? 'rejected' : error.message;
+      }
+    });
+    const [{ values: [[rowCount]] }] = database.exec(
+      'SELECT COUNT(*) FROM manuscript_ignored_resources',
+    );
+
+    assert.deepEqual(
+      { invalidOutcomes, rowCount },
+      { invalidOutcomes: ['rejected', 'rejected'], rowCount: 4 },
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test('schema 12 canonical trigger set is deterministic, independent from v1, and complete', () => {
   const definitions = schema12CanonicalTriggerDefinitions();
   assert.equal(definitions.length, 66);

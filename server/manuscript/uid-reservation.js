@@ -11,9 +11,24 @@ const {
 
 const RESERVATION_DOMAIN = 'mythpen.manuscript.uid-reservation';
 const RESERVATION_VERSION = 1;
+const CREATE_LOGICAL_INPUT_DOMAIN = 'mythpen.manuscript.create-logical-input';
+const CREATE_LOGICAL_INPUT_VERSION = 1;
 const MAX_UID_ATTEMPTS = 32;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const SOURCE_OWNER_KINDS = new Set(['file_publication', 'migration']);
+const CHAPTER_STATUSES = new Set(['pending', 'writing', 'review', 'accepted']);
+const CHAPTER_SIDECAR_KEYS = Object.freeze([
+  'title',
+  'outline',
+  'status',
+  'summary',
+  'cognitive_frame',
+  'emotional_anchor',
+  'world_texture',
+  'concrete_mystery',
+  'interpersonal_tension',
+]);
 
 function invalid(message) {
   throw new TypeError(message);
@@ -83,7 +98,9 @@ function assertDeepFrozenPlainData(value, label, active = new WeakSet()) {
 }
 
 function denseArray(value, label) {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    invalid(`${label} must be a plain array`);
+  }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   for (let index = 0; index < value.length; index += 1) {
     const descriptor = descriptors[String(index)];
@@ -117,6 +134,13 @@ function positiveInteger(value, label) {
   return value;
 }
 
+function canonicalDigest(value, label) {
+  if (typeof value !== 'string' || !SHA256_PATTERN.test(value)) {
+    invalid(`${label} must be a lowercase SHA-256 digest`);
+  }
+  return value;
+}
+
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
@@ -127,17 +151,86 @@ function recoveryRequired(reason, cause) {
   return manuscriptError('RECOVERY_REQUIRED', { reason }, cause);
 }
 
+function canonicalCreateLogicalInputDigest(command) {
+  if (!isPlainObject(command)) invalid('create command must be a plain object');
+  const kindDescriptor = Object.getOwnPropertyDescriptor(command, 'kind');
+  if (
+    kindDescriptor === undefined
+    || kindDescriptor.enumerable !== true
+    || !Object.hasOwn(kindDescriptor, 'value')
+  ) invalid('create command.kind must be an enumerable data property');
+
+  let material;
+  if (kindDescriptor.value === 'volume.create') {
+    const value = exactObject(command, ['kind', 'title', 'summary'], 'volume create command');
+    if (typeof value.title !== 'string' || typeof value.summary !== 'string') {
+      invalid('volume create text fields must be strings');
+    }
+    material = {
+      domain: CREATE_LOGICAL_INPUT_DOMAIN,
+      version: CREATE_LOGICAL_INPUT_VERSION,
+      kind: 'volume.create',
+      title: value.title,
+      summary: value.summary,
+    };
+  } else if (kindDescriptor.value === 'chapter.create') {
+    const value = exactObject(command, [
+      'kind',
+      'containerVolumeUid',
+      'requestedNum',
+      'content',
+      'sidecar',
+    ], 'chapter create command');
+    if (value.containerVolumeUid !== null) {
+      canonicalUuid(value.containerVolumeUid, 'chapter create containerVolumeUid');
+    }
+    if (value.requestedNum !== null) {
+      positiveInteger(value.requestedNum, 'chapter create requestedNum');
+    }
+    if (typeof value.content !== 'string') invalid('chapter create content must be a string');
+    const sidecar = exactObject(value.sidecar, CHAPTER_SIDECAR_KEYS, 'chapter create sidecar');
+    for (const key of CHAPTER_SIDECAR_KEYS) {
+      if (typeof sidecar[key] !== 'string') invalid(`chapter create sidecar.${key} must be a string`);
+    }
+    if (!CHAPTER_STATUSES.has(sidecar.status)) invalid('chapter create sidecar.status is invalid');
+    material = {
+      domain: CREATE_LOGICAL_INPUT_DOMAIN,
+      version: CREATE_LOGICAL_INPUT_VERSION,
+      kind: 'chapter.create',
+      containerVolumeUid: value.containerVolumeUid,
+      requestedNum: value.requestedNum,
+      content: value.content,
+      sidecar: {
+        title: sidecar.title,
+        outline: sidecar.outline,
+        status: sidecar.status,
+        summary: sidecar.summary,
+        cognitive_frame: sidecar.cognitive_frame,
+        emotional_anchor: sidecar.emotional_anchor,
+        world_texture: sidecar.world_texture,
+        concrete_mystery: sidecar.concrete_mystery,
+        interpersonal_tension: sidecar.interpersonal_tension,
+      },
+    };
+  } else {
+    invalid('create command.kind is invalid');
+  }
+  return createHash('sha256').update(Buffer.from(JSON.stringify(material), 'utf8')).digest('hex');
+}
+
 function normalizeCurrentInput(input) {
   const request = exactObject(input, [
     'allocation',
     'currentProjection',
     'ignoredLedgerBefore',
     'kind',
+    'logicalInputDigest',
     'logicalRequestId',
     'pathProbe',
   ], 'UID reservation request');
   if (request.kind !== 'chapter' && request.kind !== 'volume') invalid('kind must be chapter or volume');
   nonEmptyString(request.logicalRequestId, 'logicalRequestId');
+  canonicalDigest(request.logicalInputDigest, 'logicalInputDigest');
   assertDeepFrozenPlainData(request.currentProjection, 'currentProjection');
   assertDeepFrozenPlainData(request.ignoredLedgerBefore, 'ignoredLedgerBefore');
   const projection = exactObject(
@@ -210,6 +303,7 @@ function normalizeAllocation(kind, allocation, basis) {
     containerVolumeUid: value.containerVolumeUid,
     id: nextSequenceId(basis, 'chapters'),
     num,
+    requestedNum: value.requestedNum,
   };
 }
 
@@ -300,23 +394,11 @@ function normalizeParentIdentity(value, label) {
   return { dev: identity.dev, ino: identity.ino };
 }
 
-function normalizePathObservation(value, objectKind, uid) {
-  if (!isPlainObject(value)) invalid('path probe result must be a plain object');
-  const disposition = Object.getOwnPropertyDescriptor(value, 'disposition');
-  if (disposition === undefined || !Object.hasOwn(disposition, 'value')) {
-    invalid('path probe result must contain a data disposition');
-  }
-  const observation = exactObject(
-    value,
-    ['disposition', ...(disposition.value === 'absent' ? ['pathPredicates'] : [])],
-    'path probe result',
-  );
-  if (observation.disposition === 'collision') return null;
-  if (observation.disposition !== 'absent') invalid('path probe did not prove absence');
+function normalizePathPredicates(value, objectKind, uid) {
   const expectedRoles = objectKind === 'chapter'
     ? ['chapter_body', 'chapter_sidecar']
     : ['volume_index'];
-  const predicates = denseArray(observation.pathPredicates, 'pathPredicates');
+  const predicates = denseArray(value, 'pathPredicates');
   if (predicates.length !== expectedRoles.length) invalid('pathPredicates has the wrong member count');
   let expectedDirectory = null;
   let expectedParent = null;
@@ -355,11 +437,116 @@ function normalizePathObservation(value, objectKind, uid) {
   });
 }
 
+function normalizePathObservation(value, objectKind, uid) {
+  if (!isPlainObject(value)) invalid('path probe result must be a plain object');
+  const disposition = Object.getOwnPropertyDescriptor(value, 'disposition');
+  if (disposition === undefined || !Object.hasOwn(disposition, 'value')) {
+    invalid('path probe result must contain a data disposition');
+  }
+  const observation = exactObject(
+    value,
+    ['disposition', ...(disposition.value === 'absent' ? ['pathPredicates'] : [])],
+    'path probe result',
+  );
+  if (observation.disposition === 'collision') return null;
+  if (observation.disposition !== 'absent') invalid('path probe did not prove absence');
+  return normalizePathPredicates(observation.pathPredicates, objectKind, uid);
+}
+
 function reservationIdFor(manifestWithoutId) {
   return createHash('sha256')
     .update('mythpen.manuscript.uid-reservation-id.v1\0', 'utf8')
     .update(JSON.stringify(manifestWithoutId), 'utf8')
     .digest('hex');
+}
+
+function canonicalIdentityReservationMaterial(value) {
+  if (!isPlainObject(value)) invalid('identity reservation manifest must be a plain object');
+  const objectKindDescriptor = Object.getOwnPropertyDescriptor(value, 'objectKind');
+  if (
+    objectKindDescriptor === undefined
+    || objectKindDescriptor.enumerable !== true
+    || !Object.hasOwn(objectKindDescriptor, 'value')
+  ) invalid('identity reservation objectKind must be an enumerable data property');
+  const objectKind = objectKindDescriptor.value;
+  if (objectKind !== 'chapter' && objectKind !== 'volume') {
+    invalid('identity reservation objectKind is invalid');
+  }
+  const manifest = exactObject(value, [
+    'domain',
+    'version',
+    'assignmentKind',
+    'objectKind',
+    'projectUid',
+    'projectInstanceId',
+    'logicalRequestId',
+    'logicalInputDigest',
+    'sourceBasisDigest',
+    'uid',
+    'id',
+    ...(objectKind === 'chapter' ? ['num', 'containerVolumeUid', 'requestedNum'] : []),
+    'pathPredicates',
+    'reservationId',
+  ], 'identity reservation manifest');
+  if (
+    manifest.domain !== RESERVATION_DOMAIN
+    || manifest.version !== RESERVATION_VERSION
+    || manifest.assignmentKind !== 'reserved_new'
+  ) invalid('identity reservation domain/version/assignment kind is invalid');
+  canonicalUuid(manifest.projectUid, 'identity reservation projectUid');
+  canonicalUuid(manifest.projectInstanceId, 'identity reservation projectInstanceId');
+  nonEmptyString(manifest.logicalRequestId, 'identity reservation logicalRequestId');
+  canonicalDigest(manifest.logicalInputDigest, 'identity reservation logicalInputDigest');
+  canonicalDigest(manifest.sourceBasisDigest, 'identity reservation sourceBasisDigest');
+  canonicalUuid(manifest.uid, 'identity reservation uid');
+  positiveInteger(manifest.id, 'identity reservation id');
+  if (objectKind === 'chapter') {
+    positiveInteger(manifest.num, 'identity reservation num');
+    if (manifest.containerVolumeUid !== null) {
+      canonicalUuid(manifest.containerVolumeUid, 'identity reservation containerVolumeUid');
+    }
+    if (manifest.requestedNum !== null) {
+      positiveInteger(manifest.requestedNum, 'identity reservation requestedNum');
+      if (manifest.requestedNum !== manifest.num) {
+        invalid('identity reservation requestedNum must equal the final num');
+      }
+    }
+  }
+  canonicalDigest(manifest.reservationId, 'identity reservation reservationId');
+  const material = {
+    domain: RESERVATION_DOMAIN,
+    version: RESERVATION_VERSION,
+    assignmentKind: 'reserved_new',
+    objectKind,
+    projectUid: manifest.projectUid,
+    projectInstanceId: manifest.projectInstanceId,
+    logicalRequestId: manifest.logicalRequestId,
+    logicalInputDigest: manifest.logicalInputDigest,
+    sourceBasisDigest: manifest.sourceBasisDigest,
+    uid: manifest.uid,
+    id: manifest.id,
+    ...(objectKind === 'chapter' ? {
+      num: manifest.num,
+      containerVolumeUid: manifest.containerVolumeUid,
+      requestedNum: manifest.requestedNum,
+    } : {}),
+    pathPredicates: normalizePathPredicates(manifest.pathPredicates, objectKind, manifest.uid),
+  };
+  return { material, reservationId: manifest.reservationId };
+}
+
+function validateIdentityReservationManifest(value) {
+  const { material, reservationId } = canonicalIdentityReservationMaterial(value);
+  const expected = reservationIdFor(material);
+  if (reservationId !== expected) invalid('identity reservation checksum is invalid');
+  return deepFreeze({ ...material, reservationId: expected });
+}
+
+function mintIdentityReservationManifest(material) {
+  return validateIdentityReservationManifest({
+    ...material,
+    reservationId: reservationIdFor(material),
+  });
 }
 
 class ManuscriptUidReservation {
@@ -440,19 +627,18 @@ class ManuscriptUidReservation {
         projectUid: request.projection.projectUid,
         projectInstanceId: request.projection.projectInstanceId,
         logicalRequestId: request.logicalRequestId,
+        logicalInputDigest: request.logicalInputDigest,
         sourceBasisDigest: request.sourceBasisDigest,
         uid,
         id: allocation.id,
         ...(request.kind === 'chapter' ? {
           num: allocation.num,
           containerVolumeUid: allocation.containerVolumeUid,
+          requestedNum: allocation.requestedNum,
         } : {}),
         pathPredicates,
       };
-      const identityReservation = deepFreeze({
-        ...manifestWithoutId,
-        reservationId: reservationIdFor(manifestWithoutId),
-      });
+      const identityReservation = mintIdentityReservationManifest(manifestWithoutId);
       const authority = Object.freeze(() => {});
       this.#authorities.set(authority, identityReservation);
       return Object.freeze({ identityReservation, authority });
@@ -466,6 +652,7 @@ class ManuscriptUidReservation {
 
   assertReservation(input) {
     const value = exactObject(input, ['authority', 'identityReservation'], 'reservation assertion');
+    validateIdentityReservationManifest(value.identityReservation);
     if (
       (typeof value.authority !== 'object' && typeof value.authority !== 'function')
       || value.authority === null
@@ -477,4 +664,8 @@ class ManuscriptUidReservation {
   }
 }
 
-module.exports = { ManuscriptUidReservation };
+module.exports = {
+  ManuscriptUidReservation,
+  canonicalCreateLogicalInputDigest,
+  validateIdentityReservationManifest,
+};

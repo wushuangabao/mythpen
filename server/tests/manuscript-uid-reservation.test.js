@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const test = require('node:test');
 
 const { LIMITS } = require('../manuscript/contracts');
@@ -8,10 +9,15 @@ const {
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
 } = require('../manuscript/projection-store');
-const { ManuscriptUidReservation } = require('../manuscript/uid-reservation');
+const {
+  ManuscriptUidReservation,
+  canonicalCreateLogicalInputDigest,
+  validateIdentityReservationManifest,
+} = require('../manuscript/uid-reservation');
 
 const ZERO_DIGEST = '0'.repeat(64);
 const BODY_DIGEST = '1'.repeat(64);
+const LOGICAL_INPUT_DIGEST = '2'.repeat(64);
 const DELETED_AT = '2026-08-18T01:02:03.004Z';
 
 function uuid(seed) {
@@ -62,6 +68,16 @@ function chapter(overrides = {}) {
   };
 }
 
+function ignoredMemberSnapshot(kind) {
+  const roles = kind === 'chapter'
+    ? ['chapter_body', 'chapter_sidecar']
+    : ['volume_index'];
+  return JSON.stringify({
+    version: 1,
+    members: roles.map((role) => ({ role, present: false })),
+  });
+}
+
 function ignoredRow({ kind = 'chapter', resourceUid = uuid(30), status = 'active' } = {}) {
   return {
     resource_kind: kind,
@@ -70,7 +86,7 @@ function ignoredRow({ kind = 'chapter', resourceUid = uuid(30), status = 'active
     opaque_container_kind: null,
     opaque_container_uid: null,
     is_currently_referenced: 0,
-    member_snapshot_json: '[]',
+    member_snapshot_json: ignoredMemberSnapshot(kind),
     projection_generation: 8,
   };
 }
@@ -182,6 +198,7 @@ function chapterRequest(fixture, overrides = {}) {
   return {
     kind: 'chapter',
     logicalRequestId: 'request-create-chapter-1',
+    logicalInputDigest: LOGICAL_INPUT_DIGEST,
     currentProjection: fixture.currentProjection,
     ignoredLedgerBefore: fixture.ignoredLedgerBefore,
     allocation: {
@@ -196,6 +213,7 @@ function volumeRequest(fixture, overrides = {}) {
   return {
     kind: 'volume',
     logicalRequestId: 'request-create-volume-1',
+    logicalInputDigest: LOGICAL_INPUT_DIGEST,
     currentProjection: fixture.currentProjection,
     ignoredLedgerBefore: fixture.ignoredLedgerBefore,
     allocation: {
@@ -236,12 +254,14 @@ test('chapter reservation binds schema-12 basis, ledger, allocation, paths, and 
     projectUid: PROJECT_UID,
     projectInstanceId: PROJECT_INSTANCE_ID,
     logicalRequestId: 'request-create-chapter-1',
+    logicalInputDigest: LOGICAL_INPUT_DIGEST,
     sourceBasisDigest: fixture.currentProjection.basis.basisDigest,
     reservationId: result.identityReservation.reservationId,
     uid: candidateUid,
     id: 51,
     num: 5,
     containerVolumeUid: VOLUME_UID,
+    requestedNum: null,
     pathPredicates: absentPredicates('chapter', candidateUid),
   });
   assert.match(result.identityReservation.reservationId, /^[0-9a-f]{64}$/u);
@@ -279,7 +299,38 @@ test('volume reservation uses sqlite_sequence + 1 and the single volume predicat
   assert.equal(identityReservation.uid, candidateUid);
   assert.equal(Object.hasOwn(identityReservation, 'num'), false);
   assert.equal(Object.hasOwn(identityReservation, 'containerVolumeUid'), false);
+  assert.equal(Object.hasOwn(identityReservation, 'requestedNum'), false);
   assert.deepEqual(identityReservation.pathPredicates, absentPredicates('volume', candidateUid));
+});
+
+test('identity reservation manifest preserves null and explicit requestedNum in its checksum', async () => {
+  const fixture = projectionFixture();
+  const candidateUid = uuid(109);
+  const automaticHarness = harness({ uuids: [candidateUid] });
+  const explicitHarness = harness({ uuids: [candidateUid] });
+  const automatic = await automaticHarness.service.reserveNewIdentity({
+    ...chapterRequest(fixture),
+    pathProbe: automaticHarness.pathProbe,
+  });
+  const explicit = await explicitHarness.service.reserveNewIdentity({
+    ...chapterRequest(fixture, {
+      allocation: { containerVolumeUid: VOLUME_UID, requestedNum: 5 },
+    }),
+    pathProbe: explicitHarness.pathProbe,
+  });
+
+  assert.equal(automatic.identityReservation.num, 5);
+  assert.equal(explicit.identityReservation.num, 5);
+  assert.equal(automatic.identityReservation.requestedNum, null);
+  assert.equal(explicit.identityReservation.requestedNum, 5);
+  assert.notEqual(automatic.identityReservation.reservationId, explicit.identityReservation.reservationId);
+  assert.deepEqual(
+    validateIdentityReservationManifest(clone(automatic.identityReservation)),
+    automatic.identityReservation,
+  );
+  const missingRequestedNum = clone(automatic.identityReservation);
+  delete missingRequestedNum.requestedNum;
+  assert.throws(() => validateIdentityReservationManifest(missingRequestedNum), TypeError);
 });
 
 test('path predicates use the Task 3 canonical ch_ and vol_ basenames', async () => {
@@ -378,7 +429,9 @@ test('chapter numbering ignores tombstones and permits the same number in anothe
   });
 
   assert.equal(automatic.identityReservation.num, 8);
+  assert.equal(automatic.identityReservation.requestedNum, null);
   assert.equal(explicitAcrossVolume.identityReservation.num, 7);
+  assert.equal(explicitAcrossVolume.identityReservation.requestedNum, 7);
   assert.equal(explicitAcrossVolume.identityReservation.containerVolumeUid, OTHER_VOLUME_UID);
 });
 
@@ -710,4 +763,141 @@ test('constructor requires explicit CSPRNG and complete reservation catalog port
     uuidV4() { return uuid(1); },
     reservationSources: [],
   }), TypeError);
+});
+
+test('create logical input digest uses one exact canonical volume and chapter material', () => {
+  const sidecar = {
+    title: 'Chapter 1',
+    outline: 'Outline',
+    status: 'writing',
+    summary: 'Summary',
+    cognitive_frame: 'Frame',
+    emotional_anchor: 'Anchor',
+    world_texture: 'Texture',
+    concrete_mystery: 'Mystery',
+    interpersonal_tension: 'Tension',
+  };
+  const volume = { kind: 'volume.create', title: 'Volume 1', summary: 'Arc' };
+  const chapterCommand = {
+    kind: 'chapter.create',
+    containerVolumeUid: VOLUME_UID,
+    requestedNum: 7,
+    content: '# Chapter 1\n',
+    sidecar,
+  };
+  const expectedVolume = createHash('sha256').update(Buffer.from(JSON.stringify({
+    domain: 'mythpen.manuscript.create-logical-input',
+    version: 1,
+    kind: 'volume.create',
+    title: 'Volume 1',
+    summary: 'Arc',
+  }), 'utf8')).digest('hex');
+  const expectedChapter = createHash('sha256').update(Buffer.from(JSON.stringify({
+    domain: 'mythpen.manuscript.create-logical-input',
+    version: 1,
+    kind: 'chapter.create',
+    containerVolumeUid: VOLUME_UID,
+    requestedNum: 7,
+    content: '# Chapter 1\n',
+    sidecar,
+  }), 'utf8')).digest('hex');
+
+  assert.equal(canonicalCreateLogicalInputDigest(volume), expectedVolume);
+  assert.equal(canonicalCreateLogicalInputDigest(chapterCommand), expectedChapter);
+  assert.equal(canonicalCreateLogicalInputDigest({ summary: 'Arc', title: 'Volume 1', kind: 'volume.create' }), expectedVolume);
+  assert.equal(canonicalCreateLogicalInputDigest({
+    sidecar: Object.fromEntries(Object.entries(sidecar).reverse()),
+    content: '# Chapter 1\n',
+    requestedNum: 7,
+    containerVolumeUid: VOLUME_UID,
+    kind: 'chapter.create',
+  }), expectedChapter);
+  assert.match(canonicalCreateLogicalInputDigest({
+    kind: 'chapter.create',
+    containerVolumeUid: null,
+    requestedNum: null,
+    content: '',
+    sidecar: { ...sidecar, status: 'pending' },
+  }), /^[0-9a-f]{64}$/u);
+  assert.match(expectedVolume, /^[0-9a-f]{64}$/u);
+  assert.match(expectedChapter, /^[0-9a-f]{64}$/u);
+  assert.throws(() => canonicalCreateLogicalInputDigest({ ...volume, path: 'caller-owned' }), TypeError);
+  assert.throws(() => canonicalCreateLogicalInputDigest({
+    ...chapterCommand,
+    sidecar: { ...sidecar, status: 'published' },
+  }), TypeError);
+  assert.throws(() => canonicalCreateLogicalInputDigest({
+    ...chapterCommand,
+    requestedNum: 0,
+  }), TypeError);
+  assert.throws(() => canonicalCreateLogicalInputDigest({
+    ...chapterCommand,
+    requestedNum: -0,
+  }), TypeError);
+  assert.throws(() => canonicalCreateLogicalInputDigest({
+    ...chapterCommand,
+    requestedNum: Number.MAX_SAFE_INTEGER + 1,
+  }), TypeError);
+  const accessor = { kind: 'volume.create', summary: 'Arc' };
+  Object.defineProperty(accessor, 'title', { enumerable: true, get() { return 'Volume 1'; } });
+  assert.throws(() => canonicalCreateLogicalInputDigest(accessor), TypeError);
+});
+
+test('identity reservation manifest has one exact canonical validator and reservation checksum', () => {
+  const uid = uuid(900);
+  const withoutId = {
+    domain: 'mythpen.manuscript.uid-reservation',
+    version: 1,
+    assignmentKind: 'reserved_new',
+    objectKind: 'chapter',
+    projectUid: PROJECT_UID,
+    projectInstanceId: PROJECT_INSTANCE_ID,
+    logicalRequestId: 'request-create-chapter-validator',
+    logicalInputDigest: LOGICAL_INPUT_DIGEST,
+    sourceBasisDigest: BODY_DIGEST,
+    uid,
+    id: 51,
+    num: 5,
+    containerVolumeUid: VOLUME_UID,
+    requestedNum: null,
+    pathPredicates: absentPredicates('chapter', uid),
+  };
+  const reservationId = createHash('sha256')
+    .update('mythpen.manuscript.uid-reservation-id.v1\0', 'utf8')
+    .update(JSON.stringify(withoutId), 'utf8')
+    .digest('hex');
+  const manifest = { ...withoutId, reservationId };
+
+  const canonical = validateIdentityReservationManifest(manifest);
+  assert.deepEqual(canonical, manifest);
+  assertRecursivelyFrozen(canonical);
+  assert.notEqual(canonical, manifest);
+  assert.equal(JSON.stringify(canonical), JSON.stringify(manifest));
+  const reversed = Object.fromEntries(Object.entries(manifest).reverse());
+  reversed.pathPredicates = manifest.pathPredicates.map((predicate) => ({
+    ...Object.fromEntries(Object.entries(predicate).reverse()),
+    parentIdentity: Object.fromEntries(Object.entries(predicate.parentIdentity).reverse()),
+  }));
+  assert.equal(
+    JSON.stringify(validateIdentityReservationManifest(reversed)),
+    JSON.stringify(manifest),
+  );
+  for (const mutate of [
+    (value) => { value.reservationId = ZERO_DIGEST; },
+    (value) => { value.logicalInputDigest = 'A'.repeat(64); },
+    (value) => { value.pathPredicates[0].canonicalPath = 'C:\\mythpen\\chapters\\wrong.md'; },
+    (value) => { value.pathPredicates.reverse(); },
+    (value) => { delete value.requestedNum; },
+    (value) => { value.requestedNum = 0; },
+    (value) => { value.requestedNum = -0; },
+    (value) => {
+      class ForeignDenseArray extends Array {}
+      Object.setPrototypeOf(value.pathPredicates, ForeignDenseArray.prototype);
+    },
+    (value) => { value.extra = true; },
+  ]) {
+    const invalid = clone(manifest);
+    mutate(invalid);
+    assert.throws(() => validateIdentityReservationManifest(invalid), TypeError);
+  }
 });

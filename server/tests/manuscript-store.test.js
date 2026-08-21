@@ -2,10 +2,17 @@
 
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
+const path = require('node:path');
 const test = require('node:test');
 
 const { LIMITS } = require('../manuscript/contracts');
 const { serializeCanonicalJson } = require('../manuscript/format');
+const { normalizeIgnoredLedgerRows } = require('../manuscript/ignored-ledger');
+const {
+  deriveChapterPaths,
+  deriveManuscriptPaths,
+  deriveVolumePath,
+} = require('../manuscript/paths');
 const {
   SQLiteProjectionStore,
   canonicalIgnoredLedgerDigest,
@@ -13,6 +20,10 @@ const {
 } = require('../manuscript/projection-store');
 const storeModule = require('../manuscript/store');
 const { ManuscriptStore } = storeModule;
+const {
+  canonicalCreateLogicalInputDigest,
+  validateIdentityReservationManifest,
+} = require('../manuscript/uid-reservation');
 const {
   CHAPTER_UID,
   PROJECT_UID,
@@ -23,6 +34,10 @@ const {
   createManuscriptTreeFixture,
   refKey,
 } = require('./fixtures/manuscript-tree');
+
+const CREATED_VOLUME_UID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const CREATED_CHAPTER_UID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const PROJECT_INSTANCE_ID = '77777777-7777-4777-8777-777777777777';
 
 function limits(overrides = {}) {
   return { ...LIMITS, ...overrides };
@@ -62,6 +77,79 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function reservationIdFor(material) {
+  return createHash('sha256')
+    .update('mythpen.manuscript.uid-reservation-id.v1\0', 'utf8')
+    .update(JSON.stringify(material), 'utf8')
+    .digest('hex');
+}
+
+function createReservation(fixture, command, parentIdentity) {
+  const objectKind = command.kind === 'volume.create' ? 'volume' : 'chapter';
+  const uid = objectKind === 'volume' ? CREATED_VOLUME_UID : CREATED_CHAPTER_UID;
+  const paths = deriveManuscriptPaths({
+    dataRoot: fixture.dataRoot,
+    projectUid: PROJECT_UID,
+  });
+  const pathPredicates = objectKind === 'volume'
+    ? [{
+      role: 'volume_index',
+      canonicalPath: deriveVolumePath(paths, uid),
+      parentIdentity,
+      disposition: 'absent',
+    }]
+    : (() => {
+      const chapterPaths = deriveChapterPaths(paths, uid);
+      return [
+        {
+          role: 'chapter_body',
+          canonicalPath: chapterPaths.bodyPath,
+          parentIdentity,
+          disposition: 'absent',
+        },
+        {
+          role: 'chapter_sidecar',
+          canonicalPath: chapterPaths.sidecarPath,
+          parentIdentity,
+          disposition: 'absent',
+        },
+      ];
+    })();
+  const material = {
+    domain: 'mythpen.manuscript.uid-reservation',
+    version: 1,
+    assignmentKind: 'reserved_new',
+    objectKind,
+    projectUid: PROJECT_UID,
+    projectInstanceId: PROJECT_INSTANCE_ID,
+    logicalRequestId: 'task10b3-store-create',
+    logicalInputDigest: canonicalCreateLogicalInputDigest(command),
+    sourceBasisDigest: 'a'.repeat(64),
+    uid,
+    id: objectKind === 'volume' ? 2 : 3,
+    ...(objectKind === 'chapter' ? {
+      num: command.requestedNum ?? 2,
+      containerVolumeUid: command.containerVolumeUid,
+      requestedNum: command.requestedNum,
+    } : {}),
+    pathPredicates,
+  };
+  return validateIdentityReservationManifest({
+    ...material,
+    reservationId: reservationIdFor(material),
+  });
+}
+
+function remintReservation(reservation, mutate) {
+  const material = JSON.parse(JSON.stringify(reservation));
+  delete material.reservationId;
+  mutate(material);
+  return validateIdentityReservationManifest({
+    ...material,
+    reservationId: reservationIdFor(material),
+  });
+}
+
 function deepFreeze(value) {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const nested of Object.values(value)) deepFreeze(nested);
@@ -78,6 +166,44 @@ function stagedFact(templateFact, ino) {
     fileIdentity: Object.freeze({ dev: templateFact.parentIdentity.dev, ino: String(ino) }),
     parentIdentity: templateFact.parentIdentity,
   });
+}
+
+function canonicalObservedMembers(members) {
+  return members.map((member) => (member.present
+    ? {
+      role: member.role,
+      present: true,
+      byteSize: member.byteSize,
+      fileIdentity: { ...member.fileIdentity },
+      parentIdentity: { ...member.parentIdentity },
+    }
+    : { role: member.role, present: false }));
+}
+
+function ignoredRowsFor(snapshot, generation = 1) {
+  return normalizeIgnoredLedgerRows(snapshot.ignoredMemberObservations.map((observation) => ({
+    resource_kind: observation.kind,
+    resource_uid: observation.uid,
+    ignore_status: observation.status,
+    opaque_container_kind: observation.reference.containerKind,
+    opaque_container_uid: observation.reference.containerUid,
+    is_currently_referenced: observation.reference.state === 'indexed' ? 1 : 0,
+    member_snapshot_json: JSON.stringify({
+      version: 1,
+      members: canonicalObservedMembers(observation.members),
+    }),
+    projection_generation: generation,
+  })));
+}
+
+function buildClosure(
+  store,
+  snapshot,
+  mutation,
+  rows = ignoredRowsFor(snapshot),
+  identityReservation = null,
+) {
+  return store.buildClosure(snapshot, mutation, rows, identityReservation);
 }
 
 function currentProjectionFor(candidate) {
@@ -186,7 +312,7 @@ test('buildClosure rereads only the changed body and finalizeCandidate injects i
 
   const content = '替换后的正文';
   const afterBytes = Buffer.from(content, 'utf8');
-  const buildResult = await store.buildClosure(snapshot, {
+  const buildResult = await buildClosure(store, snapshot, {
     kind: 'chapter.replace_body',
     bodyRef: fixture.refs.chapterBody,
     content,
@@ -280,7 +406,7 @@ test('buildClosure compiles sidecar, combined, and volume metadata updates with 
     const fixture = createManuscriptTreeFixture();
     const store = createStore(fixture);
     const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
-    const buildResult = await store.buildClosure(snapshot, row.mutation(fixture));
+    const buildResult = await buildClosure(store, snapshot, row.mutation(fixture));
     assert.deepEqual(buildResult.closure.map((member) => member.ref.role), row.expectedRoles, row.name);
     assert.equal(
       fixture.controls.calls().contentReads,
@@ -316,21 +442,21 @@ test('buildClosure rejects copied or foreign snapshots, unsupported markdown, an
     bodyRef: fixture.refs.chapterBody,
     content: '合法正文',
   };
-  await assert.rejects(store.buildClosure({ ...snapshot }, mutation), TypeError);
+  await assert.rejects(buildClosure(store, { ...snapshot }, mutation), TypeError);
 
   const otherFixture = createManuscriptTreeFixture({
     dataRoot: fixture.dataRoot.replace('mythpen-store-fixture', 'mythpen-store-foreign'),
   });
   const otherStore = createStore(otherFixture);
-  await assert.rejects(otherStore.buildClosure(snapshot, mutation), TypeError);
+  await assert.rejects(buildClosure(otherStore, snapshot, mutation), TypeError);
 
-  await assertCode(store.buildClosure(snapshot, {
+  await assertCode(buildClosure(store, snapshot, {
     ...mutation,
     content: '- unsupported list',
   }), 'UNSUPPORTED_MARKDOWN_FOR_BODY_WRITE');
 
   fixture.controls.setBytes(fixture.refs.chapterBody, Buffer.from('原地改正文', 'utf8'));
-  await assertCode(store.buildClosure(snapshot, mutation), 'EXTERNAL_CHANGE_CONFLICT');
+  await assertCode(buildClosure(store, snapshot, mutation), 'EXTERNAL_CHANGE_CONFLICT');
 });
 
 test('buildClosure rejects a body write from read-only Markdown before opening closure bytes', async () => {
@@ -340,7 +466,7 @@ test('buildClosure rejects a body write from read-only Markdown before opening c
   const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
   const readsBefore = fixture.controls.calls().contentReads;
 
-  await assertCode(store.buildClosure(snapshot, {
+  await assertCode(buildClosure(store, snapshot, {
     kind: 'chapter.replace_body',
     bodyRef: fixture.refs.chapterBody,
     content: '转换为可视正文',
@@ -363,7 +489,7 @@ test('buildClosure recomputes capacity from final controlled facts plus active i
     validationOptions(fixture, { ignoredLedger }),
   );
 
-  const result = await store.buildClosure(snapshot, {
+  const result = await buildClosure(store, snapshot, {
     kind: 'chapter.replace_body',
     bodyRef: fixture.refs.chapterBody,
     content: 'x',
@@ -395,7 +521,7 @@ test('buildClosure no-op stays read-free and finalizeCandidate rejects every ine
   const store = createStore(fixture);
   const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
   const readsBefore = fixture.controls.calls().contentReads;
-  const noOp = await store.buildClosure(snapshot, {
+  const noOp = await buildClosure(store, snapshot, {
     kind: 'chapter.patch_sidecar',
     sidecarRef: fixture.refs.chapterSidecar,
     patch: { title: fixture.values.chapter.title },
@@ -404,7 +530,7 @@ test('buildClosure no-op stays read-free and finalizeCandidate rejects every ine
   assert.equal(fixture.controls.calls().contentReads, readsBefore);
   assert.doesNotThrow(() => store.finalizeCandidate(noOp, Object.freeze([])));
 
-  const buildResult = await store.buildClosure(snapshot, {
+  const buildResult = await buildClosure(store, snapshot, {
     kind: 'chapter.replace_body_and_sidecar',
     bodyRef: fixture.refs.chapterBody,
     sidecarRef: fixture.refs.chapterSidecar,
@@ -431,6 +557,598 @@ test('buildClosure no-op stays read-free and finalizeCandidate rejects every ine
     good[1],
   ])), TypeError);
   assert.doesNotThrow(() => store.finalizeCandidate(buildResult, Object.freeze(good)));
+});
+
+test('buildClosure moves a known chapter and derives both index bytes and positions once', async () => {
+  const fixture = createManuscriptTreeFixture();
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+
+  const result = await buildClosure(store, snapshot, {
+    kind: 'chapter.move',
+    chapterUid: CHAPTER_UID,
+    targetVolumeUid: null,
+    targetPosition: 1,
+  });
+
+  assert.deepEqual(result.closure.map((member) => member.ref.role), [
+    'volume_index',
+    'unassigned',
+  ]);
+  const volumeAfter = JSON.parse(result.closure[0].after.bytes.toString('utf8'));
+  const unassignedAfter = JSON.parse(result.closure[1].after.bytes.toString('utf8'));
+  assert.deepEqual(volumeAfter.chapter_uids, []);
+  assert.deepEqual(unassignedAfter.chapter_uids, [UNASSIGNED_CHAPTER_UID, CHAPTER_UID]);
+  assert.deepEqual(result.candidateTemplate.chapters.map((chapter) => ({
+    uid: chapter.chapterUid,
+    volumeUid: chapter.volumeUid,
+    chapterPosition: chapter.chapterPosition,
+    manuscriptPosition: chapter.manuscriptPosition,
+  })), [
+    {
+      uid: UNASSIGNED_CHAPTER_UID,
+      volumeUid: null,
+      chapterPosition: 1,
+      manuscriptPosition: 1,
+    },
+    {
+      uid: CHAPTER_UID,
+      volumeUid: null,
+      chapterPosition: 2,
+      manuscriptPosition: 2,
+    },
+  ]);
+});
+
+test('buildClosure requires complete chapter and volume permutations and preserves domain order', async () => {
+  const fixture = createManuscriptTreeFixture();
+  fixture.values.volume.chapter_uids = [CHAPTER_UID, UNASSIGNED_CHAPTER_UID];
+  fixture.values.unassigned.chapter_uids = [];
+  fixture.controls.setJson(fixture.refs.volume, fixture.values.volume);
+  fixture.controls.setJson(fixture.refs.unassigned, fixture.values.unassigned);
+  const secondVolumeRef = fixture.controls.addVolume(UNKNOWN_VOLUME_UID);
+  fixture.values.manuscript.volume_uids = [VOLUME_UID, UNKNOWN_VOLUME_UID];
+  fixture.controls.setJson(fixture.refs.manuscript, fixture.values.manuscript);
+  const lifecycleBasis = deepFreeze({
+    ...fixture.lifecycleBasis,
+    activeVolumeUids: [VOLUME_UID, UNKNOWN_VOLUME_UID],
+  });
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(
+    fixture.projectBinding,
+    validationOptions(fixture, { lifecycleBasis }),
+  );
+  const readsBeforeNoOp = fixture.controls.calls().contentReads;
+  const noOp = await buildClosure(store, snapshot, {
+    kind: 'chapter.reorder',
+    containerVolumeUid: VOLUME_UID,
+    chapterUids: [CHAPTER_UID, UNASSIGNED_CHAPTER_UID],
+  });
+  assert.deepEqual(noOp.closure, []);
+  assert.equal(fixture.controls.calls().contentReads, readsBeforeNoOp);
+
+  const chapters = await buildClosure(store, snapshot, {
+    kind: 'chapter.reorder',
+    containerVolumeUid: VOLUME_UID,
+    chapterUids: [UNASSIGNED_CHAPTER_UID, CHAPTER_UID],
+  });
+  assert.deepEqual(chapters.closure.map((member) => member.ref.role), ['volume_index']);
+  assert.deepEqual(chapters.candidateTemplate.chapters.map((chapter) => chapter.chapterUid), [
+    UNASSIGNED_CHAPTER_UID,
+    CHAPTER_UID,
+  ]);
+  await assert.rejects(buildClosure(store, snapshot, {
+    kind: 'chapter.reorder',
+    containerVolumeUid: VOLUME_UID,
+    chapterUids: [CHAPTER_UID],
+  }), TypeError);
+
+  const volumes = await buildClosure(store, snapshot, {
+    kind: 'volume.reorder',
+    volumeUids: [UNKNOWN_VOLUME_UID, VOLUME_UID],
+  });
+  assert.deepEqual(volumes.closure.map((member) => member.ref.role), ['manuscript']);
+  assert.deepEqual(volumes.candidateTemplate.volumeOrder, [UNKNOWN_VOLUME_UID, VOLUME_UID]);
+  assert.deepEqual(volumes.candidateTemplate.volumes.map((volume) => volume.volumePosition), [1, 2]);
+  assert.deepEqual(
+    volumes.closure[0].ref,
+    fixture.refs.manuscript,
+  );
+  assert.equal(secondVolumeRef.role, 'volume_index');
+});
+
+test('chapter and volume delete emit exact delete closure and keep lifetime identity capacity', async () => {
+  {
+    const fixture = createManuscriptTreeFixture();
+    const store = createStore(fixture);
+    const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+    const result = await buildClosure(store, snapshot, {
+      kind: 'chapter.delete',
+      chapterUid: CHAPTER_UID,
+    });
+
+    assert.deepEqual(result.closure.map((member) => member.ref.role), [
+      'chapter_body',
+      'chapter_sidecar',
+      'volume_index',
+    ]);
+    assert.deepEqual(result.closure.map((member) => member.after.exists), [false, false, true]);
+    assert.deepEqual(result.closure[0].after, {
+      exists: false,
+      bytes: null,
+      byteSize: 0,
+      rawSha256: null,
+    });
+    assert.deepEqual(result.candidateTemplate.chapters.map((chapter) => chapter.chapterUid), [
+      UNASSIGNED_CHAPTER_UID,
+    ]);
+    assert.equal(result.candidateTemplate.capacitySnapshot.measurements.chapterIdentities, 2);
+    assert.equal(result.candidateTemplate.capacitySnapshot.measurements.chapterDirectoryEntries, 2);
+
+    const afterPresent = result.candidateTemplate.controlledFiles.filter(
+      (fact) => fact.fileIdentity === null,
+    );
+    assert.equal(afterPresent.length, 1);
+    const candidate = store.finalizeCandidate(result, Object.freeze([
+      stagedFact(afterPresent[0], 9301),
+    ]));
+    assert.equal(candidate.controlledFiles.some(
+      (fact) => fact.resourceUid === CHAPTER_UID,
+    ), false);
+    const deletedBody = snapshot.controlledFiles.find(
+      (fact) => fact.role === 'chapter_body' && fact.resourceUid === CHAPTER_UID,
+    );
+    assert.throws(() => store.finalizeCandidate(result, Object.freeze([
+      stagedFact(afterPresent[0], 9301),
+      stagedFact(deletedBody, 9302),
+    ])), TypeError);
+  }
+
+  {
+    const fixture = createManuscriptTreeFixture();
+    const store = createStore(fixture);
+    const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+    const result = await buildClosure(store, snapshot, {
+      kind: 'volume.delete',
+      volumeUid: VOLUME_UID,
+    });
+
+    assert.deepEqual(result.closure.map((member) => member.ref.role), [
+      'chapter_body',
+      'chapter_sidecar',
+      'volume_index',
+      'manuscript',
+    ]);
+    assert.deepEqual(result.closure.map((member) => member.after.exists), [
+      false,
+      false,
+      false,
+      true,
+    ]);
+    assert.deepEqual(result.candidateTemplate.volumeOrder, []);
+    assert.deepEqual(result.candidateTemplate.chapters.map((chapter) => chapter.chapterUid), [
+      UNASSIGNED_CHAPTER_UID,
+    ]);
+    assert.equal(result.candidateTemplate.capacitySnapshot.measurements.volumeIdentities, 1);
+    assert.equal(result.candidateTemplate.capacitySnapshot.measurements.chapterIdentities, 2);
+  }
+});
+
+test('volume metadata and ignored reference actions use one known plus opaque serializer', async () => {
+  const fixture = createManuscriptTreeFixture();
+  fixture.controls.addChapter(UNKNOWN_CHAPTER_UID);
+  fixture.values.volume.chapter_uids = [UNKNOWN_CHAPTER_UID, CHAPTER_UID];
+  fixture.controls.setJson(fixture.refs.volume, fixture.values.volume);
+  const ignoredLedger = deepFreeze({
+    entries: [{ kind: 'chapter', status: 'active', uid: UNKNOWN_CHAPTER_UID }],
+  });
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(
+    fixture.projectBinding,
+    validationOptions(fixture, { ignoredLedger }),
+  );
+  const rows = ignoredRowsFor(snapshot);
+
+  const metadata = await buildClosure(store, snapshot, {
+    kind: 'volume.patch_metadata',
+    volumeRef: fixture.refs.volume,
+    patch: { title: '规范尾部' },
+  }, rows);
+  assert.deepEqual(
+    JSON.parse(metadata.closure[0].after.bytes.toString('utf8')).chapter_uids,
+    [CHAPTER_UID, UNKNOWN_CHAPTER_UID],
+  );
+
+  const preserve = await buildClosure(store, snapshot, {
+    kind: 'ignored.preserve_move_to_unassigned',
+    chapterUid: UNKNOWN_CHAPTER_UID,
+  }, rows);
+  assert.deepEqual(preserve.closure.map((member) => member.ref.role), [
+    'volume_index',
+    'unassigned',
+  ]);
+  assert.deepEqual(
+    JSON.parse(preserve.closure[0].after.bytes.toString('utf8')).chapter_uids,
+    [CHAPTER_UID],
+  );
+  assert.deepEqual(
+    JSON.parse(preserve.closure[1].after.bytes.toString('utf8')).chapter_uids,
+    [UNASSIGNED_CHAPTER_UID, UNKNOWN_CHAPTER_UID],
+  );
+  assert.deepEqual(preserve.candidateTemplate.ignoredLedgerAfter[0].reference, {
+    state: 'indexed',
+    containerKind: 'unassigned',
+    containerUid: null,
+  });
+
+  const detach = await buildClosure(store, snapshot, {
+    kind: 'ignored.detach_reference',
+    chapterUid: UNKNOWN_CHAPTER_UID,
+  }, rows);
+  assert.deepEqual(detach.closure.map((member) => member.ref.role), ['volume_index']);
+  assert.deepEqual(detach.candidateTemplate.ignoredLedgerAfter[0].reference, {
+    state: 'detached',
+    containerKind: null,
+    containerUid: null,
+  });
+});
+
+test('create closure binds the fourth-argument reservation into exact absent members and final candidates', async () => {
+  const rows = [
+    {
+      command: {
+        kind: 'volume.create',
+        title: '新增卷',
+        summary: '新增卷摘要',
+      },
+      expectedRoles: ['volume_index', 'manuscript'],
+      identityDimension: 'volumeIdentities',
+      directoryDelta: 0,
+    },
+    {
+      command: {
+        kind: 'chapter.create',
+        containerVolumeUid: VOLUME_UID,
+        requestedNum: null,
+        content: '新增章正文',
+        sidecar: {
+          title: '新增章',
+          outline: '新增章提纲',
+          status: 'pending',
+          summary: '新增章摘要',
+          cognitive_frame: '',
+          emotional_anchor: '',
+          world_texture: '',
+          concrete_mystery: '',
+          interpersonal_tension: '',
+        },
+      },
+      expectedRoles: ['chapter_body', 'chapter_sidecar', 'volume_index'],
+      identityDimension: 'chapterIdentities',
+      directoryDelta: 2,
+    },
+  ];
+
+  for (const row of rows) {
+    const fixture = createManuscriptTreeFixture();
+    const store = createStore(fixture);
+    const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+    const parentRole = row.command.kind === 'volume.create' ? 'volume_index' : 'chapter_body';
+    const parentIdentity = snapshot.controlledFiles.find(
+      (fact) => fact.role === parentRole,
+    ).parentIdentity;
+    const reservation = createReservation(fixture, row.command, parentIdentity);
+    const beforeCapacity = snapshot.capacitySnapshot.measurements;
+
+    await assert.rejects(
+      store.buildClosure(snapshot, row.command, ignoredRowsFor(snapshot)),
+      TypeError,
+    );
+    await assert.rejects(
+      store.buildClosure(
+        snapshot,
+        row.command,
+        ignoredRowsFor(snapshot),
+        JSON.parse(JSON.stringify(reservation)),
+      ),
+      TypeError,
+    );
+    await assert.rejects(store.buildClosure(
+      snapshot,
+      row.command,
+      ignoredRowsFor(snapshot),
+      Object.freeze({
+        ...reservation,
+        pathPredicates: reservation.pathPredicates.map((predicate) => ({ ...predicate })),
+      }),
+    ), TypeError);
+    const wrongDirectory = remintReservation(reservation, (value) => {
+      const directory = path.join(
+        path.dirname(path.dirname(value.pathPredicates[0].canonicalPath)),
+        'wrong-create-directory',
+      );
+      for (const predicate of value.pathPredicates) {
+        predicate.canonicalPath = path.join(directory, path.basename(predicate.canonicalPath));
+      }
+    });
+    const wrongParent = remintReservation(reservation, (value) => {
+      for (const predicate of value.pathPredicates) {
+        predicate.parentIdentity = { dev: parentIdentity.dev, ino: '999999' };
+      }
+    });
+    const readsBeforePathDrift = fixture.controls.calls().contentReads;
+    for (const driftedReservation of [wrongDirectory, wrongParent]) {
+      await assert.rejects(store.buildClosure(
+        snapshot,
+        row.command,
+        ignoredRowsFor(snapshot),
+        driftedReservation,
+      ), TypeError);
+      assert.equal(fixture.controls.calls().contentReads, readsBeforePathDrift);
+    }
+
+    const result = await store.buildClosure(
+      snapshot,
+      row.command,
+      ignoredRowsFor(snapshot),
+      reservation,
+    );
+    assert.deepEqual(result.closure.map((member) => member.ref.role), row.expectedRoles);
+    const creates = result.closure.filter((member) => member.before.exists === false);
+    assert.equal(creates.length, reservation.pathPredicates.length);
+    for (const member of creates) {
+      assert.deepEqual(member.before, {
+        exists: false,
+        bytes: null,
+        byteSize: 0,
+        rawSha256: null,
+        fileIdentity: null,
+      });
+      assert.deepEqual(
+        member.parentIdentity,
+        reservation.pathPredicates.find((predicate) => predicate.role === member.ref.role)
+          .parentIdentity,
+      );
+    }
+    assert.equal(
+      result.candidateTemplate.capacitySnapshot.measurements[row.identityDimension],
+      beforeCapacity[row.identityDimension] + 1,
+    );
+    assert.equal(
+      result.candidateTemplate.capacitySnapshot.measurements.chapterDirectoryEntries,
+      beforeCapacity.chapterDirectoryEntries + row.directoryDelta,
+    );
+
+    const newUid = reservation.uid;
+    const createdFacts = result.candidateTemplate.controlledFiles.filter(
+      (fact) => fact.resourceUid === newUid,
+    );
+    assert.equal(createdFacts.length, reservation.objectKind === 'volume' ? 1 : 2);
+    assert.equal(createdFacts.every((fact) => fact.fileIdentity === null), true);
+    const staged = result.candidateTemplate.controlledFiles
+      .filter((fact) => fact.fileIdentity === null)
+      .map((fact, index) => stagedFact(fact, 9400 + index));
+    const candidate = store.finalizeCandidate(result, Object.freeze(staged));
+    assert.equal(candidate.controlledFiles.filter(
+      (fact) => fact.resourceUid === newUid,
+    ).every((fact) => fact.fileIdentity !== null), true);
+    if (reservation.objectKind === 'volume') {
+      assert.equal(candidate.volumeOrder.at(-1), newUid);
+      assert.deepEqual(candidate.volumes.at(-1), {
+        summary: row.command.summary,
+        title: row.command.title,
+        volumePosition: candidate.volumes.length,
+        volumeUid: newUid,
+      });
+    } else {
+      const chapter = candidate.chapters.find((value) => value.chapterUid === newUid);
+      assert.equal(chapter.volumeUid, VOLUME_UID);
+      assert.equal(chapter.chapterPosition, 2);
+      assert.equal(chapter.manuscriptPosition, 2);
+      assert.equal(chapter.title, row.command.sidecar.title);
+      assert.equal(chapter.content, row.command.content);
+    }
+  }
+});
+
+test('chapter create serializes known then new then opaque and enforces lifetime capacity before staging', async () => {
+  const command = {
+    kind: 'chapter.create',
+    containerVolumeUid: VOLUME_UID,
+    requestedNum: 2,
+    content: '容量边界正文',
+    sidecar: {
+      title: '容量边界章',
+      outline: '',
+      status: 'writing',
+      summary: '',
+      cognitive_frame: '',
+      emotional_anchor: '',
+      world_texture: '',
+      concrete_mystery: '',
+      interpersonal_tension: '',
+    },
+  };
+  const fixture = createManuscriptTreeFixture();
+  fixture.controls.addChapter(UNKNOWN_CHAPTER_UID);
+  fixture.values.volume.chapter_uids = [UNKNOWN_CHAPTER_UID, CHAPTER_UID];
+  fixture.controls.setJson(fixture.refs.volume, fixture.values.volume);
+  const ignoredLedger = deepFreeze({
+    entries: [{ kind: 'chapter', status: 'active', uid: UNKNOWN_CHAPTER_UID }],
+  });
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(
+    fixture.projectBinding,
+    validationOptions(fixture, { ignoredLedger }),
+  );
+  const parentIdentity = snapshot.controlledFiles.find(
+    (fact) => fact.role === 'chapter_body',
+  ).parentIdentity;
+  const reservation = createReservation(fixture, command, parentIdentity);
+  const result = await store.buildClosure(
+    snapshot,
+    command,
+    ignoredRowsFor(snapshot),
+    reservation,
+  );
+  const indexMember = result.closure.find((member) => member.ref.role === 'volume_index');
+  assert.deepEqual(
+    JSON.parse(indexMember.after.bytes.toString('utf8')).chapter_uids,
+    [CHAPTER_UID, CREATED_CHAPTER_UID, UNKNOWN_CHAPTER_UID],
+  );
+
+  const limitedFixture = createManuscriptTreeFixture();
+  const limitedStore = createStore(limitedFixture, { chapterIdentities: 2 });
+  const limitedSnapshot = await limitedStore.validateFull(
+    limitedFixture.projectBinding,
+    validationOptions(limitedFixture),
+  );
+  const limitedParent = limitedSnapshot.controlledFiles.find(
+    (fact) => fact.role === 'chapter_body',
+  ).parentIdentity;
+  await assertCode(limitedStore.buildClosure(
+    limitedSnapshot,
+    command,
+    ignoredRowsFor(limitedSnapshot),
+    createReservation(limitedFixture, command, limitedParent),
+  ), 'MANUSCRIPT_CONTENT_TOO_LARGE');
+});
+
+test('chapter create rejects non-writable Markdown and lossy string encoding before closure reads', async () => {
+  for (const content of ['- unsupported list', 'nul\u0000body', '\ud800']) {
+    const fixture = createManuscriptTreeFixture();
+    const store = createStore(fixture);
+    const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+    const command = {
+      kind: 'chapter.create',
+      containerVolumeUid: VOLUME_UID,
+      requestedNum: null,
+      content,
+      sidecar: {
+        title: '不可写正文',
+        outline: '',
+        status: 'pending',
+        summary: '',
+        cognitive_frame: '',
+        emotional_anchor: '',
+        world_texture: '',
+        concrete_mystery: '',
+        interpersonal_tension: '',
+      },
+    };
+    const parentIdentity = snapshot.controlledFiles.find(
+      (fact) => fact.role === 'chapter_body',
+    ).parentIdentity;
+    const readsBefore = fixture.controls.calls().contentReads;
+    await assertCode(store.buildClosure(
+      snapshot,
+      command,
+      ignoredRowsFor(snapshot),
+      createReservation(fixture, command, parentIdentity),
+    ), 'UNSUPPORTED_MARKDOWN_FOR_BODY_WRITE');
+    assert.equal(fixture.controls.calls().contentReads, readsBefore);
+  }
+});
+
+test('ignored row bijection and indexed opaque children block structure work before boundary reads', async () => {
+  const fixture = createManuscriptTreeFixture();
+  fixture.controls.addChapter(UNKNOWN_CHAPTER_UID);
+  fixture.values.volume.chapter_uids.push(UNKNOWN_CHAPTER_UID);
+  fixture.controls.setJson(fixture.refs.volume, fixture.values.volume);
+  const ignoredLedger = deepFreeze({
+    entries: [{ kind: 'chapter', status: 'active', uid: UNKNOWN_CHAPTER_UID }],
+  });
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(
+    fixture.projectBinding,
+    validationOptions(fixture, { ignoredLedger }),
+  );
+  const readsBefore = fixture.controls.calls().contentReads;
+
+  await assertCode(buildClosure(store, snapshot, {
+    kind: 'volume.delete',
+    volumeUid: VOLUME_UID,
+  }, ignoredRowsFor(snapshot)), 'IGNORED_REFERENCE_BLOCKS_CONTAINER_DELETE');
+  assert.equal(fixture.controls.calls().contentReads, readsBefore);
+
+  await assert.rejects(buildClosure(store, snapshot, {
+    kind: 'chapter.delete',
+    chapterUid: CHAPTER_UID,
+  }, normalizeIgnoredLedgerRows([])), TypeError);
+  assert.equal(fixture.controls.calls().contentReads, readsBefore);
+
+  const mismatched = ignoredRowsFor(snapshot).map((row) => {
+    const parsed = JSON.parse(row.member_snapshot_json);
+    parsed.members[0].byteSize += 1;
+    return { ...row, member_snapshot_json: JSON.stringify(parsed) };
+  });
+  await assert.rejects(buildClosure(store, snapshot, {
+    kind: 'chapter.delete',
+    chapterUid: CHAPTER_UID,
+  }, mismatched), TypeError);
+  assert.equal(fixture.controls.calls().contentReads, readsBefore);
+});
+
+test('Store rejects every inexact structural shape and bound before opening closure bytes', async () => {
+  const fixture = createManuscriptTreeFixture();
+  const store = createStore(fixture);
+  const snapshot = await store.validateFull(fixture.projectBinding, validationOptions(fixture));
+  const rows = ignoredRowsFor(snapshot);
+  const readsBefore = fixture.controls.calls().contentReads;
+  let getterCalls = 0;
+  const accessor = {
+    kind: 'chapter.delete',
+  };
+  Object.defineProperty(accessor, 'chapterUid', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return CHAPTER_UID;
+    },
+  });
+  const sparse = [];
+  sparse.length = 1;
+  const invalid = [
+    { kind: 'chapter.delete', chapterUid: CHAPTER_UID, extra: true },
+    accessor,
+    {
+      kind: 'chapter.move',
+      chapterUid: CHAPTER_UID,
+      targetVolumeUid: null,
+      targetPosition: 2,
+    },
+    {
+      kind: 'chapter.move',
+      chapterUid: CHAPTER_UID,
+      targetVolumeUid: VOLUME_UID,
+      targetPosition: 0,
+    },
+    {
+      kind: 'chapter.reorder',
+      containerVolumeUid: VOLUME_UID,
+      chapterUids: [CHAPTER_UID, CHAPTER_UID],
+    },
+    {
+      kind: 'chapter.reorder',
+      containerVolumeUid: VOLUME_UID,
+      chapterUids: sparse,
+    },
+    {
+      kind: 'volume.delete',
+      volumeUid: VOLUME_UID,
+      childPolicy: 'cascade',
+    },
+  ];
+  for (const mutation of invalid) {
+    await assert.rejects(buildClosure(store, snapshot, mutation, rows));
+    assert.equal(fixture.controls.calls().contentReads, readsBefore);
+  }
+  await assert.rejects(store.buildClosure(snapshot, {
+    kind: 'chapter.delete',
+    chapterUid: CHAPTER_UID,
+  }), TypeError);
+  assert.equal(fixture.controls.calls().contentReads, readsBefore);
+  assert.equal(getterCalls, 0);
 });
 
 test('full validation builds one immutable file-fact projection with canonical positions', async () => {
@@ -659,6 +1377,8 @@ test('tombstone resources can revive while a complete known deletion remains a v
 
 test('active ignored members stay opaque while revoked identities still consume lifetime capacity', async () => {
   const fixture = createManuscriptTreeFixture();
+  fixture.controls.setBytes(fixture.refs.chapterBody, Buffer.from([0xff, 0x00]));
+  fixture.controls.setBytes(fixture.refs.chapterSidecar, Buffer.from('{', 'utf8'));
   const lifecycleBasis = {
     ...fixture.lifecycleBasis,
     activeChapterUids: [UNASSIGNED_CHAPTER_UID],
@@ -675,14 +1395,37 @@ test('active ignored members stay opaque while revoked identities still consume 
   assert.deepEqual(projected.chapters.map((entry) => entry.chapterUid), [
     UNASSIGNED_CHAPTER_UID,
   ]);
-  assert.equal(snapshot.ignoredMemberObservations.length, 1);
-  assert.deepEqual(
-    snapshot.ignoredMemberObservations[0].members.map((member) => member.role).sort(),
-    ['chapter_body', 'chapter_sidecar'],
-  );
+  assert.deepEqual(snapshot.ignoredMemberObservations, [{
+    kind: 'chapter',
+    members: [
+      {
+        byteSize: 2,
+        fileIdentity: { dev: '1', ino: '103' },
+        parentIdentity: { dev: '1', ino: '13' },
+        present: true,
+        role: 'chapter_body',
+      },
+      {
+        byteSize: 1,
+        fileIdentity: { dev: '1', ino: '104' },
+        parentIdentity: { dev: '1', ino: '13' },
+        present: true,
+        role: 'chapter_sidecar',
+      },
+    ],
+    reference: {
+      containerKind: 'volume',
+      containerUid: VOLUME_UID,
+      state: 'indexed',
+    },
+    status: 'active',
+    uid: CHAPTER_UID,
+  }]);
   assert.equal(snapshot.capacitySnapshot.measurements.chapterIdentities, 2);
+  assert.equal(snapshot.capacitySnapshot.measurements.controlledFiles, 7);
   const calls = fixture.controls.calls();
   assert.equal(calls.contentOpens, 5);
+  assert.equal(calls.contentReads, 5);
   assert.equal(calls.probes.includes(refKey(fixture.refs.chapterBody)), true);
   assert.equal(calls.probes.includes(refKey(fixture.refs.chapterSidecar)), true);
 
@@ -696,7 +1439,10 @@ test('active ignored members stay opaque while revoked identities still consume 
       ignoredLedger: {
         entries: [{ kind: 'chapter', status: 'active', uid: CHAPTER_UID }],
       },
-      lifecycleBasis: duplicateFixture.lifecycleBasis,
+      lifecycleBasis: {
+        ...duplicateFixture.lifecycleBasis,
+        activeChapterUids: [UNASSIGNED_CHAPTER_UID],
+      },
     }),
     'MANUSCRIPT_FILESET_INVALID',
   );
@@ -705,7 +1451,10 @@ test('active ignored members stay opaque while revoked identities still consume 
   await assertCode(
     createStore(revokedFixture).validateFull(revokedFixture.projectBinding, {
       ignoredLedger: { entries: [{ kind: 'chapter', status: 'revoked', uid: CHAPTER_UID }] },
-      lifecycleBasis: revokedFixture.lifecycleBasis,
+      lifecycleBasis: {
+        ...revokedFixture.lifecycleBasis,
+        activeChapterUids: [UNASSIGNED_CHAPTER_UID],
+      },
     }),
     'EXTERNAL_RESOURCE_CREATION_UNSUPPORTED',
   );
@@ -721,12 +1470,208 @@ test('active ignored members stay opaque while revoked identities still consume 
     chapterIdentities: 2,
   }).validateFull(deletedFixture.projectBinding, {
     ignoredLedger: { entries: [{ kind: 'chapter', status: 'revoked', uid: CHAPTER_UID }] },
-    lifecycleBasis: deletedFixture.lifecycleBasis,
+    lifecycleBasis: {
+      ...deletedFixture.lifecycleBasis,
+      activeChapterUids: [UNASSIGNED_CHAPTER_UID],
+    },
   });
   assert.equal(deletedSnapshot.capacitySnapshot.measurements.chapterIdentities, 2);
   assert.deepEqual(deletedSnapshot.warnings.map((warning) => warning.dimension), [
     'chapterIdentities',
   ]);
+  assert.deepEqual(deletedSnapshot.ignoredMemberObservations[0].reference, {
+    containerKind: null,
+    containerUid: null,
+    state: 'detached',
+  });
+});
+
+test('ignored references come only from the validated index closure and cover every legal container', async () => {
+  const cases = [
+    {
+      expected: {
+        containerKind: 'unassigned',
+        containerUid: null,
+        state: 'indexed',
+      },
+      kind: 'chapter',
+      prepare(fixture) {
+        return {
+          lifecycleBasis: {
+            ...fixture.lifecycleBasis,
+            activeChapterUids: [CHAPTER_UID],
+          },
+          uid: UNASSIGNED_CHAPTER_UID,
+        };
+      },
+    },
+    {
+      expected: {
+        containerKind: 'manuscript',
+        containerUid: null,
+        state: 'indexed',
+      },
+      kind: 'volume',
+      prepare(fixture) {
+        fixture.controls.setBytes(fixture.refs.volume, Buffer.from('{', 'utf8'));
+        fixture.controls.deleteFile(fixture.refs.chapterBody);
+        fixture.controls.deleteFile(fixture.refs.chapterSidecar);
+        return {
+          lifecycleBasis: {
+            ...fixture.lifecycleBasis,
+            activeChapterUids: [UNASSIGNED_CHAPTER_UID],
+            activeVolumeUids: [],
+          },
+          uid: VOLUME_UID,
+        };
+      },
+    },
+    {
+      expected: {
+        containerKind: null,
+        containerUid: null,
+        state: 'detached',
+      },
+      kind: 'chapter',
+      prepare(fixture) {
+        fixture.controls.addChapter(UNKNOWN_CHAPTER_UID, {
+          body: Buffer.from([0xff]).toString('latin1'),
+          sidecar: fixture.values.chapter,
+        });
+        return {
+          lifecycleBasis: fixture.lifecycleBasis,
+          uid: UNKNOWN_CHAPTER_UID,
+        };
+      },
+    },
+    {
+      expected: {
+        containerKind: null,
+        containerUid: null,
+        state: 'detached',
+      },
+      kind: 'volume',
+      prepare(fixture) {
+        fixture.controls.addVolume(UNKNOWN_VOLUME_UID);
+        return {
+          lifecycleBasis: fixture.lifecycleBasis,
+          uid: UNKNOWN_VOLUME_UID,
+        };
+      },
+    },
+    {
+      expected: {
+        containerKind: null,
+        containerUid: null,
+        state: 'detached',
+      },
+      kind: 'chapter',
+      prepare(fixture) {
+        return {
+          lifecycleBasis: fixture.lifecycleBasis,
+          uid: UNKNOWN_CHAPTER_UID,
+        };
+      },
+    },
+  ];
+
+  for (const row of cases) {
+    const fixture = createManuscriptTreeFixture();
+    const { lifecycleBasis, uid } = row.prepare(fixture);
+    const snapshot = await createStore(fixture).validateFull(fixture.projectBinding, {
+      ignoredLedger: { entries: [{ kind: row.kind, status: 'active', uid }] },
+      lifecycleBasis,
+    });
+    assert.deepEqual(snapshot.ignoredMemberObservations[0].reference, row.expected);
+    if (row === cases.at(-1)) {
+      assert.deepEqual(snapshot.ignoredMemberObservations[0].members, [
+        { present: false, role: 'chapter_body' },
+        { present: false, role: 'chapter_sidecar' },
+      ]);
+    }
+  }
+
+  const callerFixture = createManuscriptTreeFixture();
+  await assert.rejects(createStore(callerFixture).validateFull(callerFixture.projectBinding, {
+    ignoredLedger: {
+      entries: [{
+        containerKind: 'volume',
+        kind: 'chapter',
+        status: 'active',
+        uid: CHAPTER_UID,
+      }],
+    },
+    lifecycleBasis: callerFixture.lifecycleBasis,
+  }), TypeError);
+  assert.deepEqual(callerFixture.controls.calls().enumerateCalls, []);
+
+  const unsafeFixture = createManuscriptTreeFixture();
+  unsafeFixture.controls.setUnsafe(unsafeFixture.refs.chapterBody, { reparse: true });
+  await assertCode(createStore(unsafeFixture).validateFull(unsafeFixture.projectBinding, {
+    ignoredLedger: {
+      entries: [{ kind: 'chapter', status: 'active', uid: CHAPTER_UID }],
+    },
+    lifecycleBasis: {
+      ...unsafeFixture.lifecycleBasis,
+      activeChapterUids: [UNASSIGNED_CHAPTER_UID],
+    },
+  }), 'MANUSCRIPT_PATH_UNSAFE');
+  assert.equal(unsafeFixture.controls.calls().contentOpens, 0);
+});
+
+test('ignored identities cannot overlap active or tombstoned lifecycle identities', async () => {
+  const rows = [];
+  for (const kind of ['chapter', 'volume']) {
+    for (const status of ['active', 'revoked']) {
+      for (const lifecycleState of ['active', 'tombstone']) {
+        rows.push({ kind, lifecycleState, status });
+      }
+    }
+  }
+
+  const actual = [];
+  for (const row of rows) {
+    const fixture = createManuscriptTreeFixture();
+    const uid = row.kind === 'chapter' ? CHAPTER_UID : VOLUME_UID;
+    const lifecycleBasis = {
+      ...fixture.lifecycleBasis,
+      ...(row.kind === 'chapter'
+        ? {
+          activeChapterUids: row.lifecycleState === 'active'
+            ? fixture.lifecycleBasis.activeChapterUids
+            : [UNASSIGNED_CHAPTER_UID],
+          chapterTombstoneUids: row.lifecycleState === 'tombstone' ? [CHAPTER_UID] : [],
+        }
+        : {
+          activeVolumeUids: row.lifecycleState === 'active' ? [VOLUME_UID] : [],
+          volumeTombstoneUids: row.lifecycleState === 'tombstone' ? [VOLUME_UID] : [],
+        }),
+    };
+
+    const code = await captureCode(createStore(fixture).validateFull(fixture.projectBinding, {
+      ignoredLedger: { entries: [{ kind: row.kind, status: row.status, uid }] },
+      lifecycleBasis,
+    }));
+    const calls = fixture.controls.calls();
+    actual.push({
+      code,
+      contentOpens: calls.contentOpens,
+      contentReads: calls.contentReads,
+      directoryInspects: calls.directoryInspects.length,
+      enumerateCalls: calls.enumerateCalls.length,
+      identityProbes: calls.probes.length,
+      ...row,
+    });
+  }
+  assert.deepEqual(actual, rows.map((row) => ({
+    code: 'MANUSCRIPT_FILESET_INVALID',
+    contentOpens: 0,
+    contentReads: 0,
+    directoryInspects: 0,
+    enumerateCalls: 0,
+    identityProbes: 0,
+    ...row,
+  })));
 });
 
 test('stable read rejects handle drift and unsafe physical files without exposing raw bytes', async () => {

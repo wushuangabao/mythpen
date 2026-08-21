@@ -10,6 +10,11 @@ const {
   deriveManuscriptPaths,
   resolveControlledFileRef,
 } = require('./paths');
+const { inspectMarkdown, parseCanonicalJson } = require('./format');
+const {
+  canonicalCreateLogicalInputDigest,
+  validateIdentityReservationManifest,
+} = require('./uid-reservation');
 const { mintJournalAuthorityCapability } = require('./capability-registry');
 const { FAULT_POINTS, faultPoint } = require('../testing/fault-injection');
 
@@ -34,6 +39,7 @@ const ROLE_ORDER = Object.freeze({
 const journalRecords = new WeakMap();
 const stagedAssetRecords = new WeakMap();
 const preparedAssetRecords = new WeakMap();
+const reservationAuthorityRecords = new WeakMap();
 const JOURNAL_AUTHORITY_BACKEND = Object.freeze({ kind: 'file_publication_journal' });
 const JOURNAL_AUTHORITY_OPTIONS = Object.freeze({
   backendToken: JOURNAL_AUTHORITY_BACKEND,
@@ -445,6 +451,124 @@ function buildReservationMembers(members, binding, journalId) {
   }));
 }
 
+function assertOrdinaryCreateClosure(record, manifest, {
+  baseGeneration,
+  basisDigest,
+  logicalRequestId,
+  targetGeneration,
+}, members, verifyLogicalInput = false) {
+  if (
+    manifest.projectUid !== record.projectBinding.projectUid
+    || manifest.projectInstanceId !== record.projectBinding.projectInstanceId
+    || manifest.logicalRequestId !== logicalRequestId
+    || manifest.sourceBasisDigest !== basisDigest
+    || targetGeneration !== baseGeneration + 1
+  ) throw new TypeError('identity reservation does not match the journal create binding');
+
+  let creates;
+  let indexMember;
+  if (manifest.objectKind === 'volume') {
+    if (members.length !== 2) throw new TypeError('volume create closure has an invalid member set');
+    creates = members.filter((member) => (
+      member.operation === 'create'
+      && member.ref.role === 'volume_index'
+      && member.ref.volumeUid === manifest.uid
+    ));
+    indexMember = members.find((member) => (
+      member.operation === 'update' && member.ref.role === 'manuscript'
+    ));
+    if (creates.length !== 1 || indexMember === undefined) {
+      throw new TypeError('volume create closure is not the exact structure mutation');
+    }
+  } else {
+    if (members.length !== 3) throw new TypeError('chapter create closure has an invalid member set');
+    creates = members.filter((member) => (
+      member.operation === 'create'
+      && (member.ref.role === 'chapter_body' || member.ref.role === 'chapter_sidecar')
+      && member.ref.chapterUid === manifest.uid
+    ));
+    const expectedIndexRole = manifest.containerVolumeUid === null ? 'unassigned' : 'volume_index';
+    indexMember = members.find((member) => (
+      member.operation === 'update'
+      && member.ref.role === expectedIndexRole
+      && (expectedIndexRole !== 'volume_index'
+        || member.ref.volumeUid === manifest.containerVolumeUid)
+    ));
+    if (
+      creates.length !== 2
+      || new Set(creates.map((member) => member.ref.role)).size !== 2
+      || indexMember === undefined
+    ) throw new TypeError('chapter create closure is not the exact structure mutation');
+  }
+
+  const createByRole = new Map(creates.map((member) => [member.ref.role, member]));
+  if (manifest.pathPredicates.length !== creates.length) {
+    throw new TypeError('identity reservation path predicate set is incomplete');
+  }
+  for (const predicate of manifest.pathPredicates) {
+    const member = createByRole.get(predicate.role);
+    const memberFinalPath = member?.final?.path ?? (
+      member === undefined ? null : finalPath(record.projectBinding, member.ref)
+    );
+    const memberParentIdentity = member?.parentIdentity ?? member?.final?.parentIdentity;
+    if (
+      member === undefined
+      || predicate.disposition !== 'absent'
+      || predicate.canonicalPath !== memberFinalPath
+      || !sameIdentity(predicate.parentIdentity, memberParentIdentity)
+    ) throw new TypeError('identity reservation path predicates do not match the create closure');
+  }
+  if (!verifyLogicalInput) return;
+
+  let logicalInputDigest;
+  if (manifest.objectKind === 'volume') {
+    const parsed = parseCanonicalJson({
+      role: 'volume_index',
+      bytes: creates[0].after.bytes,
+      expectedUid: manifest.uid,
+    });
+    if (parsed.chapter_uids.length !== 0) {
+      throw new TypeError('new volume index must not contain existing chapters');
+    }
+    logicalInputDigest = canonicalCreateLogicalInputDigest({
+      kind: 'volume.create',
+      title: parsed.title,
+      summary: parsed.summary,
+    });
+  } else {
+    const createByRole = new Map(creates.map((member) => [member.ref.role, member]));
+    const body = inspectMarkdown(createByRole.get('chapter_body').after.bytes);
+    if (body.contentAvailable !== true) {
+      throw new TypeError('new chapter body does not expose exact UTF-8 content');
+    }
+    const sidecar = parseCanonicalJson({
+      role: 'chapter_sidecar',
+      bytes: createByRole.get('chapter_sidecar').after.bytes,
+      expectedUid: manifest.uid,
+    });
+    logicalInputDigest = canonicalCreateLogicalInputDigest({
+      kind: 'chapter.create',
+      containerVolumeUid: manifest.containerVolumeUid,
+      requestedNum: manifest.requestedNum,
+      content: body.content,
+      sidecar: {
+        title: sidecar.title,
+        outline: sidecar.outline,
+        status: sidecar.status,
+        summary: sidecar.summary,
+        cognitive_frame: sidecar.cognitive_frame,
+        emotional_anchor: sidecar.emotional_anchor,
+        world_texture: sidecar.world_texture,
+        concrete_mystery: sidecar.concrete_mystery,
+        interpersonal_tension: sidecar.interpersonal_tension,
+      },
+    });
+  }
+  if (logicalInputDigest !== manifest.logicalInputDigest) {
+    throw new TypeError('identity reservation logical input does not match create bytes');
+  }
+}
+
 function snapshotAsset(value, label = 'asset') {
   const descriptors = assertExactKeys(value, [
     'assetKind',
@@ -754,14 +878,17 @@ function snapshotAssetsReservation(record, payload, journalId) {
     throw new TypeError('assets reservation project binding changed');
   }
   const members = snapshotPersistedMembers(payload.members, record, journalId);
+  const mode = modeForParent(parent);
   const identityReservation = payload.identityReservation === null
     ? null
-    : snapshotPlainData(payload.identityReservation, 'persisted identityReservation');
+    : parent.kind === 'ordinary' && mode === 'full'
+      ? validateIdentityReservationManifest(payload.identityReservation)
+      : snapshotPlainData(payload.identityReservation, 'persisted identityReservation');
   const reservation = Object.freeze({
     version: 1,
     record_kind: 'reservation',
     journalId,
-    mode: modeForParent(parent),
+    mode,
     parent,
     projectBinding,
     logicalRequestId: payload.logicalRequestId,
@@ -795,6 +922,13 @@ function snapshotAssetsReservation(record, payload, journalId) {
     || assertDigest(reservation.inputDigest, 'event inputDigest') !== reservation.inputDigest
     || reservation.inputDigest !== digestPlain(inputBinding)
   ) throw new TypeError('assets reservation binding is invalid');
+  if (
+    reservation.parent.kind === 'ordinary'
+    && reservation.mode === 'full'
+    && identityReservation !== null
+  ) {
+    assertOrdinaryCreateClosure(record, identityReservation, reservation, members);
+  }
   return reservation;
 }
 
@@ -818,19 +952,52 @@ function assertEventShape(payload, keys, label) {
   if (payload.version !== 1) throw new TypeError(`${label}.version is invalid`);
 }
 
-function parseJournal(record, journalId) {
+function captureJournalGroups(events) {
+  try {
+    if (!Array.isArray(events)) throw new TypeError('ControlStore read result must be an array');
+    const groups = new Map();
+    for (const event of events) {
+      if (typeof event?.type !== 'string' || !event.type.startsWith(EVENT_PREFIX)) continue;
+      if (!isPlainObject(event.payload)) {
+        throw recoveryRequired('file publication event payload is malformed');
+      }
+      const journalIdDescriptor = Object.getOwnPropertyDescriptor(event.payload, 'journalId');
+      if (
+        journalIdDescriptor === undefined
+        || journalIdDescriptor.enumerable !== true
+        || !Object.hasOwn(journalIdDescriptor, 'value')
+      ) throw new TypeError('file publication event journalId is malformed');
+      const journalId = assertCanonicalUuid(journalIdDescriptor.value, 'journal_id');
+      const suffix = event.type.slice(EVENT_PREFIX.length);
+      if (!EVENT_SUFFIXES.has(suffix)) {
+        throw recoveryRequired('file publication event suffix is unknown');
+      }
+      const group = groups.get(journalId);
+      if (group === undefined) groups.set(journalId, [event]);
+      else group.push(event);
+    }
+    return groups;
+  } catch (cause) {
+    if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
+    throw recoveryRequired('file publication event catalog is malformed', cause);
+  }
+}
+
+function parseJournal(record, journalId, capturedEvents = null) {
   const result = {
     state: null,
     reservation: null,
     reservationDigest: null,
+    stageReservations: null,
     ready: new Map(),
     targetReservation: null,
     targetReady: null,
     manifestDigest: null,
     filesPublished: null,
+    terminalDisposition: null,
   };
   try {
-    const events = record.controlStore.read();
+    const events = capturedEvents ?? record.controlStore.read();
     for (const event of events) {
     if (typeof event.type !== 'string' || !event.type.startsWith(EVENT_PREFIX)) continue;
     const payload = event.payload;
@@ -861,6 +1028,7 @@ function parseJournal(record, journalId) {
         }
         result.reservation = snapshotAssetsReservation(record, payload, journalId);
         result.reservationDigest = digestPlain(result.reservation);
+        result.stageReservations = expectedStageReservations(result.reservation);
         result.state = 'assets_reserved';
       } else if (payload.record_kind === 'asset_ready') {
         assertEventShape(payload, [
@@ -877,7 +1045,7 @@ function parseJournal(record, journalId) {
           throw recoveryRequired('asset ready fact has the wrong reservation digest');
         }
         const asset = snapshotAsset(payload.asset, 'asset ready fact');
-        const expected = expectedStageReservations(result.reservation).get(asset.path);
+        const expected = result.stageReservations.get(asset.path);
         if (
           expected === undefined
           || expected.assetKind !== asset.assetKind
@@ -910,8 +1078,7 @@ function parseJournal(record, journalId) {
         if (result.state !== 'assets_reserved') {
           throw recoveryRequired('out-of-order target reservation');
         }
-        const expectedStage = expectedStageReservations(result.reservation);
-        if ([...expectedStage.keys()].some((assetPath) => !result.ready.has(assetPath))) {
+        if ([...result.stageReservations.keys()].some((assetPath) => !result.ready.has(assetPath))) {
           throw recoveryRequired('target was reserved before staged assets were ready');
         }
         if (payload.reservationDigest !== result.reservationDigest) {
@@ -1027,6 +1194,7 @@ function parseJournal(record, journalId) {
         throw recoveryRequired('completed manifest digest changed');
       }
       result.state = 'completed';
+      result.terminalDisposition = 'after';
       continue;
     }
     if (suffix === 'rolled_back') {
@@ -1045,6 +1213,7 @@ function parseJournal(record, journalId) {
         throw recoveryRequired('rolled_back manifest digest changed');
       }
       result.state = 'rolled_back';
+      result.terminalDisposition = 'before';
       continue;
     }
     if (suffix === 'assets_collected') {
@@ -1065,7 +1234,7 @@ function parseJournal(record, journalId) {
       assertCollectionReceipts(
         payload.assets,
         manifest,
-        result.state === 'rolled_back' ? 'BEFORE' : 'AFTER',
+        result.terminalDisposition === 'before' ? 'BEFORE' : 'AFTER',
       );
       result.state = 'assets_collected';
     }
@@ -1075,6 +1244,150 @@ function parseJournal(record, journalId) {
     if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
     throw recoveryRequired('file publication event chain is malformed', cause);
   }
+}
+
+function captureParsedJournalCatalog(record) {
+  const events = record.controlStore.read();
+  const groups = captureJournalGroups(events);
+  const parsed = new Map();
+  for (const [journalId, journalEvents] of groups) {
+    parsed.set(journalId, parseJournal(record, journalId, journalEvents));
+  }
+  return parsed;
+}
+
+function assertOrdinaryCreateParsed(parsed, journalId, logicalRequestId) {
+  const reservation = parsed.reservation;
+  if (
+    reservation === null
+    || reservation.journalId !== journalId
+    || reservation.logicalRequestId !== logicalRequestId
+    || reservation.mode !== 'full'
+    || reservation.parent.kind !== 'ordinary'
+    || reservation.parent.journalId !== null
+    || reservation.identityReservation === null
+  ) throw recoveryRequired('logical request is not one exact ordinary create reservation');
+  return reservation;
+}
+
+function reservationBinding(parsed) {
+  const reservation = parsed.reservation;
+  if (reservation === null || reservation.identityReservation === null) {
+    throw recoveryRequired('identity reservation binding is absent');
+  }
+  const identityReservation = validateIdentityReservationManifest(reservation.identityReservation);
+  return deepFreeze({
+    projectUid: reservation.projectBinding.projectUid,
+    projectInstanceId: reservation.projectBinding.projectInstanceId,
+    journalId: reservation.journalId,
+    logicalRequestId: reservation.logicalRequestId,
+    baseGeneration: reservation.baseGeneration,
+    targetGeneration: reservation.targetGeneration,
+    basisDigest: reservation.basisDigest,
+    logicalInputDigest: identityReservation.logicalInputDigest,
+    inputDigest: reservation.inputDigest,
+    reservationDigest: parsed.reservationDigest,
+  });
+}
+
+function lookupOutcome(parsed) {
+  if (parsed.state === 'assets_reserved' || parsed.state === 'target_reserved') return 'early';
+  if (['prepared', 'files_published', 'projection_committed'].includes(parsed.state)) return 'advanced';
+  if (parsed.state === 'completed' || parsed.terminalDisposition === 'after') return 'after';
+  if (parsed.state === 'rolled_back' || parsed.terminalDisposition === 'before') return 'before';
+  throw recoveryRequired('ordinary request state cannot be classified');
+}
+
+function lookupOrdinaryInCatalog(catalog, logicalRequestId) {
+  const matches = [];
+  for (const [journalId, parsed] of catalog) {
+    if (parsed.reservation?.logicalRequestId === logicalRequestId) matches.push([journalId, parsed]);
+  }
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) throw recoveryRequired('logical request belongs to multiple journals');
+  const [journalId, parsed] = matches[0];
+  const reservation = assertOrdinaryCreateParsed(parsed, journalId, logicalRequestId);
+  return deepFreeze({
+    state: parsed.state,
+    outcome: lookupOutcome(parsed),
+    identityReservation: reservation.identityReservation,
+    reservationBinding: reservationBinding(parsed),
+  });
+}
+
+function snapshotReservationScope(value, record) {
+  const descriptors = assertExactKeys(value, [
+    'projectUid',
+    'projectInstanceId',
+    'objectKind',
+  ], 'reservation source scope');
+  const projectUid = assertCanonicalUuid(descriptors.projectUid.value, 'project_uid');
+  const projectInstanceId = assertCanonicalUuid(
+    descriptors.projectInstanceId.value,
+    'project_instance_id',
+  );
+  const objectKind = descriptors.objectKind.value;
+  if (objectKind !== 'chapter' && objectKind !== 'volume') {
+    throw new TypeError('reservation source objectKind is invalid');
+  }
+  if (
+    projectUid !== record.projectBinding.projectUid
+    || projectInstanceId !== record.projectBinding.projectInstanceId
+  ) throw new TypeError('reservation source scope does not match this project');
+  return Object.freeze({ projectUid, projectInstanceId, objectKind });
+}
+
+function enumerateReservationSource(record, scopeInput) {
+  const scope = snapshotReservationScope(scopeInput, record);
+  const catalog = captureParsedJournalCatalog(record);
+  const uids = new Set();
+  const reservationIds = new Set();
+  const owners = new Set();
+  const logicalRequests = new Set();
+  const records = [];
+  for (const [journalId, parsed] of catalog) {
+    const reservation = parsed.reservation;
+    if (reservation !== null) {
+      if (logicalRequests.has(reservation.logicalRequestId)) {
+        throw recoveryRequired('reservation source contains a duplicate logical request');
+      }
+      logicalRequests.add(reservation.logicalRequestId);
+    }
+    if (
+      reservation === null
+      || reservation.mode !== 'full'
+      || reservation.parent.kind !== 'ordinary'
+      || reservation.parent.journalId !== null
+      || reservation.identityReservation === null
+    ) continue;
+    const identityReservation = validateIdentityReservationManifest(reservation.identityReservation);
+    if (parsed.state === 'assets_collected') continue;
+    const ownerKey = `file_publication\0${journalId}`;
+    if (
+      uids.has(identityReservation.uid)
+      || reservationIds.has(identityReservation.reservationId)
+      || owners.has(ownerKey)
+    ) throw recoveryRequired('reservation source contains duplicate ownership');
+    uids.add(identityReservation.uid);
+    reservationIds.add(identityReservation.reservationId);
+    owners.add(ownerKey);
+    if (identityReservation.objectKind === scope.objectKind) {
+      records.push(Object.freeze({
+        ownerKind: 'file_publication',
+        ownerId: journalId,
+        reservationId: identityReservation.reservationId,
+        uid: identityReservation.uid,
+      }));
+    }
+  }
+  records.sort((left, right) => left.ownerId.localeCompare(right.ownerId, 'en'));
+  return deepFreeze({
+    complete: true,
+    projectUid: scope.projectUid,
+    projectInstanceId: scope.projectInstanceId,
+    objectKind: scope.objectKind,
+    records,
+  });
 }
 
 function readyForReservation(parsed, reservation) {
@@ -1302,7 +1615,7 @@ function assertPublicationReceipt(value, manifest) {
 }
 
 function assertCompleteStage(parsed) {
-  const expected = expectedStageReservations(parsed.reservation);
+  const expected = parsed.stageReservations;
   if ([...expected.keys()].some((assetPath) => !parsed.ready.has(assetPath))) {
     throw recoveryRequired('staged recovery assets are incomplete');
   }
@@ -1527,8 +1840,113 @@ class FilePublicationJournal {
       projectBinding: safeProjectBinding,
       assertWriteAuthority,
       authority: null,
+      reservationSource: null,
     }));
     Object.freeze(this);
+  }
+
+  lookupOrdinaryRequest(logicalRequestId) {
+    const record = journalRecords.get(this);
+    if (record === undefined) throw new TypeError('invalid FilePublicationJournal receiver');
+    if (typeof logicalRequestId !== 'string' || logicalRequestId.length === 0) {
+      throw new TypeError('logicalRequestId is required');
+    }
+    return lookupOrdinaryInCatalog(captureParsedJournalCatalog(record), logicalRequestId);
+  }
+
+  readReservation(input) {
+    const record = journalRecords.get(this);
+    if (record === undefined) throw new TypeError('invalid FilePublicationJournal receiver');
+    const descriptors = assertExactKeys(
+      input,
+      ['journalId', 'logicalRequestId'],
+      'reservation read request',
+    );
+    const journalId = assertCanonicalUuid(descriptors.journalId.value, 'journal_id');
+    const logicalRequestId = descriptors.logicalRequestId.value;
+    if (typeof logicalRequestId !== 'string' || logicalRequestId.length === 0) {
+      throw new TypeError('logicalRequestId is required');
+    }
+    const groups = captureJournalGroups(record.controlStore.read());
+    const events = groups.get(journalId);
+    if (events === undefined) return null;
+    const parsed = parseJournal(record, journalId, events);
+    const reservation = assertOrdinaryCreateParsed(parsed, journalId, logicalRequestId);
+    if (!['assets_reserved', 'target_reserved'].includes(parsed.state)) {
+      throw recoveryRequired('ordinary reservation is no longer resumable early state');
+    }
+    const binding = reservationBinding(parsed);
+    const authority = Object.freeze(() => {});
+    reservationAuthorityRecords.set(authority, Object.freeze({
+      owner: this,
+      journalId,
+      logicalRequestId,
+      identityReservation: reservation.identityReservation,
+      reservationDigest: parsed.reservationDigest,
+      binding,
+    }));
+    return Object.freeze({
+      identityReservation: reservation.identityReservation,
+      authority,
+    });
+  }
+
+  assertReservation(input) {
+    const record = journalRecords.get(this);
+    if (record === undefined) throw new TypeError('invalid FilePublicationJournal receiver');
+    const descriptors = assertExactKeys(input, [
+      'authority',
+      'identityReservation',
+      'journalId',
+      'logicalRequestId',
+    ], 'reservation assertion');
+    const authority = descriptors.authority.value;
+    const authorityRecord = (
+      (typeof authority === 'object' || typeof authority === 'function')
+      && authority !== null
+    ) ? reservationAuthorityRecords.get(authority) : undefined;
+    const journalId = assertCanonicalUuid(descriptors.journalId.value, 'journal_id');
+    const logicalRequestId = descriptors.logicalRequestId.value;
+    if (typeof logicalRequestId !== 'string' || logicalRequestId.length === 0) {
+      throw new TypeError('logicalRequestId is required');
+    }
+    if (
+      authorityRecord?.owner !== this
+      || authorityRecord.journalId !== journalId
+      || authorityRecord.logicalRequestId !== logicalRequestId
+      || authorityRecord.identityReservation !== descriptors.identityReservation.value
+    ) throw new TypeError('reservation authority and manifest must be the original matching pair');
+    validateIdentityReservationManifest(descriptors.identityReservation.value);
+    const groups = captureJournalGroups(record.controlStore.read());
+    const events = groups.get(journalId);
+    if (events === undefined) throw recoveryRequired('reserved journal no longer exists');
+    const parsed = parseJournal(record, journalId, events);
+    const reservation = assertOrdinaryCreateParsed(parsed, journalId, logicalRequestId);
+    if (!['assets_reserved', 'target_reserved'].includes(parsed.state)) {
+      throw recoveryRequired('ordinary reservation is no longer resumable early state');
+    }
+    if (
+      parsed.reservationDigest !== authorityRecord.reservationDigest
+      || canonicalJson(reservation.identityReservation)
+        !== canonicalJson(descriptors.identityReservation.value)
+    ) throw recoveryRequired('persisted identity reservation changed');
+    const binding = reservationBinding(parsed);
+    if (canonicalJson(binding) !== canonicalJson(authorityRecord.binding)) {
+      throw recoveryRequired('persisted reservation binding changed');
+    }
+    return binding;
+  }
+
+  reservationSource() {
+    const record = journalRecords.get(this);
+    if (record === undefined) throw new TypeError('invalid FilePublicationJournal receiver');
+    if (record.reservationSource !== null) return record.reservationSource;
+    record.reservationSource = Object.freeze({
+      enumerate(scope) {
+        return enumerateReservationSource(record, scope);
+      },
+    });
+    return record.reservationSource;
   }
 
   async stageAssets({
@@ -1557,12 +1975,28 @@ class FilePublicationJournal {
     const safeBasisDigest = assertDigest(basisDigest, 'basisDigest');
     const safeParent = snapshotParent(parent);
     const mode = modeForParent(safeParent);
-    const safeReservation = identityReservation === null
-      ? null
-      : snapshotPlainData(identityReservation, 'identityReservation', true);
+    let safeReservation = null;
+    if (identityReservation !== null) {
+      const privateReservation = snapshotPlainData(
+        identityReservation,
+        'identityReservation',
+        true,
+      );
+      safeReservation = safeParent.kind === 'ordinary' && mode === 'full'
+        ? validateIdentityReservationManifest(privateReservation)
+        : privateReservation;
+    }
 
     // Copies all caller buffers before the first await.
     const privateClosure = snapshotClosure(closure, record.projectBinding);
+    if (safeParent.kind === 'ordinary' && mode === 'full' && safeReservation !== null) {
+      assertOrdinaryCreateClosure(record, safeReservation, {
+        baseGeneration,
+        basisDigest: safeBasisDigest,
+        logicalRequestId,
+        targetGeneration,
+      }, privateClosure, true);
+    }
     const members = buildReservationMembers(privateClosure, record.projectBinding, safeJournalId);
     const inputBinding = deepFreeze({
       journalId: safeJournalId,

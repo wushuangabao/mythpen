@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const { LIMITS } = require('../manuscript/contracts');
+const { IgnoredIdentityLedger } = require('../manuscript/ignored-ledger');
 const { deriveControlledFileRef } = require('../manuscript/paths');
 const {
   SQLiteProjectionStore,
@@ -12,6 +13,9 @@ const {
 } = require('../manuscript/projection-store');
 const { ManuscriptStore } = require('../manuscript/store');
 const {
+  CHAPTER_UID: FIXTURE_CHAPTER_UID,
+  UNASSIGNED_CHAPTER_UID: FIXTURE_UNASSIGNED_CHAPTER_UID,
+  VOLUME_UID: FIXTURE_VOLUME_UID,
   createManuscriptTreeFixture,
 } = require('./fixtures/manuscript-tree');
 
@@ -189,6 +193,35 @@ function fileIdentity(seed) {
   return { dev: '1', ino: String(seed) };
 }
 
+function absentIgnoredMember(role) {
+  return { role, present: false };
+}
+
+function presentIgnoredMember(role, seed) {
+  return {
+    role,
+    present: true,
+    byteSize: 10 + seed,
+    fileIdentity: fileIdentity(900 + seed),
+    parentIdentity: fileIdentity(990 + seed),
+  };
+}
+
+function ignoredChapterMembers(overrides = {}) {
+  return [
+    overrides.body ?? presentIgnoredMember('chapter_body', 1),
+    overrides.sidecar ?? presentIgnoredMember('chapter_sidecar', 2),
+  ];
+}
+
+function ignoredVolumeMembers(overrides = {}) {
+  return [overrides.index ?? presentIgnoredMember('volume_index', 3)];
+}
+
+function ignoredMemberJson(members) {
+  return JSON.stringify({ version: 1, members });
+}
+
 function controlledFileRef(role, resourceUid) {
   const input = { role, projectUid: PROJECT_UID };
   if (role === 'volume_index') input.volumeUid = resourceUid;
@@ -352,19 +385,50 @@ function identityPlan() {
   ].sort((left, right) => `${left.objectKind}:${left.uid}`.localeCompare(`${right.objectKind}:${right.uid}`, 'en')));
 }
 
-function ignoredAfter() {
-  return deepFreeze([
-    {
-      resource_kind: 'chapter',
-      resource_uid: uuid(90),
-      ignore_status: 'active',
-      opaque_container_kind: 'unassigned',
-      opaque_container_uid: null,
-      is_currently_referenced: 1,
-      member_snapshot_json: '{"body":true,"sidecar":true}',
-      projection_generation: 9,
+function ignoredRow(projectionGeneration, overrides = {}) {
+  const resourceKind = overrides.resource_kind ?? 'chapter';
+  const members = overrides.members ?? (
+    resourceKind === 'chapter' ? ignoredChapterMembers() : ignoredVolumeMembers()
+  );
+  return {
+    resource_kind: resourceKind,
+    resource_uid: overrides.resource_uid ?? uuid(90),
+    ignore_status: overrides.ignore_status ?? 'active',
+    opaque_container_kind: Object.hasOwn(overrides, 'opaque_container_kind')
+      ? overrides.opaque_container_kind
+      : 'unassigned',
+    opaque_container_uid: Object.hasOwn(overrides, 'opaque_container_uid')
+      ? overrides.opaque_container_uid
+      : null,
+    is_currently_referenced: overrides.is_currently_referenced ?? 1,
+    member_snapshot_json: overrides.member_snapshot_json ?? ignoredMemberJson(members),
+    projection_generation: projectionGeneration,
+  };
+}
+
+function ignoredBefore(overrides = {}) {
+  return deepFreeze([ignoredRow(8, overrides)]);
+}
+
+function ignoredAfter(overrides = {}) {
+  return deepFreeze([ignoredRow(9, overrides)]);
+}
+
+function ignoredObservation(overrides = {}) {
+  const kind = overrides.kind ?? 'chapter';
+  return {
+    kind,
+    uid: overrides.uid ?? uuid(90),
+    status: overrides.status ?? 'active',
+    members: overrides.members ?? (
+      kind === 'chapter' ? ignoredChapterMembers() : ignoredVolumeMembers()
+    ),
+    reference: overrides.reference ?? {
+      state: 'indexed',
+      containerKind: kind === 'chapter' ? 'unassigned' : 'manuscript',
+      containerUid: null,
     },
-  ]);
+  };
 }
 
 function buildDefaultTarget(store = new SQLiteProjectionStore(), overrides = {}) {
@@ -373,22 +437,26 @@ function buildDefaultTarget(store = new SQLiteProjectionStore(), overrides = {})
     currentProjection: currentProjection(),
     targetGeneration: 9,
     projectedAt: PROJECTED_AT,
-    ignoredLedger: ignoredAfter(),
+    ignoredLedger: deepFreeze([]),
     localIdentityPlan: identityPlan(),
     ...overrides,
   });
 }
 
-function emptyCurrentProjection(projectUid, projectInstanceId = PROJECT_INSTANCE_ID) {
+function emptySchema12CurrentProjection(
+  projectUid,
+  ignoredRows,
+  projectInstanceId = PROJECT_INSTANCE_ID,
+) {
   const basis = {
     domain: 'mythpen.manuscript.projection-basis',
     version: 1,
-    sourceKind: 'empty',
+    sourceKind: 'schema12',
     baseGeneration: 0,
     volumes: [],
     chapters: [],
     sqliteSequence: [{ name: 'chapters', seq: 0 }, { name: 'volumes', seq: 0 }],
-    ignoredBeforeDigest: canonicalIgnoredLedgerDigest([]),
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest(ignoredRows),
     pendingProposals: [],
     basisDigest: ZERO_DIGEST,
   };
@@ -467,7 +535,7 @@ test('canonical digests are exact, order-independent, compact, and exclude only 
       opaque_container_kind: null,
       opaque_container_uid: null,
       is_currently_referenced: 0,
-      member_snapshot_json: '{}',
+      member_snapshot_json: ignoredMemberJson(ignoredVolumeMembers()),
       projection_generation: 9,
     },
   ];
@@ -475,7 +543,9 @@ test('canonical digests are exact, order-independent, compact, and exclude only 
     .map((row) => Object.fromEntries(Object.entries(row).reverse()));
   assert.equal(canonicalIgnoredLedgerDigest(ledger), canonicalIgnoredLedgerDigest(permutedLedger));
   const changedLedger = clone(ledger);
-  changedLedger[0].member_snapshot_json = '{"body":false,"sidecar":true}';
+  changedLedger[0].member_snapshot_json = ignoredMemberJson(ignoredChapterMembers({
+    body: absentIgnoredMember('chapter_body'),
+  }));
   assert.notEqual(canonicalIgnoredLedgerDigest(changedLedger), canonicalIgnoredLedgerDigest(ledger));
   const negativeZeroLedger = clone(ledger);
   negativeZeroLedger[0].projection_generation = -0;
@@ -486,10 +556,17 @@ test('canonical digests are exact, order-independent, compact, and exclude only 
   assert.throws(() => canonicalIgnoredLedgerDigest([{ ...ledger[0], extra: true }]), TypeError);
 });
 
-test('ignored rows require parseable snapshots and the exact referenced-container CHECK', () => {
+test('ignored rows require canonical member snapshots and the exact resource/container matrix', () => {
   const base = clone(ignoredAfter()[0]);
   const invalidRows = [
     ['invalid member JSON', { ...base, member_snapshot_json: '{' }],
+    ['non-canonical member JSON', {
+      ...base,
+      member_snapshot_json: JSON.stringify({
+        members: ignoredChapterMembers(),
+        version: 1,
+      }),
+    }],
     ['detached row with container kind', {
       ...base,
       is_currently_referenced: 0,
@@ -511,6 +588,10 @@ test('ignored rows require parseable snapshots and the exact referenced-containe
       opaque_container_kind: 'unassigned',
       opaque_container_uid: VOLUME_KEEP,
     }],
+    ['chapter in manuscript container', {
+      ...base,
+      opaque_container_kind: 'manuscript',
+    }],
   ];
   for (const [name, row] of invalidRows) {
     assert.throws(() => canonicalIgnoredLedgerDigest([row]), TypeError, name);
@@ -527,6 +608,184 @@ test('ignored rows require parseable snapshots and the exact referenced-containe
     opaque_container_kind: null,
     opaque_container_uid: null,
   }]), /^[0-9a-f]{64}$/);
+  assert.match(canonicalIgnoredLedgerDigest([{
+    ...base,
+    resource_kind: 'volume',
+    resource_uid: uuid(92),
+    opaque_container_kind: 'manuscript',
+    opaque_container_uid: null,
+    member_snapshot_json: ignoredMemberJson(ignoredVolumeMembers()),
+  }]), /^[0-9a-f]{64}$/);
+  assert.throws(() => canonicalIgnoredLedgerDigest([{
+    ...base,
+    resource_kind: 'volume',
+    resource_uid: uuid(92),
+    opaque_container_kind: 'unassigned',
+    opaque_container_uid: null,
+    member_snapshot_json: ignoredMemberJson(ignoredVolumeMembers()),
+  }]), TypeError);
+});
+
+test('buildTarget binds complete base ledger rows and derives target rows only from candidate observations', () => {
+  const beforeRows = ignoredBefore();
+  const basis = basisWithDigest({
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest(beforeRows),
+  });
+  const current = deepFreeze({
+    projectUid: PROJECT_UID,
+    projectInstanceId: PROJECT_INSTANCE_ID,
+    basis,
+  });
+  const changedMembers = ignoredChapterMembers({
+    body: absentIgnoredMember('chapter_body'),
+  });
+  const changedObservation = ignoredObservation({
+    members: changedMembers,
+    reference: {
+      state: 'indexed',
+      containerKind: 'volume',
+      containerUid: VOLUME_KEEP,
+    },
+  });
+  const compiled = buildDefaultTarget(undefined, {
+    candidate: candidate({ ignoredLedgerAfter: deepFreeze([changedObservation]) }),
+    currentProjection: current,
+    ignoredLedger: beforeRows,
+  });
+  assert.deepEqual(compiled.ignoredLedger, ignoredAfter({
+    opaque_container_kind: 'volume',
+    opaque_container_uid: VOLUME_KEEP,
+    members: changedMembers,
+  }));
+
+  for (const [name, ignoredLedgerAfter] of [
+    ['missing observation', []],
+    ['extra observation', [ignoredObservation(), ignoredObservation({ uid: uuid(93) })]],
+    ['status mismatch', [ignoredObservation({ status: 'revoked' })]],
+  ]) {
+    assert.throws(() => buildDefaultTarget(undefined, {
+      candidate: candidate({ ignoredLedgerAfter: deepFreeze(ignoredLedgerAfter) }),
+      currentProjection: current,
+      ignoredLedger: beforeRows,
+    }), TypeError, name);
+  }
+
+  assert.throws(() => buildDefaultTarget(undefined, {
+    candidate: candidate({ ignoredLedgerAfter: deepFreeze([ignoredObservation()]) }),
+    currentProjection: current,
+    ignoredLedger: ignoredAfter(),
+  }), TypeError, 'caller cannot inject SQL-shaped target rows');
+
+  const staleBefore = deepFreeze([ignoredRow(7)]);
+  const staleBasis = basisWithDigest({
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest(staleBefore),
+  });
+  assert.throws(() => buildDefaultTarget(undefined, {
+    currentProjection: deepFreeze({
+      projectUid: PROJECT_UID,
+      projectInstanceId: PROJECT_INSTANCE_ID,
+      basis: staleBasis,
+    }),
+    ignoredLedger: staleBefore,
+  }), TypeError, 'every before row must use the base generation');
+});
+
+test('buildTarget does not rewalk compiler-branded ignored rows', () => {
+  const beforeRows = ignoredBefore();
+  const basis = basisWithDigest({
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest(beforeRows),
+  });
+  const originalDescriptors = Object.getOwnPropertyDescriptors;
+  const originalIterator = Array.prototype[Symbol.iterator];
+  const originalSome = Array.prototype.some;
+  let brandedLedgerWalks = 0;
+  function isCompiledLedger(value) {
+    return (
+      Array.isArray(value)
+      && value.length === 1
+      && value[0]?.resource_uid === uuid(90)
+      && value[0]?.projection_generation === 9
+    );
+  }
+  Object.getOwnPropertyDescriptors = function observeDescriptors(value) {
+    if (isCompiledLedger(value)) brandedLedgerWalks += 1;
+    return originalDescriptors(value);
+  };
+  Array.prototype[Symbol.iterator] = function observeIterator(...args) {
+    if (isCompiledLedger(this)) brandedLedgerWalks += 1;
+    return originalIterator.apply(this, args);
+  };
+  Array.prototype.some = function observeSome(...args) {
+    if (isCompiledLedger(this)) brandedLedgerWalks += 1;
+    return originalSome.apply(this, args);
+  };
+  try {
+    buildDefaultTarget(undefined, {
+      candidate: candidate({
+        ignoredLedgerAfter: deepFreeze([ignoredObservation()]),
+      }),
+      currentProjection: deepFreeze({
+        projectUid: PROJECT_UID,
+        projectInstanceId: PROJECT_INSTANCE_ID,
+        basis,
+      }),
+      ignoredLedger: beforeRows,
+    });
+  } finally {
+    Object.getOwnPropertyDescriptors = originalDescriptors;
+    Array.prototype[Symbol.iterator] = originalIterator;
+    Array.prototype.some = originalSome;
+  }
+  assert.equal(brandedLedgerWalks, 0);
+});
+
+test('validateTarget keeps cold ignored rows canonical, ordered, and target-generation bound', () => {
+  const beforeRows = deepFreeze([
+    ignoredRow(8),
+    ignoredRow(8, {
+      resource_kind: 'volume',
+      resource_uid: uuid(91),
+      opaque_container_kind: 'manuscript',
+      opaque_container_uid: null,
+      members: ignoredVolumeMembers(),
+    }),
+  ]);
+  const basis = basisWithDigest({
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest(beforeRows),
+  });
+  const target = buildDefaultTarget(undefined, {
+    candidate: candidate({
+      ignoredLedgerAfter: deepFreeze([
+        ignoredObservation(),
+        ignoredObservation({ kind: 'volume', uid: uuid(91) }),
+      ]),
+    }),
+    currentProjection: deepFreeze({
+      projectUid: PROJECT_UID,
+      projectInstanceId: PROJECT_INSTANCE_ID,
+      basis,
+    }),
+    ignoredLedger: beforeRows,
+  });
+  const store = new SQLiteProjectionStore();
+  const cold = deepFreeze(clone(target));
+  assert.strictEqual(store.validateTarget(cold), cold);
+
+  const reversed = clone(target);
+  reversed.ignoredLedger.reverse();
+  assert.throws(() => store.validateTarget(deepFreeze(reversed)), TypeError);
+
+  const wrongGeneration = clone(target);
+  wrongGeneration.ignoredLedger[0].projection_generation = 8;
+  assert.throws(() => store.validateTarget(deepFreeze(wrongGeneration)), TypeError);
+
+  const nonCanonicalMemberJson = clone(target);
+  const snapshot = JSON.parse(nonCanonicalMemberJson.ignoredLedger[0].member_snapshot_json);
+  nonCanonicalMemberJson.ignoredLedger[0].member_snapshot_json = JSON.stringify({
+    members: snapshot.members,
+    version: snapshot.version,
+  });
+  assert.throws(() => store.validateTarget(deepFreeze(nonCanonicalMemberJson)), TypeError);
 });
 
 test('buildTarget compiles one immutable deterministic full target with reuse, tombstone, revival, and reserved rows', () => {
@@ -625,7 +884,7 @@ test('buildTarget compiles one immutable deterministic full target with reuse, t
     assert.equal(Object.hasOwn(row, 'data_version'), false);
   }
   assert.deepEqual(first.capacitySnapshot, candidate().capacitySnapshot);
-  assert.deepEqual(first.ignoredLedger, ignoredAfter());
+  assert.deepEqual(first.ignoredLedger, []);
   assert.equal(first.controlledFiles.length, 10);
   assert.equal(first.controlledFiles.some((row) => Object.hasOwn(row, 'ref')), false);
   assert.throws(() => { first.chapters[0].title = 'mutated'; }, TypeError);
@@ -697,6 +956,16 @@ test('buildTarget compiles one immutable deterministic full target with reuse, t
 
 test('buildTarget consumes a real Task3 branded candidate and persists only controlled-file facts', async () => {
   const fixture = createManuscriptTreeFixture();
+  const beforeRows = deepFreeze([ignoredRow(0, {
+    resource_uid: FIXTURE_CHAPTER_UID,
+    opaque_container_kind: 'volume',
+    opaque_container_uid: FIXTURE_VOLUME_UID,
+    members: ignoredChapterMembers({
+      body: absentIgnoredMember('chapter_body'),
+      sidecar: absentIgnoredMember('chapter_sidecar'),
+    }),
+  })]);
+  const ledger = new IgnoredIdentityLedger();
   const manuscriptStore = new ManuscriptStore({
     dataRoot: fixture.dataRoot,
     fileBoundary: fixture.fileBoundary,
@@ -704,16 +973,19 @@ test('buildTarget consumes a real Task3 branded candidate and persists only cont
     limits: LIMITS,
   });
   const snapshot = await manuscriptStore.validateFull(fixture.projectBinding, {
-    ignoredLedger: fixture.ignoredLedger,
-    lifecycleBasis: fixture.lifecycleBasis,
+    ignoredLedger: ledger.toValidationEntries(beforeRows, 0),
+    lifecycleBasis: Object.freeze({
+      ...fixture.lifecycleBasis,
+      activeChapterUids: Object.freeze([FIXTURE_UNASSIGNED_CHAPTER_UID]),
+    }),
   });
   const task3Candidate = await manuscriptStore.buildProjectionCandidate(snapshot);
   const target = new SQLiteProjectionStore().buildTarget({
     candidate: task3Candidate,
-    currentProjection: emptyCurrentProjection(task3Candidate.projectUid),
+    currentProjection: emptySchema12CurrentProjection(task3Candidate.projectUid, beforeRows),
     targetGeneration: 1,
     projectedAt: PROJECTED_AT,
-    ignoredLedger: deepFreeze([]),
+    ignoredLedger: beforeRows,
     localIdentityPlan: reservedPlanForCandidate(task3Candidate),
   });
 
@@ -728,6 +1000,16 @@ test('buildTarget consumes a real Task3 branded candidate and persists only cont
         || String(left.resourceUid ?? '').localeCompare(String(right.resourceUid ?? ''), 'en')
       )),
   );
+  assert.equal(task3Candidate.ignoredLedgerAfter.length, 1);
+  assert.equal(task3Candidate.ignoredLedgerAfter[0].uid, FIXTURE_CHAPTER_UID);
+  assert.deepEqual(target.ignoredLedger, ledger.compileAfter({
+    beforeRows,
+    observations: task3Candidate.ignoredLedgerAfter,
+    targetGeneration: 1,
+  }));
+  assert.equal(target.ignoredLedger[0].opaque_container_kind, 'volume');
+  assert.equal(target.ignoredLedger[0].opaque_container_uid, FIXTURE_VOLUME_UID);
+  assert.equal(target.ignoredLedger[0].projection_generation, 1);
 });
 
 test('buildTarget distinguishes legacy binding from reserved-new and rejects incomplete or conflicting identity plans', () => {
@@ -913,7 +1195,7 @@ test('buildTarget derives exact pending-to-stale invalidations and ignores movem
       currentProjection: currentProjection(),
       targetGeneration: 9,
       projectedAt: PROJECTED_AT,
-      ignoredLedger: ignoredAfter(),
+      ignoredLedger: deepFreeze([]),
       localIdentityPlan: identityPlan(),
       proposalInvalidations: [],
     }),
@@ -943,7 +1225,6 @@ test('publish validates a persisted plain target and forwards the same reference
     ['sequence -0', (value) => { value.sqliteSequence[0].seq = -0; }],
     ['controlled file garbage', (value) => { value.controlledFiles[0].byteSize = -0; }],
     ['capacity garbage', (value) => { value.capacitySnapshot.extra = true; }],
-    ['ignored ledger garbage', (value) => { value.ignoredLedger[0].projection_generation = -0; }],
     ['identity mismatch', (value) => { value.chapters[0].id = 99; }],
     ['retained tombstone time changed', (value) => {
       value.volumes.find((row) => row.volume_uid === VOLUME_TOMBSTONE).deleted_at = '2026-02-02T00:00:00.000Z';

@@ -618,7 +618,7 @@ const SCHEMA12_TABLES = {
       checkSql: '"ignore_status" IN (\'active\', \'revoked\')',
     }),
     schema12Column('opaque_container_kind', 'TEXT', {
-      checkSql: '"opaque_container_kind" IS NULL OR "opaque_container_kind" IN (\'unassigned\', \'volume\')',
+      checkSql: '"opaque_container_kind" IS NULL OR "opaque_container_kind" IN (\'manuscript\', \'unassigned\', \'volume\')',
     }),
     schema12Column('opaque_container_uid', 'TEXT', {
       checkSql: schema12CanonicalUuidCheck('opaque_container_uid', { nullable: true }),
@@ -637,7 +637,7 @@ const SCHEMA12_TABLES = {
     }),
   ], [
     'PRIMARY KEY ("resource_kind", "resource_uid")',
-    'CHECK (("is_currently_referenced" = 0 AND "opaque_container_kind" IS NULL AND "opaque_container_uid" IS NULL) OR ("is_currently_referenced" = 1 AND (("opaque_container_kind" = \'unassigned\' AND "opaque_container_uid" IS NULL) OR ("opaque_container_kind" = \'volume\' AND "opaque_container_uid" IS NOT NULL))))',
+    'CHECK (("is_currently_referenced" = 0 AND "opaque_container_kind" IS NULL AND "opaque_container_uid" IS NULL) OR ("is_currently_referenced" = 1 AND "opaque_container_kind" IS NOT NULL AND (("resource_kind" = \'volume\' AND "opaque_container_kind" = \'manuscript\' AND "opaque_container_uid" IS NULL) OR ("resource_kind" = \'chapter\' AND (("opaque_container_kind" = \'unassigned\' AND "opaque_container_uid" IS NULL) OR ("opaque_container_kind" = \'volume\' AND "opaque_container_uid" IS NOT NULL))))))',
   ]),
   manuscript_controlled_files: schema12Table('manuscript_controlled_files', 'create', [
     schema12Column('file_role', 'TEXT', {
