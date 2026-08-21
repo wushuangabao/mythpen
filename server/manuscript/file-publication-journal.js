@@ -2373,6 +2373,27 @@ class FilePublicationJournal {
     return Object.freeze({ state: parsed.state });
   }
 
+  async recoverPendingOrdinary() {
+    const record = journalRecords.get(this);
+    if (record === undefined) throw new TypeError('invalid FilePublicationJournal receiver');
+    const terminal = new Set(['assets_collected', 'completed', 'rolled_back']);
+    const recovered = [];
+    for (const [journalId, parsed] of captureParsedJournalCatalog(record)) {
+      if (
+        parsed.reservation === null
+        || parsed.reservation.mode !== 'full'
+        || parsed.reservation.parent?.kind !== 'ordinary'
+        || terminal.has(parsed.state)
+      ) continue;
+      const result = await this.recover(journalId);
+      if (!terminal.has(result.state)) {
+        throw recoveryRequired('ordinary file publication did not reach a known terminal state');
+      }
+      recovered.push(Object.freeze({ journalId, state: result.state }));
+    }
+    return Object.freeze({ recovered: Object.freeze(recovered), status: 'clean' });
+  }
+
   async collectAssets(journalId, { parentGcAuthority } = {}) {
     const record = journalRecords.get(this);
     const safeJournalId = assertCanonicalUuid(journalId, 'journal_id');

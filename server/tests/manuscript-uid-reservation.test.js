@@ -2,9 +2,12 @@
 
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 
 const { LIMITS } = require('../manuscript/contracts');
+const { MigrationJournal } = require('../manuscript/migration-journal');
 const {
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
@@ -14,6 +17,15 @@ const {
   canonicalCreateLogicalInputDigest,
   validateIdentityReservationManifest,
 } = require('../manuscript/uid-reservation');
+const {
+  createUidReservationSources,
+} = require('../manuscript/uid-reservation-sources');
+const {
+  MIGRATION_ID: JOURNAL_MIGRATION_ID,
+  createMemoryControlStore,
+  projectBinding,
+  reserveInput,
+} = require('./fixtures/manuscript-migration-crash');
 
 const ZERO_DIGEST = '0'.repeat(64);
 const BODY_DIGEST = '1'.repeat(64);
@@ -470,6 +482,124 @@ test('basis and complete ignored-ledger bindings reject before any external port
     await assert.rejects(current.service.reserveNewIdentity(request), TypeError, name);
     assert.deepEqual(current.calls, { enumerate: [], probe: [], uuid: 0 }, name);
   }
+});
+
+function migrationBasis() {
+  return projectionFixture({
+    sourceKind: 'schema11',
+    volumes: [{ id: 7, sortOrder: 2 }],
+    chapters: [{
+      id: 11,
+      volumeId: 7,
+      num: 4,
+      bodyRawSha256: BODY_DIGEST,
+      status: 'writing',
+    }],
+    sqliteSequence: [
+      { name: 'chapters', seq: 11 },
+      { name: 'volumes', seq: 7 },
+    ],
+  }).currentProjection.basis;
+}
+
+function migrationJournalHarness(seed, suffix) {
+  const dataRoot = path.join(
+    os.tmpdir(),
+    `mythpen-migration-uid-${process.pid}-${suffix}`,
+  );
+  const controlStore = createMemoryControlStore(dataRoot, seed);
+  const disposition = Object.freeze({
+    inspect() { return Object.freeze({ disposition: 'after' }); },
+    classify(evidence) { return evidence.disposition; },
+  });
+  return {
+    controlStore,
+    journal: new MigrationJournal({
+      controlStore,
+      projectBinding: projectBinding(dataRoot),
+      routeDisposition: disposition,
+      childDisposition: disposition,
+      databaseDisposition: disposition,
+      cleanupDisposition: disposition,
+      clock: () => 1_723_900_000_000,
+    }),
+  };
+}
+
+test('migration UID source ambiguity is RECOVERY_REQUIRED before RNG or path probing', async () => {
+  const firstJournal = migrationJournalHarness([], 'lookup');
+  const journalAuthority = firstJournal.journal.authority();
+  assert.strictEqual(journalAuthority.readMigrationReserved(JOURNAL_MIGRATION_ID), null);
+
+  await firstJournal.journal.reserve(reserveInput());
+  const migrationReserved = journalAuthority.readMigrationReserved(JOURNAL_MIGRATION_ID);
+  assert.equal(typeof migrationReserved, 'function');
+  assert.strictEqual(
+    journalAuthority.readMigrationReserved(JOURNAL_MIGRATION_ID),
+    migrationReserved,
+  );
+  const descriptor = journalAuthority.describeMigrationReserved(migrationReserved);
+  assert.equal(descriptor.createdAt, 1_723_900_000_000);
+  assert.equal(Number.isSafeInteger(descriptor.createdAt), true);
+
+  const [firstEvent] = firstJournal.controlStore.snapshot();
+  const secondMigrationId = '99999999-9999-4999-8999-999999999999';
+  const secondEvent = structuredClone(firstEvent);
+  secondEvent.seq = 1;
+  secondEvent.prevDigest = firstEvent.digest;
+  secondEvent.digest = 'e'.repeat(64);
+  secondEvent.payload.migrationId = secondMigrationId;
+  secondEvent.payload.data.migrationId = secondMigrationId;
+  secondEvent.payload.data.migrationReservation.migrationId = secondMigrationId;
+  const ambiguousJournal = migrationJournalHarness(
+    [firstEvent, secondEvent],
+    'ambiguous',
+  ).journal;
+  assert.throws(
+    () => ambiguousJournal.authority().readMigrationReserved(JOURNAL_MIGRATION_ID),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+
+  const calls = { probe: 0, uuid: 0 };
+  const completeSource = Object.freeze({
+    enumerate(scope) {
+      return deepFreeze({
+        complete: true,
+        projectUid: scope.projectUid,
+        projectInstanceId: scope.projectInstanceId,
+        objectKind: scope.objectKind,
+        records: [],
+      });
+    },
+  });
+  const completeCreationSource = Object.freeze({
+    enumerate: completeSource.enumerate,
+    lookup(input) {
+      return deepFreeze({
+        complete: true,
+        logicalRequestId: input.logicalRequestId,
+        reservations: [],
+      });
+    },
+  });
+  const service = new ManuscriptUidReservation({
+    reservationSources: createUidReservationSources({
+      registrySource: completeSource,
+      existingRootsSource: Object.freeze({ enumerate() { return { complete: false }; } }),
+      migrationSources: Object.freeze([]),
+      creationSources: Object.freeze([completeCreationSource]),
+    }),
+    journalAuthority,
+    uuidV4() { calls.uuid += 1; return uuid(200); },
+  });
+
+  await assert.rejects(service.reserveMigrationIdentities(Object.freeze({
+    migrationId: uuid(81),
+    projectInstanceId: PROJECT_INSTANCE_ID,
+    sourceBasis: migrationBasis(),
+    projectRootProbe: Object.freeze({ probe() { calls.probe += 1; } }),
+  })), (error) => error?.code === 'RECOVERY_REQUIRED');
+  assert.deepEqual(calls, { probe: 0, uuid: 0 });
 });
 
 test('a self-consistent ignored digest still rejects a stale ledger generation before ports', async () => {

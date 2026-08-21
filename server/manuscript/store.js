@@ -20,6 +20,10 @@ const {
   normalizeIgnoredLedgerRows,
 } = require('./ignored-ledger');
 const {
+  canonicalIgnoredLedgerDigest,
+  canonicalProjectionBasisDigest,
+} = require('./projection-store');
+const {
   requireFileBoundaryCapability,
   requireJournalAuthorityCapability,
 } = require('./capability-registry');
@@ -36,6 +40,7 @@ const {
 const {
   canonicalCreateLogicalInputDigest,
   validateIdentityReservationManifest,
+  validateMigrationReservationManifest,
 } = require('./uid-reservation');
 
 const DIRECTORY_ROLES = Object.freeze(['mythpen', 'volumes', 'chapters']);
@@ -78,6 +83,7 @@ const MUTATION_FIELDS = Object.freeze({
   ]),
 });
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const CANONICAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 const storeRecords = new WeakMap();
 const treeIdentityRecords = new WeakMap();
@@ -662,7 +668,8 @@ async function enumerateInternal(store, bindingValue, accumulator) {
     projectUid: binding.projectUid,
     scanEpoch,
   });
-  treeIdentityRecords.set(treeIdentity, { ...context, store });
+  const treeRecord = { ...context, store, enumerationSnapshot: null };
+  treeIdentityRecords.set(treeIdentity, treeRecord);
   const capacitySnapshot = accumulator.snapshot();
   const snapshot = deepFreeze({
     canonicalShapes: context.canonicalFiles.map((file) => ({ ...file })),
@@ -679,6 +686,7 @@ async function enumerateInternal(store, bindingValue, accumulator) {
     projectUid: binding.projectUid,
     treeIdentity,
   });
+  treeRecord.enumerationSnapshot = snapshot;
   return { context, snapshot };
 }
 
@@ -1780,6 +1788,713 @@ function assertDenseFrozenArray(value, label) {
   return value;
 }
 
+function assertOwnedEnumeration(store, snapshot, { requireLatest = true } = {}) {
+  if (
+    snapshot === null
+    || typeof snapshot !== 'object'
+    || !Object.isFrozen(snapshot)
+  ) throw new TypeError('snapshot must be a frozen Store enumeration');
+  const context = treeIdentityRecords.get(snapshot.treeIdentity);
+  if (
+    context === undefined
+    || context.store !== store
+    || context.enumerationSnapshot !== snapshot
+    || snapshot.projectUid !== context.binding.projectUid
+  ) {
+    throw new TypeError('snapshot must be produced by this ManuscriptStore.enumerateAndClassify');
+  }
+  const record = storeRecords.get(store);
+  if (requireLatest && record.nextScanEpoch !== context.scanEpoch + 1) {
+    throw manuscriptError('RECOVERY_REQUIRED', { reason: 'uid_path_enumeration_stale' });
+  }
+  return context;
+}
+
+function assertUnambiguousEnumeration(context) {
+  if (context.journalCandidates.length !== 0 || context.residues.length !== 0) {
+    throw manuscriptError('RECOVERY_REQUIRED', { reason: 'uid_path_enumeration_ambiguous' });
+  }
+}
+
+function uidPathProbeInput(value, context) {
+  const descriptors = dataDescriptors(value, 'UID path probe input');
+  assertExactKeys(descriptors, [
+    'projectUid',
+    'projectInstanceId',
+    'sourceBasisDigest',
+    'objectKind',
+    'uid',
+  ], 'UID path probe input');
+  const projectUid = assertCanonicalUuid(descriptorValue(descriptors, 'projectUid'), 'project_uid');
+  assertCanonicalUuid(
+    descriptorValue(descriptors, 'projectInstanceId'),
+    'project_instance_id',
+  );
+  const sourceBasisDigest = descriptorValue(descriptors, 'sourceBasisDigest');
+  if (typeof sourceBasisDigest !== 'string' || !SHA256_PATTERN.test(sourceBasisDigest)) {
+    throw new TypeError('sourceBasisDigest must be a lowercase SHA-256 digest');
+  }
+  const objectKind = descriptorValue(descriptors, 'objectKind');
+  if (objectKind !== 'chapter' && objectKind !== 'volume') {
+    throw new TypeError('objectKind must be chapter or volume');
+  }
+  const uid = assertCanonicalUuid(descriptorValue(descriptors, 'uid'), 'uid');
+  if (projectUid !== context.binding.projectUid) {
+    throw new TypeError('UID path probe project does not match the enumeration');
+  }
+  return { objectKind, uid };
+}
+
+function migrationSourcePath(value, record, paths) {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.includes('\0')
+    || !path.isAbsolute(value)
+    || path.normalize(value) !== value
+    || path.resolve(value) !== value
+  ) throw new TypeError('sourceSnapshot.sourcePath must be an absolute canonical path');
+  const relativeToData = path.relative(record.dataRoot, value);
+  if (
+    relativeToData === ''
+    || path.isAbsolute(relativeToData)
+    || relativeToData === '..'
+    || relativeToData.startsWith(`..${path.sep}`)
+  ) throw new TypeError('sourceSnapshot.sourcePath must remain within dataRoot');
+  const relativeToTarget = path.relative(paths.articleRoot, value);
+  if (
+    relativeToTarget === ''
+    || (!path.isAbsolute(relativeToTarget)
+      && relativeToTarget !== '..'
+      && !relativeToTarget.startsWith(`..${path.sep}`))
+  ) throw new TypeError('sourceSnapshot.sourcePath must be outside the target article root');
+  return value;
+}
+
+function sourceString(value, label) {
+  if (typeof value !== 'string') throw new TypeError(`${label} must be a string`);
+  return value;
+}
+
+function sourcePositiveInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function migrationSourceSnapshot(value, store, context, reservation) {
+  assertDeepFrozenPlainData(value, 'sourceSnapshot');
+  const descriptors = dataDescriptors(value, 'sourceSnapshot');
+  assertExactKeys(descriptors, [
+    'domain',
+    'version',
+    'projectUid',
+    'projectInstanceId',
+    'sourceBasisDigest',
+    'sourcePath',
+    'sourceIdentity',
+    'sourceSha256',
+    'readOnly',
+    'projectedAt',
+    'currentProjection',
+    'ignoredLedger',
+    'volumes',
+    'chapters',
+  ], 'sourceSnapshot');
+  if (
+    descriptorValue(descriptors, 'domain') !== 'mythpen.manuscript.schema11-source-snapshot'
+    || descriptorValue(descriptors, 'version') !== 1
+    || descriptorValue(descriptors, 'readOnly') !== true
+  ) throw new TypeError('sourceSnapshot domain/version/readOnly binding is invalid');
+  const projectUid = assertCanonicalUuid(
+    descriptorValue(descriptors, 'projectUid'),
+    'sourceSnapshot.projectUid',
+  );
+  const projectInstanceId = assertCanonicalUuid(
+    descriptorValue(descriptors, 'projectInstanceId'),
+    'sourceSnapshot.projectInstanceId',
+  );
+  const sourceBasisDigest = descriptorValue(descriptors, 'sourceBasisDigest');
+  const sourceSha256 = descriptorValue(descriptors, 'sourceSha256');
+  if (
+    !SHA256_PATTERN.test(sourceBasisDigest || '')
+    || !SHA256_PATTERN.test(sourceSha256 || '')
+  ) throw new TypeError('sourceSnapshot digests must be lowercase SHA-256 values');
+  const projectedAt = descriptorValue(descriptors, 'projectedAt');
+  if (
+    typeof projectedAt !== 'string'
+    || !CANONICAL_TIME_PATTERN.test(projectedAt)
+    || Number.isNaN(Date.parse(projectedAt))
+    || new Date(projectedAt).toISOString() !== projectedAt
+  ) throw new TypeError('sourceSnapshot.projectedAt must be a canonical UTC timestamp');
+  const sourceIdentity = snapshotIdentity(
+    descriptorValue(descriptors, 'sourceIdentity'),
+    'sourceSnapshot.sourceIdentity',
+  );
+  const record = storeRecords.get(store);
+  migrationSourcePath(
+    descriptorValue(descriptors, 'sourcePath'),
+    record,
+    context.paths,
+  );
+  const currentProjection = descriptorValue(descriptors, 'currentProjection');
+  const projectionDescriptors = dataDescriptors(currentProjection, 'sourceSnapshot.currentProjection');
+  assertExactKeys(
+    projectionDescriptors,
+    ['projectUid', 'projectInstanceId', 'basis'],
+    'sourceSnapshot.currentProjection',
+  );
+  const basis = descriptorValue(projectionDescriptors, 'basis');
+  const canonicalBasisDigest = canonicalProjectionBasisDigest(basis);
+  if (
+    descriptorValue(projectionDescriptors, 'projectUid') !== projectUid
+    || descriptorValue(projectionDescriptors, 'projectInstanceId') !== projectInstanceId
+    || basis.sourceKind !== 'schema11'
+    || basis.basisDigest !== canonicalBasisDigest
+    || sourceBasisDigest !== canonicalBasisDigest
+    || projectUid !== context.binding.projectUid
+    || projectUid !== reservation.projectReservation.uid
+    || projectInstanceId !== reservation.projectInstanceId
+    || sourceBasisDigest !== reservation.sourceBasisDigest
+  ) throw new TypeError('sourceSnapshot projection/reservation binding is invalid');
+  const ignoredLedger = descriptorValue(descriptors, 'ignoredLedger');
+  if (
+    canonicalIgnoredLedgerDigest(ignoredLedger) !== basis.ignoredBeforeDigest
+    || ignoredLedger.length !== 0
+  ) throw new TypeError('schema11 sourceSnapshot ignoredLedger must be the canonical empty ledger');
+
+  const volumeRows = assertDenseFrozenArray(
+    descriptorValue(descriptors, 'volumes'),
+    'sourceSnapshot.volumes',
+  ).map((entry, index) => {
+    const rowDescriptors = dataDescriptors(entry, `sourceSnapshot.volumes[${index}]`);
+    assertExactKeys(
+      rowDescriptors,
+      ['id', 'sortOrder', 'title', 'summary'],
+      `sourceSnapshot.volumes[${index}]`,
+    );
+    const id = sourcePositiveInteger(descriptorValue(rowDescriptors, 'id'), 'source volume id');
+    const sortOrder = descriptorValue(rowDescriptors, 'sortOrder');
+    if (!Number.isSafeInteger(sortOrder) || Object.is(sortOrder, -0)) {
+      throw new TypeError('source volume sortOrder must be a safe integer');
+    }
+    return Object.freeze({
+      id,
+      sortOrder,
+      title: sourceString(descriptorValue(rowDescriptors, 'title'), 'source volume title'),
+      summary: sourceString(descriptorValue(rowDescriptors, 'summary'), 'source volume summary'),
+    });
+  });
+  const chapterRows = assertDenseFrozenArray(
+    descriptorValue(descriptors, 'chapters'),
+    'sourceSnapshot.chapters',
+  ).map((entry, index) => {
+    const rowDescriptors = dataDescriptors(entry, `sourceSnapshot.chapters[${index}]`);
+    assertExactKeys(rowDescriptors, [
+      'id',
+      'volumeId',
+      'num',
+      'title',
+      'outline',
+      'content',
+      'summary',
+      'status',
+      'cognitiveFrame',
+      'emotionalAnchor',
+      'worldTexture',
+      'concreteMystery',
+      'interpersonalTension',
+    ], `sourceSnapshot.chapters[${index}]`);
+    const volumeId = descriptorValue(rowDescriptors, 'volumeId');
+    if (volumeId !== null) sourcePositiveInteger(volumeId, 'source chapter volumeId');
+    return Object.freeze({
+      id: sourcePositiveInteger(descriptorValue(rowDescriptors, 'id'), 'source chapter id'),
+      volumeId,
+      num: sourcePositiveInteger(descriptorValue(rowDescriptors, 'num'), 'source chapter num'),
+      title: sourceString(descriptorValue(rowDescriptors, 'title'), 'source chapter title'),
+      outline: sourceString(descriptorValue(rowDescriptors, 'outline'), 'source chapter outline'),
+      content: sourceString(descriptorValue(rowDescriptors, 'content'), 'source chapter content'),
+      summary: sourceString(descriptorValue(rowDescriptors, 'summary'), 'source chapter summary'),
+      status: sourceString(descriptorValue(rowDescriptors, 'status'), 'source chapter status'),
+      cognitiveFrame: sourceString(
+        descriptorValue(rowDescriptors, 'cognitiveFrame'),
+        'source chapter cognitiveFrame',
+      ),
+      emotionalAnchor: sourceString(
+        descriptorValue(rowDescriptors, 'emotionalAnchor'),
+        'source chapter emotionalAnchor',
+      ),
+      worldTexture: sourceString(
+        descriptorValue(rowDescriptors, 'worldTexture'),
+        'source chapter worldTexture',
+      ),
+      concreteMystery: sourceString(
+        descriptorValue(rowDescriptors, 'concreteMystery'),
+        'source chapter concreteMystery',
+      ),
+      interpersonalTension: sourceString(
+        descriptorValue(rowDescriptors, 'interpersonalTension'),
+        'source chapter interpersonalTension',
+      ),
+    });
+  });
+  const basisVolumes = new Map(basis.volumes.map((row) => [row.id, row]));
+  const basisChapters = new Map(basis.chapters.map((row) => [row.id, row]));
+  if (volumeRows.length !== basisVolumes.size || chapterRows.length !== basisChapters.size) {
+    throw new TypeError('sourceSnapshot rows do not exactly cover the schema11 basis');
+  }
+  const seenVolumeIds = new Set();
+  for (const row of volumeRows) {
+    const basisRow = basisVolumes.get(row.id);
+    if (
+      seenVolumeIds.has(row.id)
+      || basisRow === undefined
+      || basisRow.sortOrder !== row.sortOrder
+    ) {
+      throw new TypeError('sourceSnapshot volume does not match the schema11 basis');
+    }
+    seenVolumeIds.add(row.id);
+  }
+  const seenChapterIds = new Set();
+  for (const row of chapterRows) {
+    const basisRow = basisChapters.get(row.id);
+    const bodyBytes = Buffer.from(row.content, 'utf8');
+    if (
+      seenChapterIds.has(row.id)
+      || bodyBytes.toString('utf8') !== row.content
+      || basisRow === undefined
+      || basisRow.volumeId !== row.volumeId
+      || basisRow.num !== row.num
+      || basisRow.status !== row.status
+      || basisRow.bodyRawSha256 !== hashBytes(bodyBytes)
+    ) throw new TypeError('sourceSnapshot chapter does not match the schema11 basis');
+    seenChapterIds.add(row.id);
+  }
+  return {
+    basis,
+    chapterRows,
+    ignoredLedger,
+    projectInstanceId,
+    projectedAt,
+    projectUid,
+    sourceIdentity,
+    sourceBasisDigest,
+    volumeRows,
+  };
+}
+
+function migrationClosureDigest(closure) {
+  const material = closure.map((member) => ({
+    ref: member.ref,
+    parentIdentity: member.parentIdentity,
+    before: {
+      exists: member.before.exists,
+      byteSize: member.before.byteSize,
+      rawSha256: member.before.rawSha256,
+      fileIdentity: member.before.fileIdentity,
+    },
+    after: {
+      exists: member.after.exists,
+      byteSize: member.after.byteSize,
+      rawSha256: member.after.rawSha256,
+    },
+  }));
+  return createHash('sha256')
+    .update('mythpen.manuscript.migration-closure.v1\0', 'utf8')
+    .update(JSON.stringify(material), 'utf8')
+    .digest('hex');
+}
+
+function creationProjectIdentity(value, context) {
+  assertDeepFrozenPlainData(value, 'creation project identity');
+  const descriptors = dataDescriptors(value, 'creation project identity');
+  assertExactKeys(
+    descriptors,
+    ['creationId', 'projectUid', 'projectInstanceId'],
+    'creation project identity',
+  );
+  const result = Object.freeze({
+    creationId: assertCanonicalUuid(
+      descriptorValue(descriptors, 'creationId'),
+      'creation_id',
+    ),
+    projectUid: assertCanonicalUuid(
+      descriptorValue(descriptors, 'projectUid'),
+      'project_uid',
+    ),
+    projectInstanceId: assertCanonicalUuid(
+      descriptorValue(descriptors, 'projectInstanceId'),
+      'project_instance_id',
+    ),
+  });
+  if (result.projectUid !== context.binding.projectUid) {
+    throw new TypeError('creation project identity belongs to another Store enumeration');
+  }
+  return result;
+}
+
+function creationClosureDigest(closure) {
+  const material = closure.map((member) => ({
+    ref: member.ref,
+    parentIdentity: member.parentIdentity,
+    before: {
+      exists: member.before.exists,
+      byteSize: member.before.byteSize,
+      rawSha256: member.before.rawSha256,
+      fileIdentity: member.before.fileIdentity,
+    },
+    after: {
+      exists: member.after.exists,
+      byteSize: member.after.byteSize,
+      rawSha256: member.after.rawSha256,
+    },
+  }));
+  return createHash('sha256')
+    .update('mythpen.manuscript.creation-empty-closure.v1\0', 'utf8')
+    .update(JSON.stringify(material), 'utf8')
+    .digest('hex');
+}
+
+function compileCreationEmptyBootstrap(store, snapshot, mutation, ignoredRows, projectIdentity) {
+  const context = assertOwnedEnumeration(store, snapshot);
+  assertUnambiguousEnumeration(context);
+  if (context.canonicalFiles.length !== 0) {
+    throw manuscriptError('RECOVERY_REQUIRED', { reason: 'creation_target_not_empty' });
+  }
+  const rows = assertDenseFrozenArray(ignoredRows, 'ignoredRows');
+  if (rows.length !== 0) {
+    throw new TypeError('creation ignoredRows must be the frozen empty array');
+  }
+  const mutationDescriptors = dataDescriptors(mutation, 'creation mutation');
+  assertExactKeys(mutationDescriptors, ['kind'], 'creation mutation');
+  if (descriptorValue(mutationDescriptors, 'kind') !== 'creation.empty_bootstrap') {
+    throw new TypeError('creation mutation kind is invalid');
+  }
+  const identity = creationProjectIdentity(projectIdentity, context);
+  const changes = [
+    createChange(
+      deriveControlledFileRef({ role: 'manuscript', projectUid: identity.projectUid }),
+      context.directories.mythpen.identity,
+      serializeCanonicalJson('manuscript', {
+        format_version: MANUSCRIPT_FORMAT_VERSION,
+        project_uid: identity.projectUid,
+        volume_uids: [],
+      }),
+      null,
+    ),
+    createChange(
+      deriveControlledFileRef({ role: 'unassigned', projectUid: identity.projectUid }),
+      context.directories.mythpen.identity,
+      serializeCanonicalJson('unassigned', {
+        format_version: MANUSCRIPT_FORMAT_VERSION,
+        kind: 'unassigned',
+        chapter_uids: [],
+      }),
+      null,
+    ),
+  ].sort((left, right) => sortFileFacts(left.before, right.before));
+  const controlledFiles = changes.map((change) => ({
+    byteSize: change.afterBytes.length,
+    fileIdentity: null,
+    parentIdentity: change.before.parentIdentity,
+    rawSha256: change.rawSha256,
+    ref: change.before.ref,
+    resourceUid: null,
+    role: change.before.role,
+  })).sort(sortCandidateFileFacts);
+  const accumulator = createAccumulator(storeRecords.get(store));
+  accumulator.recordDirectoryEntry();
+  accumulator.recordDirectoryEntry();
+  for (const fact of controlledFiles) {
+    accumulator.recordDirectoryEntry();
+    accumulator.recordFileMetadata({ kind: 'json', byteSize: fact.byteSize });
+  }
+  const capacitySnapshot = accumulator.snapshot();
+  const candidateTemplate = deepFreeze({
+    capacitySnapshot,
+    chapters: [],
+    controlledFiles,
+    diagnostics: { journalCandidates: [], residues: [] },
+    ignoredLedgerAfter: [],
+    projectUid: identity.projectUid,
+    volumeOrder: [],
+    volumes: [],
+    warnings: capacitySnapshot.warnings,
+  });
+  const closure = Object.freeze(changes.map((change) => Object.freeze({
+    after: closureEndpoint(change.afterBytes, change.rawSha256),
+    before: ABSENT_BEFORE_CLOSURE_ENDPOINT,
+    parentIdentity: change.before.parentIdentity,
+    ref: change.before.ref,
+  })));
+  const buildResult = Object.freeze({
+    closure,
+    closureDigest: creationClosureDigest(closure),
+    candidateTemplate,
+  });
+  buildResultRecords.set(buildResult, {
+    expected: new Map(changes.map((change) => [
+      logicalRefKey(change.before.ref),
+      Object.freeze({
+        byteSize: change.afterBytes.length,
+        parentIdentity: change.before.parentIdentity,
+        rawSha256: change.rawSha256,
+      }),
+    ])),
+    store,
+  });
+  return buildResult;
+}
+
+function compileMigrationFullSnapshot(store, snapshot, mutation, ignoredRows, identityReservation) {
+  const context = assertOwnedEnumeration(store, snapshot);
+  assertUnambiguousEnumeration(context);
+  if (context.canonicalFiles.length !== 0) {
+    throw manuscriptError('RECOVERY_REQUIRED', { reason: 'migration_target_not_empty' });
+  }
+  const rows = assertDenseFrozenArray(ignoredRows, 'ignoredRows');
+  if (rows.length !== 0) throw new TypeError('migration ignoredRows must be the frozen empty array');
+  assertDeepFrozenPlainData(identityReservation, 'migrationReservation');
+  validateMigrationReservationManifest(identityReservation);
+  const mutationDescriptors = dataDescriptors(mutation, 'migration mutation');
+  assertExactKeys(
+    mutationDescriptors,
+    ['kind', 'sourceSnapshot', 'localIdentityPlan'],
+    'migration mutation',
+  );
+  if (descriptorValue(mutationDescriptors, 'kind') !== 'migration.full_snapshot') {
+    throw new TypeError('migration mutation kind is invalid');
+  }
+  const localIdentityPlan = descriptorValue(mutationDescriptors, 'localIdentityPlan');
+  if (
+    localIdentityPlan !== identityReservation.localIdentityPlan
+    || !Object.isFrozen(localIdentityPlan)
+  ) throw new TypeError('migration localIdentityPlan must be the reservation original');
+  const source = migrationSourceSnapshot(
+    descriptorValue(mutationDescriptors, 'sourceSnapshot'),
+    store,
+    context,
+    identityReservation,
+  );
+  const assignments = new Map(localIdentityPlan.map((row) => [
+    `${row.objectKind}:${row.id}`,
+    row,
+  ]));
+  if (assignments.size !== source.volumeRows.length + source.chapterRows.length) {
+    throw new TypeError('migration localIdentityPlan does not exactly cover source rows');
+  }
+  const volumeUidById = new Map();
+  for (const row of source.volumeRows) {
+    const assignment = assignments.get(`volume:${row.id}`);
+    if (assignment === undefined) throw new TypeError('migration plan is missing a source volume');
+    volumeUidById.set(row.id, assignment.uid);
+  }
+  const chapterUidById = new Map();
+  for (const row of source.chapterRows) {
+    const assignment = assignments.get(`chapter:${row.id}`);
+    if (assignment === undefined || assignment.num !== row.num) {
+      throw new TypeError('migration plan does not bind the exact source chapter');
+    }
+    chapterUidById.set(row.id, assignment.uid);
+  }
+  const volumeOrderRows = [...source.volumeRows].sort((left, right) => (
+    left.sortOrder - right.sortOrder || left.id - right.id
+  ));
+  const volumeOrder = volumeOrderRows.map((row) => volumeUidById.get(row.id));
+  const chapterGroups = new Map([[null, []]]);
+  for (const row of source.volumeRows) chapterGroups.set(row.id, []);
+  const activeNumbers = new Set();
+  for (const row of source.chapterRows) {
+    if (!chapterGroups.has(row.volumeId)) {
+      throw new TypeError('source chapter references an unknown volume');
+    }
+    const numberKey = `${row.volumeId ?? 'unassigned'}:${row.num}`;
+    if (activeNumbers.has(numberKey)) {
+      throw manuscriptError('LEGACY_CHAPTER_NUMBER_INVALID', { id: row.id, num: row.num });
+    }
+    activeNumbers.add(numberKey);
+    chapterGroups.get(row.volumeId).push(row);
+  }
+  for (const members of chapterGroups.values()) {
+    members.sort((left, right) => left.num - right.num || left.id - right.id);
+  }
+
+  const changes = [];
+  function addJson(ref, parentIdentity, parsed) {
+    changes.push(createChange(
+      ref,
+      parentIdentity,
+      serializeCanonicalJson(ref.role, parsed),
+      parsed,
+    ));
+  }
+  addJson(
+    deriveControlledFileRef({ role: 'manuscript', projectUid: source.projectUid }),
+    context.directories.mythpen.identity,
+    {
+      format_version: MANUSCRIPT_FORMAT_VERSION,
+      project_uid: source.projectUid,
+      volume_uids: volumeOrder,
+    },
+  );
+  addJson(
+    deriveControlledFileRef({ role: 'unassigned', projectUid: source.projectUid }),
+    context.directories.mythpen.identity,
+    {
+      format_version: MANUSCRIPT_FORMAT_VERSION,
+      kind: 'unassigned',
+      chapter_uids: chapterGroups.get(null).map((row) => chapterUidById.get(row.id)),
+    },
+  );
+  for (const volume of volumeOrderRows) {
+    const volumeUid = volumeUidById.get(volume.id);
+    addJson(
+      deriveControlledFileRef({ role: 'volume_index', projectUid: source.projectUid, volumeUid }),
+      context.directories.volumes.identity,
+      {
+        format_version: MANUSCRIPT_FORMAT_VERSION,
+        volume_uid: volumeUid,
+        title: volume.title,
+        summary: volume.summary,
+        chapter_uids: chapterGroups.get(volume.id).map((row) => chapterUidById.get(row.id)),
+      },
+    );
+  }
+
+  const chapterCandidates = new Map();
+  for (const chapter of source.chapterRows) {
+    const chapterUid = chapterUidById.get(chapter.id);
+    const bodyBytes = Buffer.from(chapter.content, 'utf8');
+    const bodyParsed = inspectMarkdown(bodyBytes);
+    const sidecarParsed = {
+      format_version: MANUSCRIPT_FORMAT_VERSION,
+      chapter_uid: chapterUid,
+      title: chapter.title,
+      outline: chapter.outline,
+      status: chapter.status,
+      summary: chapter.summary,
+      cognitive_frame: chapter.cognitiveFrame,
+      emotional_anchor: chapter.emotionalAnchor,
+      world_texture: chapter.worldTexture,
+      concrete_mystery: chapter.concreteMystery,
+      interpersonal_tension: chapter.interpersonalTension,
+    };
+    changes.push(createChange(
+      deriveControlledFileRef({ role: 'chapter_body', projectUid: source.projectUid, chapterUid }),
+      context.directories.chapters.identity,
+      bodyBytes,
+      bodyParsed,
+    ));
+    addJson(
+      deriveControlledFileRef({ role: 'chapter_sidecar', projectUid: source.projectUid, chapterUid }),
+      context.directories.chapters.identity,
+      sidecarParsed,
+    );
+    chapterCandidates.set(chapter.id, {
+      bodyFileIdentity: null,
+      bodyRawSha256: bodyParsed.rawSha256,
+      chapterUid,
+      cognitiveFrame: chapter.cognitiveFrame,
+      concreteMystery: chapter.concreteMystery,
+      content: bodyParsed.content,
+      contentAvailable: bodyParsed.contentAvailable,
+      emotionalAnchor: chapter.emotionalAnchor,
+      interpersonalTension: chapter.interpersonalTension,
+      markdownMode: bodyParsed.mode,
+      outline: chapter.outline,
+      sidecarFileIdentity: null,
+      sidecarRawSha256: hashBytes(serializeCanonicalJson('chapter_sidecar', sidecarParsed)),
+      status: chapter.status,
+      summary: chapter.summary,
+      title: chapter.title,
+      wordCount: bodyParsed.wordCount,
+      worldTexture: chapter.worldTexture,
+    });
+  }
+  changes.sort((left, right) => sortFileFacts(left.before, right.before));
+  const controlledFiles = changes.map((change) => ({
+    byteSize: change.afterBytes.length,
+    fileIdentity: null,
+    parentIdentity: change.before.parentIdentity,
+    rawSha256: change.rawSha256,
+    ref: change.before.ref,
+    resourceUid: change.before.resourceUid,
+    role: change.before.role,
+  })).sort(sortCandidateFileFacts);
+  const accumulator = createAccumulator(storeRecords.get(store));
+  accumulator.recordDirectoryEntry();
+  accumulator.recordDirectoryEntry();
+  for (const uid of volumeOrder) accumulator.recordIdentity({ kind: 'volume', uid, source: 'active' });
+  for (const uid of chapterUidById.values()) {
+    accumulator.recordIdentity({ kind: 'chapter', uid, source: 'active' });
+  }
+  for (const fact of controlledFiles) {
+    accumulator.recordDirectoryEntry({ chapterDirectory: fact.role.startsWith('chapter_') });
+    accumulator.recordFileMetadata({
+      kind: fact.role === 'chapter_body' ? 'markdown' : 'json',
+      byteSize: fact.byteSize,
+    });
+  }
+  const capacitySnapshot = accumulator.snapshot();
+  const chapters = [];
+  let manuscriptPosition = 0;
+  function appendGroup(volumeId, volumeUid) {
+    const members = chapterGroups.get(volumeId);
+    for (let index = 0; index < members.length; index += 1) {
+      const candidate = chapterCandidates.get(members[index].id);
+      manuscriptPosition += 1;
+      chapters.push({
+        ...candidate,
+        chapterPosition: index + 1,
+        manuscriptPosition,
+        volumeUid,
+      });
+    }
+  }
+  for (const volume of volumeOrderRows) appendGroup(volume.id, volumeUidById.get(volume.id));
+  appendGroup(null, null);
+  const candidateTemplate = deepFreeze({
+    capacitySnapshot,
+    chapters,
+    controlledFiles,
+    diagnostics: { journalCandidates: [], residues: [] },
+    ignoredLedgerAfter: [],
+    projectUid: source.projectUid,
+    volumeOrder,
+    volumes: volumeOrderRows.map((volume, index) => ({
+      summary: volume.summary,
+      title: volume.title,
+      volumePosition: index + 1,
+      volumeUid: volumeUidById.get(volume.id),
+    })),
+    warnings: capacitySnapshot.warnings,
+  });
+  const closure = Object.freeze(changes.map((change) => Object.freeze({
+    after: closureEndpoint(change.afterBytes, change.rawSha256),
+    before: ABSENT_BEFORE_CLOSURE_ENDPOINT,
+    parentIdentity: change.before.parentIdentity,
+    ref: change.before.ref,
+  })));
+  const buildResult = Object.freeze({
+    closure,
+    closureDigest: migrationClosureDigest(closure),
+    candidateTemplate,
+  });
+  buildResultRecords.set(buildResult, {
+    expected: new Map(changes.map((change) => [
+      logicalRefKey(change.before.ref),
+      Object.freeze({
+        byteSize: change.afterBytes.length,
+        parentIdentity: change.before.parentIdentity,
+        rawSha256: change.rawSha256,
+      }),
+    ])),
+    store,
+  });
+  return buildResult;
+}
+
 class ManuscriptStore {
   constructor({
     dataRoot,
@@ -1808,6 +2523,66 @@ class ManuscriptStore {
   async enumerateAndClassify(identity) {
     const result = await enumerateInternal(this, identity, createAccumulator(storeRecords.get(this)));
     return result.snapshot;
+  }
+
+  createUidPathProbe(snapshot) {
+    const validated = validatedSnapshotRecords.get(snapshot);
+    const context = validated?.store === this
+      ? treeIdentityRecords.get(snapshot.treeIdentity)
+      : assertOwnedEnumeration(this, snapshot);
+    const record = storeRecords.get(this);
+    if (
+      context === undefined
+      || context.store !== this
+      || snapshot.projectUid !== context.binding.projectUid
+      || record.nextScanEpoch !== context.scanEpoch + 1
+    ) throw manuscriptError('RECOVERY_REQUIRED', { reason: 'uid_path_enumeration_stale' });
+    assertUnambiguousEnumeration(context);
+    const store = this;
+    return Object.freeze({
+      async probe(input) {
+        const ownedValidation = validatedSnapshotRecords.get(snapshot);
+        const current = ownedValidation?.store === store
+          ? treeIdentityRecords.get(snapshot.treeIdentity)
+          : assertOwnedEnumeration(store, snapshot);
+        const currentRecord = storeRecords.get(store);
+        if (
+          current === undefined
+          || current.store !== store
+          || snapshot.projectUid !== current.binding.projectUid
+          || currentRecord.nextScanEpoch !== current.scanEpoch + 1
+        ) throw manuscriptError('RECOVERY_REQUIRED', { reason: 'uid_path_enumeration_stale' });
+        assertUnambiguousEnumeration(current);
+        const { objectKind, uid } = uidPathProbeInput(input, current);
+        const roles = objectKind === 'chapter'
+          ? ['chapter_body', 'chapter_sidecar']
+          : ['volume_index'];
+        if (roles.some((role) => current.filesByKey.has(`${role}:${uid}`))) {
+          return Object.freeze({ disposition: 'collision' });
+        }
+        const parentIdentity = objectKind === 'chapter'
+          ? current.directories.chapters.identity
+          : current.directories.volumes.identity;
+        const pathByRole = objectKind === 'chapter'
+          ? (() => {
+            const paths = deriveChapterPaths(current.paths, uid);
+            return new Map([
+              ['chapter_body', paths.bodyPath],
+              ['chapter_sidecar', paths.sidecarPath],
+            ]);
+          })()
+          : new Map([['volume_index', deriveVolumePath(current.paths, uid)]]);
+        return deepFreeze({
+          disposition: 'absent',
+          pathPredicates: roles.map((role) => ({
+            role,
+            canonicalPath: pathByRole.get(role),
+            parentIdentity,
+            disposition: 'absent',
+          })),
+        });
+      },
+    });
   }
 
   async readControlledFile(identity, controlledFileRef) {
@@ -2149,6 +2924,35 @@ class ManuscriptStore {
   async buildClosure(snapshot, mutation, ignoredRows, identityReservation) {
     if (arguments.length !== 4) {
       throw new TypeError('buildClosure requires an explicit identityReservation argument');
+    }
+    const migrationKindDescriptor = isPlainObject(mutation)
+      ? Object.getOwnPropertyDescriptor(mutation, 'kind')
+      : undefined;
+    if (
+      migrationKindDescriptor?.enumerable === true
+      && Object.hasOwn(migrationKindDescriptor, 'value')
+      && migrationKindDescriptor.value === 'creation.empty_bootstrap'
+    ) {
+      return compileCreationEmptyBootstrap(
+        this,
+        snapshot,
+        mutation,
+        ignoredRows,
+        identityReservation,
+      );
+    }
+    if (
+      migrationKindDescriptor?.enumerable === true
+      && Object.hasOwn(migrationKindDescriptor, 'value')
+      && migrationKindDescriptor.value === 'migration.full_snapshot'
+    ) {
+      return compileMigrationFullSnapshot(
+        this,
+        snapshot,
+        mutation,
+        ignoredRows,
+        identityReservation,
+      );
     }
     const validated = validatedSnapshotRecords.get(snapshot);
     if (validated === undefined || validated.store !== this) {

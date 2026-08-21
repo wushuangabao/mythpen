@@ -19,6 +19,7 @@ const INCARNATION_VERSION = 1;
 const WRITER_LOCK_NAME = '.controlstore-writer.lock';
 const SQLITE_RECOVERY_DIR_NAME = 'sqlite-recovery';
 const MANUSCRIPT_FILE_ASSETS_DIR_NAME = 'file-assets';
+const MANUSCRIPT_DRAFT_CONFLICT_DIR_NAME = 'draft-conflict';
 const BOUNDED_CONTROL_PROTOCOL_EPOCH = 2;
 const BOUNDED_TAIL_FILE_NAME = '.controlstore-tail.json';
 const BOUNDED_TAIL_CANDIDATE_PATTERN = /^\.controlstore-tail-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.tmp$/;
@@ -1409,9 +1410,12 @@ function readBoundedActiveEvents(controlDir, tail, options = {}) {
     if (
       name === SQLITE_RECOVERY_DIR_NAME
       || name === MANUSCRIPT_FILE_ASSETS_DIR_NAME
+      || name === MANUSCRIPT_DRAFT_CONFLICT_DIR_NAME
     ) {
       const reservedDirectory = path.join(controlDir, name);
-      const label = name === SQLITE_RECOVERY_DIR_NAME ? 'recovery' : 'manuscript file-assets';
+      const label = name === SQLITE_RECOVERY_DIR_NAME
+        ? 'recovery'
+        : `manuscript ${name}`;
       const stats = runIo(
         `inspecting ${label} directory ${reservedDirectory}`,
         () => fs.lstatSync(reservedDirectory),
@@ -2038,9 +2042,12 @@ function readEvents(controlDir) {
     if (
       name === SQLITE_RECOVERY_DIR_NAME
       || name === MANUSCRIPT_FILE_ASSETS_DIR_NAME
+      || name === MANUSCRIPT_DRAFT_CONFLICT_DIR_NAME
     ) {
       const reservedDirectory = path.join(controlDir, name);
-      const label = name === SQLITE_RECOVERY_DIR_NAME ? 'recovery' : 'manuscript file-assets';
+      const label = name === SQLITE_RECOVERY_DIR_NAME
+        ? 'recovery'
+        : `manuscript ${name}`;
       const stats = runIo(
         `inspecting ${label} directory ${reservedDirectory}`,
         () => fs.lstatSync(reservedDirectory),

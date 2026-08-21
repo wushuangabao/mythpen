@@ -1,4 +1,12 @@
 import { isolateProjectDraft } from './projectDraftRecovery.ts'
+import type { ManuscriptBaseWitness } from './api.ts'
+import {
+  discardManuscriptDirtyResource,
+  markManuscriptResourceDirty,
+  markManuscriptResourceSaving,
+  settleManuscriptResource,
+  type ManuscriptDirtyBinding,
+} from './manuscriptDirtyResources.ts'
 
 export interface EditorSaveEntry {
   project: string
@@ -8,6 +16,8 @@ export interface EditorSaveEntry {
   baseDataVersion: number
   version: number
   tombstoneGeneration: number
+  dirtyBinding?: ManuscriptDirtyBinding
+  baseWitness?: ManuscriptBaseWitness
 }
 
 export interface EditorSaveQueueSnapshot {
@@ -21,6 +31,7 @@ const pendingSaves = new Map<string, EditorSaveEntry>()
 const visibleDrafts = new Map<string, EditorSaveEntry>()
 const saveQueues = new Map<string, Promise<void>>()
 const failedSaves = new Map<string, string>()
+const failedSaveCodes = new Map<string, string>()
 const confirmedDataVersions = new Map<string, number>()
 const tombstoneGenerations = new Map<string, number>()
 const projectEpochs = new Map<string, number>()
@@ -64,6 +75,24 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || '保存失败')
 }
 
+function errorCode(error: unknown): string | null {
+  if (error === null || typeof error !== 'object') return null
+  const descriptor = Object.getOwnPropertyDescriptor(error, 'code')
+  return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value') && typeof descriptor.value === 'string'
+    ? descriptor.value
+    : null
+}
+
+function snapshotBaseWitness(value: ManuscriptBaseWitness | undefined): ManuscriptBaseWitness | undefined {
+  if (value === undefined) return undefined
+  return Object.freeze({
+    expected_data_version: value.expected_data_version,
+    generation: value.generation,
+    raw_sha256: value.raw_sha256,
+    sidecar_raw_sha256: value.sidecar_raw_sha256,
+  })
+}
+
 export function subscribeEditorSaveQueue(listener: () => void): () => void {
   listeners.add(listener)
   return () => listeners.delete(listener)
@@ -77,8 +106,23 @@ export function getEditorSaveDraft(project: string, chapterId: number): EditorSa
   return visibleDrafts.get(editorSaveKey(project, chapterId)) || null
 }
 
+export function getEditorSaveFailure(
+  project: string,
+  chapterId: number,
+): Readonly<{ message: string; code: string | null }> | null {
+  const saveKey = editorSaveKey(project, chapterId)
+  const message = failedSaves.get(saveKey)
+  if (message === undefined) return null
+  return Object.freeze({ message, code: failedSaveCodes.get(saveKey) ?? null })
+}
+
 function clearProjectEditorSaves(project: string): void {
   projectEpochs.set(project, projectEpoch(project) + 1)
+  for (const [saveKey, entry] of visibleDrafts) {
+    if (saveKeyBelongsToProject(saveKey, project) && entry.dirtyBinding) {
+      discardManuscriptDirtyResource(entry.dirtyBinding)
+    }
+  }
   for (const saveKey of [...pendingSaves.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) pendingSaves.delete(saveKey)
   }
@@ -87,6 +131,9 @@ function clearProjectEditorSaves(project: string): void {
   }
   for (const saveKey of [...failedSaves.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) failedSaves.delete(saveKey)
+  }
+  for (const saveKey of [...failedSaveCodes.keys()]) {
+    if (saveKeyBelongsToProject(saveKey, project)) failedSaveCodes.delete(saveKey)
   }
   for (const saveKey of [...confirmedDataVersions.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) confirmedDataVersions.delete(saveKey)
@@ -133,11 +180,14 @@ export function retireStaleProjectEditorSaves(project: string, sourceInstanceId:
  */
 export function discardEditorSave(project: string, chapterId: number): void {
   const saveKey = editorSaveKey(project, chapterId)
+  const dirtyBinding = visibleDrafts.get(saveKey)?.dirtyBinding
   tombstoneGenerations.set(saveKey, (tombstoneGenerations.get(saveKey) ?? 0) + 1)
   pendingSaves.delete(saveKey)
   visibleDrafts.delete(saveKey)
   failedSaves.delete(saveKey)
+  failedSaveCodes.delete(saveKey)
   confirmedDataVersions.delete(saveKey)
+  if (dirtyBinding) discardManuscriptDirtyResource(dirtyBinding)
   publishSnapshot()
 }
 
@@ -147,6 +197,8 @@ export function enqueueEditorSave(
   chapterNum: number,
   content: string,
   baseDataVersion: number,
+  dirtyBinding?: ManuscriptDirtyBinding,
+  baseWitness?: ManuscriptBaseWitness,
 ): void {
   const saveKey = editorSaveKey(project, chapterId)
   const existingDraft = visibleDrafts.get(saveKey)
@@ -161,12 +213,16 @@ export function enqueueEditorSave(
     baseDataVersion: existingDraft?.baseDataVersion ?? baseDataVersion,
     version: ++nextSaveVersion,
     tombstoneGeneration: tombstoneGenerations.get(saveKey) ?? 0,
+    dirtyBinding: existingDraft ? existingDraft.dirtyBinding : dirtyBinding,
+    baseWitness: existingDraft ? existingDraft.baseWitness : snapshotBaseWitness(baseWitness),
   }
   pendingSaves.set(saveKey, entry)
   visibleDrafts.set(saveKey, entry)
   // A new edit remains unsaved, but the previous request's error no longer
   // describes the snapshot that will be retried.
   failedSaves.delete(saveKey)
+  failedSaveCodes.delete(saveKey)
+  if (entry.dirtyBinding) markManuscriptResourceDirty(entry.dirtyBinding, entry.version, { content })
   publishSnapshot()
 }
 
@@ -180,6 +236,7 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
   if (!pending) return saveQueues.get(saveKey) ?? Promise.resolve()
   pendingSaves.delete(saveKey)
   const requestEpoch = projectEpoch(project)
+  const requestId = `editor-save-${pending.version}`
 
   const previousSave = saveQueues.get(saveKey) ?? Promise.resolve()
   const currentSave = previousSave
@@ -187,6 +244,9 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
     .then(() => {
       if (projectEpoch(project) !== requestEpoch) return
       if ((tombstoneGenerations.get(saveKey) ?? 0) !== pending.tombstoneGeneration) return
+      if (pending.dirtyBinding) {
+        markManuscriptResourceSaving(pending.dirtyBinding, pending.version, requestId)
+      }
       // A newer snapshot may already have left pendingSaves and be waiting in
       // this serialized promise chain. Advance it immediately before its write,
       // using only a version confirmed by an earlier local CAS success.
@@ -210,6 +270,10 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
         const visible = visibleDrafts.get(saveKey)
         if (visible?.version === pending.version) visibleDrafts.delete(saveKey)
         failedSaves.delete(saveKey)
+        failedSaveCodes.delete(saveKey)
+        if (pending.dirtyBinding) {
+          settleManuscriptResource(pending.dirtyBinding, pending.version, requestId, 'saved')
+        }
         publishSnapshot()
       },
       (error) => {
@@ -220,10 +284,22 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
         if (!newerPending && visible?.version === pending.version) {
           pendingSaves.set(saveKey, pending)
           failedSaves.set(saveKey, errorMessage(error))
+          const code = errorCode(error)
+          if (code) failedSaveCodes.set(saveKey, code)
+          else failedSaveCodes.delete(saveKey)
+          if (pending.dirtyBinding) {
+            settleManuscriptResource(
+              pending.dirtyBinding,
+              pending.version,
+              requestId,
+              code === 'EXTERNAL_DRAFT_CONFLICT' ? 'stale' : 'failed',
+            )
+          }
         } else if (visible?.version !== pending.version) {
           // This request belongs to an older snapshot. Do not label the newer
           // draft as failed before its own serialized write has even run.
           failedSaves.delete(saveKey)
+          failedSaveCodes.delete(saveKey)
         }
         publishSnapshot()
         throw error

@@ -1,10 +1,19 @@
 import { AlertTriangle, BookOpen, Trash2, X } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { ManuscriptMigrationDialog } from '@/components/ManuscriptMigrationDialog'
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { useT } from '@/hooks/useT'
 import { activateOnKeyDown } from '@/lib/a11y'
+import { projectsApi, type FilesBetaProjectStatus } from '@/lib/api'
+import {
+  beginFilesBetaMigration,
+  FilesBetaMigrationBlockedError,
+  inspectFilesBetaMigrationPreflight,
+  type FilesBetaMigrationPreflight,
+} from '@/lib/manuscriptMigrationPreflight'
 import { recoveryReasonI18nKey } from '@/lib/projectRecovery'
 import { useProjectStore } from '@/stores/useProjectStore'
+import { useChapterStore } from '@/stores/useChapterStore'
 import { useUIStore } from '@/stores/useUIStore'
 
 function formatDate(dateStr: string): string {
@@ -26,7 +35,36 @@ export function ProjectList() {
   const totalWords = projects.reduce((s, p) => s + p.wordCount, 0)
 
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [filesRoutes, setFilesRoutes] = useState<Record<string, FilesBetaProjectStatus['route']>>({})
+  const [migrationTarget, setMigrationTarget] = useState<string | null>(null)
+  const [migrationPreflight, setMigrationPreflight] = useState<FilesBetaMigrationPreflight | null>(null)
+  const [migrationBusy, setMigrationBusy] = useState(false)
+  const [migrationError, setMigrationError] = useState<string | null>(null)
   const deleteTargetProject = projects.find((project) => project.name === deleteTarget)
+
+  useEffect(() => {
+    let cancelled = false
+    const ready = projects.filter((project) => project.openState === 'ready')
+    void Promise.all(
+      ready.map(async (project) => {
+        try {
+          return [project.name, (await projectsApi.getFilesBetaStatus(project.name)).route] as const
+        } catch {
+          return null
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return
+      setFilesRoutes(
+        Object.fromEntries(
+          entries.filter((entry): entry is readonly [string, FilesBetaProjectStatus['route']] => entry !== null),
+        ),
+      )
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [projects])
 
   if (!showProjectList) return null
 
@@ -35,6 +73,33 @@ export function ProjectList() {
     const name = deleteTarget
     setDeleteTarget(null)
     await deleteProject(name)
+  }
+
+  const openMigration = (name: string) => {
+    setMigrationTarget(name)
+    setMigrationPreflight(inspectFilesBetaMigrationPreflight(name))
+    setMigrationError(null)
+  }
+
+  const confirmMigration = async () => {
+    if (!migrationTarget) return
+    const name = migrationTarget
+    setMigrationBusy(true)
+    setMigrationError(null)
+    try {
+      await beginFilesBetaMigration(name, () => projectsApi.migrateFilesBeta(name))
+      setFilesRoutes((routes) => ({ ...routes, [name]: 'files' }))
+      useChapterStore.getState().discardProjectState(name)
+      setCurrentProject(name)
+      await useChapterStore.getState().loadChapters(name)
+      setMigrationTarget(null)
+      setMigrationPreflight(null)
+    } catch (error) {
+      if (error instanceof FilesBetaMigrationBlockedError) setMigrationPreflight(error.preflight)
+      setMigrationError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMigrationBusy(false)
+    }
   }
 
   return (
@@ -130,6 +195,29 @@ export function ProjectList() {
                   <div className="text-[11px] text-[var(--ink-mute)]">
                     {t(`project.mode.${p.mode}`)} · {t(`status.${p.status}`)}
                   </div>
+                  {p.openState === 'ready' && filesRoutes[p.name] === 'sqlite' && (
+                    <button
+                      type="button"
+                      className="mt-3 rounded-md border border-[var(--accent-gold)]/40 px-2.5 py-1.5 text-[11px] font-medium text-[var(--accent-gold)] hover:bg-[var(--accent-gold)]/10"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        openMigration(p.name)
+                      }}
+                    >
+                      {t('project.filesBetaMigrate')}
+                    </button>
+                  )}
+                  {p.openState === 'ready' && filesRoutes[p.name] === 'files' && (
+                    <div className="mt-3 text-[11px] font-medium text-[var(--accent-gold)]">
+                      {t('project.filesBetaActive')}
+                    </div>
+                  )}
+                  {p.openState === 'ready' &&
+                    (filesRoutes[p.name] === 'migrating' || filesRoutes[p.name] === 'retired') && (
+                      <div className="mt-3 rounded-md bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                        {t('project.filesBetaRecoveryRequired')}
+                      </div>
+                    )}
                 </div>
               ))}
 
@@ -190,6 +278,21 @@ export function ProjectList() {
             </div>
           </div>
         </div>
+      )}
+      {migrationTarget && migrationPreflight && (
+        <ManuscriptMigrationDialog
+          project={migrationTarget}
+          preflight={migrationPreflight}
+          busy={migrationBusy}
+          error={migrationError}
+          onCancel={() => {
+            if (migrationBusy) return
+            setMigrationTarget(null)
+            setMigrationPreflight(null)
+            setMigrationError(null)
+          }}
+          onConfirm={() => void confirmMigration()}
+        />
       )}
     </>
   )

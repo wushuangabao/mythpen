@@ -6,6 +6,7 @@ const fs = require('fs');
 const db = require('../db');
 const { sendJsonError } = require('../json-error-middleware');
 const { writeChapterBody } = require('../manuscript-service');
+const { getManuscriptRuntime } = require('../manuscript/runtime');
 const {
   publishGeneratedProjectFile,
   publishOpaqueDiagnosticsExport,
@@ -25,6 +26,7 @@ const {
 
 const CHARACTER_ROLES = new Set(['major', 'minor', 'extra']);
 const PROJECT_INSTANCE_HEADER = 'X-Mythpen-Project-Instance';
+const REQUEST_ID_HEADER = 'X-Mythpen-Request-Id';
 const COVER_FILE_NAMES = ['cover.png', 'cover.jpg', 'cover.jpeg', 'cover.webp', 'cover.gif'];
 const RECOVERY_ACTIONS = new Set([
   'recover_transaction',
@@ -163,6 +165,23 @@ function retireStagedProjectCoverFiles(projectName, stagedFiles) {
 router.param('project', (req, res, next, name) => {
   const expectedInstanceId = req.get(PROJECT_INSTANCE_HEADER) || '';
   return db.runWithProjectInstance(name, expectedInstanceId, () => {
+    try {
+      req.manuscriptAdmission = db.inspectProjectManuscriptRoute(name);
+    } catch (error) {
+      if (error?.code === 'PROJECT_NOT_FOUND') return sendJsonError(res, error.code);
+      return next(error);
+    }
+    if (req.manuscriptAdmission.route === 'files') return next();
+    if (req.manuscriptAdmission.route === 'migrating') {
+      const error = new Error('Project migration is in progress');
+      error.code = 'PROJECT_MIGRATION_BUSY';
+      return next(error);
+    }
+    if (req.manuscriptAdmission.route === 'retired') {
+      const error = new Error('Project is retired');
+      error.code = 'RECOVERY_REQUIRED';
+      return next(error);
+    }
     if (
       req.method === 'PUT'
       && Object.prototype.hasOwnProperty.call(req.body || {}, 'content')
@@ -181,6 +200,86 @@ router.param('project', (req, res, next, name) => {
     }
   });
 });
+
+function isFilesRequest(req) {
+  return req.manuscriptAdmission?.route === 'files';
+}
+
+function filesProjectSelector(req) {
+  return Object.freeze({
+    projectUid: req.manuscriptAdmission.databaseFacts.projectUid,
+  });
+}
+
+function filesRequestId(req) {
+  const requestId = req.get(REQUEST_ID_HEADER) || '';
+  if (!requestId) {
+    const error = new Error(`${REQUEST_ID_HEADER} is required for files mutations`);
+    error.code = 'INVALID_PARAMS';
+    throw error;
+  }
+  return requestId;
+}
+
+function filesBaseWitness(body) {
+  const witness = body?.base_witness;
+  if (!isPlainJsonObject(witness)) {
+    const error = new Error('base_witness is required for files mutations');
+    error.code = 'INVALID_PARAMS';
+    throw error;
+  }
+  return Object.freeze({
+    expectedDataVersion: witness.expected_data_version,
+    generation: witness.generation,
+    rawSha256: witness.raw_sha256,
+    sidecarRawSha256: witness.sidecar_raw_sha256 ?? null,
+  });
+}
+
+function serializeFilesBaseWitness(witness) {
+  return {
+    expected_data_version: witness.expectedDataVersion,
+    generation: witness.generation,
+    raw_sha256: witness.rawSha256,
+    sidecar_raw_sha256: witness.sidecarRawSha256,
+  };
+}
+
+function filesChapterIdentity(req) {
+  return {
+    manuscript_project_uid: req.manuscriptAdmission.databaseFacts.projectUid,
+    project_instance_id: req.manuscriptAdmission.databaseFacts.projectInstanceId,
+  };
+}
+
+function serializeFilesChapter(req, chapter, generation) {
+  return {
+    ...chapter,
+    ...filesChapterIdentity(req),
+    ...(Number.isSafeInteger(generation) ? {
+      base_witness: serializeFilesBaseWitness({
+        expectedDataVersion: chapter.data_version,
+        generation,
+        rawSha256: chapter.body_raw_sha256,
+        sidecarRawSha256: chapter.sidecar_raw_sha256,
+      }),
+    } : {}),
+  };
+}
+
+function serializeFilesVolumes(req, volumes, generation) {
+  return volumes.map((volume) => ({
+    ...volume,
+    chapters: (volume.chapters || []).map((chapter) => serializeFilesChapter(req, chapter, generation)),
+  }));
+}
+
+function sendFilesRead(req, res, result) {
+  return res.json({
+    ...serializeFilesChapter(req, result.value, result.baseWitness.generation),
+    base_witness: serializeFilesBaseWitness(result.baseWitness),
+  });
+}
 
 // ─── Shared helpers ───
 function updateRecord(projectName, table, id, body, allowedFields, addUpdatedAt) {
@@ -233,11 +332,19 @@ function listTimelineEvents(projectName) {
 
 router.get('/projects', (req, res) => {
   const rows = db.dbQuery('SELECT * FROM recent_projects ORDER BY last_opened DESC');
-  const projects = rows.map((row) => readRecentProject(row, {
+  const filesProjects = db.listFilesProjectSummaries();
+  const filesByName = new Map(filesProjects.map((project) => [project.name, project]));
+  const projects = rows.map((row) => filesByName.get(row.name) || readRecentProject(row, {
     getProjectOpenState: db.getProjectOpenState,
     openProjectDb: db.openProjectDb,
     recordProjectOpenFailure: db.recordProjectOpenFailure,
   }));
+  for (const project of filesProjects) {
+    if (!rows.some((row) => row.name === project.name)) projects.push(project);
+  }
+  projects.sort((left, right) => (
+    left.lastOpened > right.lastOpened ? -1 : left.lastOpened < right.lastOpened ? 1 : 0
+  ));
   res.json(projects);
 });
 
@@ -277,6 +384,53 @@ router.post('/projects', (req, res) => {
   pdb.flush();
   config.flush();
   res.json({ name, filePath, mode, language, genres, instanceId });
+});
+
+router.post('/projects/files-beta', async (req, res, next) => {
+  if (
+    !hasEmptyQuery(req)
+    || !hasExactKeys(req.body, ['genres', 'language', 'mode', 'name'])
+  ) return invalidDiagnosticsParams(res);
+  try {
+    return res.status(201).json(await getManuscriptRuntime().createProject(Object.freeze({
+      requestId: filesRequestId(req),
+      name: req.body.name,
+      mode: req.body.mode,
+      language: req.body.language,
+      genres: req.body.genres,
+    })));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post('/projects/by-name/:name/files-beta/migrate', async (req, res, next) => {
+  if (!hasEmptyQuery(req) || !hasExactKeys(req.body, [])) {
+    return invalidDiagnosticsParams(res);
+  }
+  try {
+    return res.json(await getManuscriptRuntime().migrateProject(Object.freeze({
+      projectSelector: Object.freeze({ projectName: req.params.name }),
+      requestId: filesRequestId(req),
+    })));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get('/projects/by-name/:name/files-beta/status', (req, res, next) => {
+  if (req.body !== undefined || !hasEmptyQuery(req)) return invalidDiagnosticsParams(res);
+  try {
+    const admission = db.inspectProjectManuscriptRoute(req.params.name);
+    const facts = admission.route === 'files' ? admission.databaseFacts : admission;
+    return res.json({
+      route: admission.route,
+      project_uid: facts.projectUid ?? null,
+      project_instance_id: facts.projectInstanceId ?? null,
+    });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 router.get('/testing/native-fixture', (req, res, next) => {
@@ -353,6 +507,10 @@ function sendProjectMetadata(req, res, next) {
   const expectedInstanceId = req.get(PROJECT_INSTANCE_HEADER) || '';
   return db.runWithProjectInstance(name, expectedInstanceId, () => {
     try {
+      const admission = db.inspectProjectManuscriptRoute(name);
+      if (admission.route === 'files') {
+        return res.json(db.readFilesProjectProductView(name).metadata);
+      }
       const pdb = db.getProjectDb(name);
       const meta = {};
       pdb.prepare('SELECT key, value FROM project_meta').all().forEach(m => meta[m.key] = m.value);
@@ -396,6 +554,20 @@ function deleteProject(req, res) {
   const filePath = db.getProjectDbPath(name);
   let stagedCoverFiles = [];
   try {
+    try {
+      const route = db.inspectProjectManuscriptRoute(name);
+      if (route.route === 'files') {
+        return res.status(409).json({
+          error: {
+            code: 'PROJECT_PERMANENT_DELETE_UNSUPPORTED',
+            message: '文件权威项目不支持永久物理删除',
+            recoverable: true,
+          },
+        });
+      }
+    } catch (error) {
+      if (error?.code !== 'PROJECT_NOT_FOUND') throw error;
+    }
     try {
       db.assertProjectInstance(name, req.get(PROJECT_INSTANCE_HEADER) || '');
     } catch (error) {
@@ -472,6 +644,9 @@ router.delete('/projects/:name', (req, res, next) => {
 
 // ─── Sidebar Items (genre-filtered) ───
 router.get('/:project/sidebar-items', (req, res) => {
+  if (isFilesRequest(req)) {
+    return res.json(db.readFilesProjectProductView(req.params.project).sidebarItems);
+  }
   const pdb = db.getProjectDb(req.params.project);
   try {
     const genres = pdb.prepare('SELECT genre FROM project_genres').all().map((g) => g.genre);
@@ -494,7 +669,29 @@ router.get('/:project/sidebar-items', (req, res) => {
 // CHAPTERS
 // ═══════════════════════════════════════════
 
-router.get('/:project/chapters', (req, res) => {
+router.get('/:project/manuscript/witness', async (req, res, next) => {
+  if (!isFilesRequest(req)) return res.json({ base_witness: null });
+  try {
+    const result = await getManuscriptRuntime().read(
+      filesProjectSelector(req),
+      Object.freeze({ kind: 'project' }),
+    );
+    return res.json({ base_witness: serializeFilesBaseWitness(result.baseWitness) });
+  } catch (error) { return next(error); }
+});
+
+router.get('/:project/chapters', async (req, res, next) => {
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({ kind: 'chapters' }),
+      );
+      return res.json(result.value.map((chapter) => (
+        serializeFilesChapter(req, chapter, result.baseWitness.generation)
+      )));
+    } catch (error) { return next(error); }
+  }
   const rows = db.projectQuery(project(req.params.project),
     'SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id ORDER BY c.num'
   );
@@ -529,7 +726,44 @@ router.post('/:project/chapters/:chapterId/revisions', (req, res) => {
   res.status(201).json({ revision: result.revision, rebased: result.rebased });
 });
 
-router.get('/:project/chapters/:num', (req, res) => {
+router.put('/:project/chapters/order', async (req, res, next) => {
+  if (!isFilesRequest(req)) return sendJsonError(res, 'INVALID_PARAMS', '章节排序仅供 files Beta 项目使用');
+  try {
+    const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+      requestId: filesRequestId(req),
+      baseWitness: filesBaseWitness(req.body),
+      command: Object.freeze({
+        kind: 'chapter.reorder',
+        containerVolumeId: req.body?.container_volume_id === null
+          ? null
+          : Number(req.body?.container_volume_id),
+        chapterIds: Object.freeze((req.body?.chapter_ids ?? []).map(Number)),
+      }),
+    }));
+    return res.json(result);
+  } catch (error) { return next(error); }
+});
+
+router.put('/:project/chapters/:chapterId/move', async (req, res, next) => {
+  if (!isFilesRequest(req)) return sendJsonError(res, 'INVALID_PARAMS', '章节移动仅供 files Beta 项目使用');
+  try {
+    const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+      requestId: filesRequestId(req),
+      baseWitness: filesBaseWitness(req.body),
+      command: Object.freeze({
+        kind: 'chapter.move',
+        chapterId: Number(req.params.chapterId),
+        targetVolumeId: req.body?.target_volume_id === null
+          ? null
+          : Number(req.body?.target_volume_id),
+        targetPosition: Number(req.body?.target_position),
+      }),
+    }));
+    return res.json(result);
+  } catch (error) { return next(error); }
+});
+
+router.get('/:project/chapters/:num', async (req, res, next) => {
   const projectName = project(req.params.project);
   const chapterNum = positiveInteger(req.params.num);
   const hasChapterId = req.query.chapter_id !== undefined;
@@ -538,6 +772,21 @@ router.get('/:project/chapters/:num', (req, res) => {
   const volumeId = hasVolumeId ? positiveInteger(req.query.volume_id) : null;
   if (!chapterNum || (hasChapterId && !chapterId) || (hasVolumeId && !volumeId)) {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节身份参数无效', recoverable: true } });
+  }
+
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({
+          kind: 'chapter',
+          chapterId,
+          chapterNum,
+          volumeId,
+        }),
+      );
+      return sendFilesRead(req, res, result);
+    } catch (error) { return next(error); }
   }
 
   let row;
@@ -567,7 +816,7 @@ router.get('/:project/chapters/:num', (req, res) => {
   res.json(row);
 });
 
-router.put('/:project/chapters/:num', (req, res) => {
+router.put('/:project/chapters/:num', async (req, res, next) => {
   const { num } = req.params;
   const projectName = project(req.params.project);
   const chapterNum = Number(num);
@@ -598,6 +847,53 @@ router.put('/:project/chapters/:num', (req, res) => {
         recoverable: true,
       },
     });
+  }
+
+  if (isFilesRequest(req)) {
+    try {
+      const baseWitness = filesBaseWitness(body);
+      const patch = Object.fromEntries(Object.entries({
+        title,
+        outline,
+        status,
+        cognitive_frame,
+        emotional_anchor,
+        world_texture,
+        concrete_mystery,
+        interpersonal_tension,
+      }).filter(([, value]) => value !== undefined));
+      const command = content === undefined
+        ? Object.freeze({
+          kind: 'chapter.patch_sidecar',
+          chapterId: requestedChapterId === undefined ? null : Number(requestedChapterId),
+          chapterNum,
+          expected_data_version: baseWitness.expectedDataVersion,
+          patch: Object.freeze(patch),
+        })
+        : Object.freeze({
+          kind: 'chapter.replace_body_and_sidecar',
+          chapterId: requestedChapterId === undefined ? null : Number(requestedChapterId),
+          chapterNum,
+          expected_data_version: baseWitness.expectedDataVersion,
+          content,
+          patch: Object.freeze(patch),
+        });
+      await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness,
+        command,
+      }));
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({
+          kind: 'chapter',
+          chapterId: requestedChapterId === undefined ? null : Number(requestedChapterId),
+          chapterNum,
+          volumeId: null,
+        }),
+      );
+      return sendFilesRead(req, res, result);
+    } catch (error) { return next(error); }
   }
 
   if (content !== undefined) {
@@ -767,8 +1063,24 @@ router.put('/:project/chapters/:num', (req, res) => {
   res.json(updateResult.updated);
 });
 
-router.post('/:project/chapters', (req, res) => {
+router.post('/:project/chapters', async (req, res, next) => {
   const { title, volume_id = 1, outline = '', status = 'pending', chapter_num } = req.body || {};
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(req.body),
+        command: Object.freeze({
+          kind: 'chapter.create',
+          containerVolumeId: volume_id,
+          requestedNum: chapter_num ?? null,
+          content: '',
+          sidecar: Object.freeze({ title, outline, status }),
+        }),
+      }));
+      return res.status(201).json(result);
+    } catch (error) { return next(error); }
+  }
   let num;
   if (chapter_num !== undefined) {
     num = chapter_num;
@@ -788,7 +1100,7 @@ router.post('/:project/chapters', (req, res) => {
   res.status(201).json(created);
 });
 
-router.delete('/:project/chapters/:num', (req, res) => {
+router.delete('/:project/chapters/:num', async (req, res, next) => {
   const projectName = project(req.params.project);
   const chapterNum = positiveInteger(req.params.num);
   const requestedChapterId = req.query.chapter_id ?? req.body?.chapter_id;
@@ -799,6 +1111,17 @@ router.delete('/:project/chapters/:num', (req, res) => {
   const volumeId = hasVolumeId ? positiveInteger(requestedVolumeId) : null;
   if (!chapterNum || (hasChapterId && !chapterId) || (hasVolumeId && !volumeId)) {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节身份参数无效', recoverable: true } });
+  }
+
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(req.body),
+        command: Object.freeze({ kind: 'chapter.delete', chapterId, chapterNum, volumeId }),
+      }));
+      return res.json(result);
+    } catch (error) { return next(error); }
   }
 
   const projectDb = db.getProjectDb(projectName);
@@ -935,7 +1258,16 @@ router.post('/:project/revisions/:revisionId/finalize', (req, res) => {
   });
 });
 
-router.get('/:project/volumes', (req, res) => {
+router.get('/:project/volumes', async (req, res, next) => {
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({ kind: 'volumes' }),
+      );
+      return res.json(serializeFilesVolumes(req, result.value, result.baseWitness.generation));
+    } catch (error) { return next(error); }
+  }
   const rows = db.projectQuery(project(req.params.project), 'SELECT * FROM volumes ORDER BY sort_order');
   for (const v of rows) {
     v.chapters = db.projectQuery(project(req.params.project),
@@ -945,8 +1277,18 @@ router.get('/:project/volumes', (req, res) => {
   res.json(rows);
 });
 
-router.post('/:project/volumes', (req, res) => {
+router.post('/:project/volumes', async (req, res, next) => {
   const { title, summary = '' } = req.body || {};
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(req.body),
+        command: Object.freeze({ kind: 'volume.create', title, summary }),
+      }));
+      return res.status(201).json(result);
+    } catch (error) { return next(error); }
+  }
   const pdb = db.getProjectDb(project(req.params.project));
   const max = pdb.prepare('SELECT COALESCE(MAX(sort_order), 0) as mx FROM volumes').get();
   const sortOrder = (max?.mx || 0) + 1;
@@ -954,14 +1296,57 @@ router.post('/:project/volumes', (req, res) => {
   res.status(201).json({ id: result.lastInsertRowid, title });
 });
 
-router.put('/:project/volumes/:id', (req, res) => {
+router.put('/:project/volumes/order', async (req, res, next) => {
+  if (!isFilesRequest(req)) return sendJsonError(res, 'INVALID_PARAMS', '卷排序仅供 files Beta 项目使用');
+  try {
+    const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+      requestId: filesRequestId(req),
+      baseWitness: filesBaseWitness(req.body),
+      command: Object.freeze({
+        kind: 'volume.reorder',
+        volumeIds: Object.freeze((req.body?.volume_ids ?? []).map(Number)),
+      }),
+    }));
+    return res.json(result);
+  } catch (error) { return next(error); }
+});
+
+router.put('/:project/volumes/:id', async (req, res, next) => {
+  if (isFilesRequest(req)) {
+    try {
+      const patch = Object.fromEntries(
+        Object.entries({ title: req.body?.title, summary: req.body?.summary })
+          .filter(([, value]) => value !== undefined),
+      );
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(req.body),
+        command: Object.freeze({
+          kind: 'volume.patch_metadata',
+          volumeId: Number(req.params.id),
+          patch: Object.freeze(patch),
+        }),
+      }));
+      return res.json(result);
+    } catch (error) { return next(error); }
+  }
   const changes = updateRecord(project(req.params.project), 'volumes', req.params.id, req.body, ['title', 'summary'], false);
   if (changes === null) return sendJsonError(res, 'INVALID_PARAMS', '没有要更新的字段');
   if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '卷不存在');
   res.json({ success: true });
 });
 
-router.delete('/:project/volumes/:id', (req, res) => {
+router.delete('/:project/volumes/:id', async (req, res, next) => {
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(req.body),
+        command: Object.freeze({ kind: 'volume.delete', volumeId: Number(req.params.id) }),
+      }));
+      return res.json(result);
+    } catch (error) { return next(error); }
+  }
   const { id } = req.params;
   const projectDb = db.getProjectDb(project(req.params.project));
   const changes = projectDb.transaction(() => {
@@ -1367,6 +1752,10 @@ router.get('/:project/meta', (req, res) => {
 // ═══════════════════════════════════════════
 
 router.get('/:project/workflow/phase', (req, res) => {
+  if (isFilesRequest(req)) {
+    const phase = db.readFilesProjectProductView(req.params.project).metadata.workflow_phase;
+    return res.json({ phase: phase || 'idea' });
+  }
   const row = db.projectGet(project(req.params.project),
     "SELECT value FROM project_meta WHERE key = 'workflow_phase'"
   );

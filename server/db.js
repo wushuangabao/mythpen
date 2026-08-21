@@ -16,7 +16,7 @@ const {
   createAtomicStore,
   inspectProjectDatabaseBytes,
 } = require('./sqljs-atomic-store');
-const { fsyncDirectory } = require('./platform/durability');
+const { fsyncDirectory, fsyncFile } = require('./platform/durability');
 const { acquireConfigLifecycleLease } = require('./config-lifecycle-lease');
 const { createProjectWriteCoordinator } = require('./project-write-coordinator');
 const {
@@ -26,7 +26,10 @@ const {
 const { isOfflineSeedBootstrapActive } = require('./offline-seed-capability');
 const { classifyChapterBodyMutation } = require('./manuscript-sql-guard');
 const { createNativeDbAdapter } = require('./native/native-db-adapter');
-const { inspectSchema11Contract } = require('./native/durability-schema');
+const {
+  inspectSchema11Contract,
+  inspectSchema12Contract,
+} = require('./native/durability-schema');
 const {
   isTestManuscriptBootstrapActive,
   registerDatabaseInternals,
@@ -112,6 +115,43 @@ function retryFailedStorageCleanup() {
   storageFailure = null;
 }
 
+function assertDataRootMoveSupported(candidateStoragePaths) {
+  if (
+    storagePaths === null
+    || canonicalDbPath(storagePaths.dataDir) === canonicalDbPath(candidateStoragePaths.dataDir)
+  ) return;
+  const unsupported = () => {
+    const error = new Error('Data-root migration is unsupported while files authority or creation is active');
+    error.code = 'NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED';
+    throw error;
+  };
+  const manuscriptControlRoot = path.join(storagePaths.dataDir, 'control', 'manuscripts');
+  const hasManuscriptRoutes = fs.existsSync(manuscriptControlRoot)
+    && fs.readdirSync(manuscriptControlRoot, { withFileTypes: true })
+      .some((entry) => entry.isDirectory());
+  if (hasManuscriptRoutes && fs.existsSync(storagePaths.projectsDir)) {
+    for (const entry of fs.readdirSync(storagePaths.projectsDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(PROJECT_DATABASE_SUFFIX)) continue;
+      if (!SQL) unsupported();
+      const bytes = fs.readFileSync(path.join(storagePaths.projectsDir, entry.name));
+      const inspection = inspectProjectDatabaseBytes(SQL, bytes);
+      if (inspection.schema === 12) unsupported();
+      const database = new SQL.Database(bytes);
+      try {
+        const route = sqlJsQueryFacade(database).query(
+          "SELECT value FROM project_meta WHERE key = 'manuscript_route'",
+        ).get()?.value;
+        if (route === 'files' || route === 'migrating' || route === 'retired') unsupported();
+      } finally {
+        database.close();
+      }
+    }
+  }
+  const creationRoot = path.join(storagePaths.dataDir, 'control', 'project-creation');
+  if (!fs.existsSync(creationRoot)) return;
+  if (fs.readdirSync(creationRoot, { withFileTypes: true }).length > 0) unsupported();
+}
+
 function configureStorage(overrides = {}) {
   retryFailedStorageCleanup();
   const candidateStoragePaths = resolveStoragePaths(
@@ -119,6 +159,7 @@ function configureStorage(overrides = {}) {
       ? { env: { ...process.env, MYTHPEN_DATA_DIR: overrides.dataDir } }
       : {},
   );
+  assertDataRootMoveSupported(candidateStoragePaths);
   fs.mkdirSync(candidateStoragePaths.dataDir, { recursive: true });
   fs.mkdirSync(candidateStoragePaths.projectsDir, { recursive: true });
 
@@ -1439,7 +1480,15 @@ function _createProjectConnection(filePath, options) {
   const pathState = assertControlledProjectDatabasePath(filePath, {
     allowMissing: options?.explicitCreate === true,
   });
-  if (pathState.exists) assertMythpenProjectIdentity(pathState.filePath);
+  const projectIdentity = pathState.exists
+    ? assertMythpenProjectIdentity(pathState.filePath)
+    : null;
+  if (projectIdentity?.route === 'files') {
+    throw projectDatabaseError(
+      'RECOVERY_REQUIRED',
+      `Files-authority project must be opened through the manuscript runtime: ${filePath}`,
+    );
+  }
   if (pathState.exists) {
     const dbKey = createHash('sha256').update(canonicalDbPath(filePath)).digest('hex');
     const controlDirectory = path.join(getStoragePaths().dataDir, 'control', 'sqlite', dbKey);
@@ -1804,6 +1853,82 @@ function inspectSchema11BytesContract(bytes) {
   }
 }
 
+function sqlJsQueryFacade(database) {
+  return Object.freeze({
+    query(sql) {
+      const all = (...params) => {
+        const statement = database.prepare(sql);
+        try {
+          if (params.length > 0) statement.bind(params.map((value) => (
+            value === undefined ? null : value
+          )));
+          const rows = [];
+          while (statement.step()) rows.push(statement.getAsObject());
+          return rows;
+        } finally {
+          statement.free();
+        }
+      };
+      return Object.freeze({
+        all,
+        get(...params) { return all(...params)[0] || null; },
+      });
+    },
+  });
+}
+
+function inspectSchema12RouteAdmission(bytes) {
+  const database = new SQL.Database(bytes);
+  try {
+    const facade = sqlJsQueryFacade(database);
+    const metaRows = facade.query(
+      "SELECT key, value FROM project_meta WHERE key IN ('durability_commit_seq', 'project_instance_id', 'manuscript_project_uid', 'manuscript_projection_generation', 'manuscript_route', 'manuscript_route_journal')",
+    ).all();
+    const meta = new Map(metaRows.map((row) => [row.key, row.value]));
+    const committed = meta.get('durability_commit_seq');
+    if (typeof committed !== 'string' || !/^(?:0|[1-9]\d*)$/.test(committed)) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Schema12 commit sequence is not canonical');
+    }
+    const expectedFinalSeq = Number(committed);
+    if (!Number.isSafeInteger(expectedFinalSeq) || expectedFinalSeq < 0) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Schema12 commit sequence is outside the safe range');
+    }
+    const { inspectSchema12Contract } = require('./native/durability-schema');
+    const contract = inspectSchema12Contract(facade, { expectedFinalSeq });
+    const databaseFacts = Object.freeze({
+      schemaVersion: 12,
+      route: contract.route,
+      projectUid: contract.manuscriptProjectUid,
+      projectInstanceId: contract.projectInstanceId,
+      routeJournal: contract.routeJournal,
+      projectionGeneration: contract.projectionGeneration,
+    });
+    const routeFacts = Object.freeze({
+      route: meta.get('manuscript_route'),
+      projectUid: meta.get('manuscript_project_uid'),
+      projectInstanceId: meta.get('project_instance_id'),
+      routeJournal: meta.get('manuscript_route_journal'),
+      projectionGeneration: Number(meta.get('manuscript_projection_generation')),
+    });
+    const {
+      loadDurableActivatedProof,
+      verifyActivatedSchema12Admission,
+    } = require('./manuscript/runtime');
+    const activatedProof = loadDurableActivatedProof({
+      dataRoot: getStoragePaths().dataDir,
+      databaseFacts,
+    });
+    return verifyActivatedSchema12Admission(Object.freeze({
+      route: 'files',
+      databaseFacts,
+      routeFacts,
+      activatedProof,
+    }));
+  } finally {
+    database.close();
+  }
+}
+
 function assertMythpenProjectIdentity(filePath, { startup = false } = {}) {
   try {
     let bytes;
@@ -1822,6 +1947,15 @@ function assertMythpenProjectIdentity(filePath, { startup = false } = {}) {
         startup ? 'STARTUP_RECOVERY_NOT_PROJECT' : 'PROJECT_DATABASE_NOT_PROJECT',
         `SQLite file is not an identified Mythpen project database: ${filePath}`,
       );
+    }
+    if (inspection.schema === 12) {
+      const admission = inspectSchema12RouteAdmission(bytes);
+      return Object.freeze({
+        projectInstanceIdSha256: inspection.projectInstanceIdSha256,
+        schema: 12,
+        route: 'files',
+        admission,
+      });
     }
     let admittedActivatedSchema = false;
     if (inspection.schema === PROJECT_SCHEMA_VERSION && nativeActivationAdmissionMode() !== null) {
@@ -2164,6 +2298,952 @@ function getProjectDb(name) {
   const context = projectInstanceContext.getStore();
   if (context?.name === name) validateProjectInstance(projectDb, name, context.expectedInstanceId);
   return projectDb;
+}
+
+const MIGRATION_ROUTE_FENCE_EVENT = 'manuscript.migration.route_fenced';
+
+function inspectDurableMigrationRoute(filePath) {
+  const root = path.join(getStoragePaths().dataDir, 'control', 'manuscripts');
+  if (!fs.existsSync(root)) return null;
+  const matches = [];
+  for (const projectEntry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!projectEntry.isDirectory()) continue;
+    const projectRoot = path.join(root, projectEntry.name);
+    for (const instanceEntry of fs.readdirSync(projectRoot, { withFileTypes: true })) {
+      if (!instanceEntry.isDirectory()) continue;
+      const controlDirectory = path.join(projectRoot, instanceEntry.name);
+      const events = inspectControlStoreEvidence(controlDirectory).events;
+      const stateByMigration = new Map();
+      const fences = new Map();
+      for (const event of events) {
+        if (event?.type === MIGRATION_ROUTE_FENCE_EVENT) {
+          const payload = event.payload;
+          if (
+            payload?.version !== 1
+            || typeof payload.migrationId !== 'string'
+            || typeof payload.sourcePath !== 'string'
+          ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration route fence evidence is malformed');
+          const prior = fences.get(payload.migrationId);
+          if (prior && JSON.stringify(prior) !== JSON.stringify(payload)) {
+            throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration route fence binding changed');
+          }
+          fences.set(payload.migrationId, payload);
+        } else if (typeof event?.type === 'string' && event.type.startsWith('migration.')) {
+          const migrationId = event.payload?.migrationId;
+          const state = event.payload?.state;
+          if (typeof migrationId !== 'string' || typeof state !== 'string') {
+            throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration journal route state is malformed');
+          }
+          stateByMigration.set(migrationId, state);
+        }
+      }
+      for (const [migrationId, fence] of fences) {
+        const state = stateByMigration.get(migrationId);
+        if (state === 'activated' || state === 'migration_aborted') continue;
+        if (canonicalDbPath(fence.sourcePath) !== canonicalDbPath(filePath)) continue;
+        matches.push(Object.freeze({
+          route: 'migrating',
+          projectUid: fence.projectUid,
+          projectInstanceId: fence.projectInstanceId,
+          routeJournal: migrationId,
+          projectionGeneration: 0,
+        }));
+      }
+    }
+  }
+  if (matches.length > 1) {
+    throw projectDatabaseError('RECOVERY_REQUIRED', 'Project path has multiple unresolved migration fences');
+  }
+  return matches[0] ?? null;
+}
+
+function inspectProjectManuscriptRoute(name) {
+  assertStorageAvailable();
+  if (typeof name !== 'string' || name.length === 0) {
+    throw projectDatabaseError('PROJECT_NOT_FOUND', 'Project name is required');
+  }
+  const filePath = getProjectDbPath(name);
+  const pathState = assertControlledProjectDatabasePath(filePath);
+  const migration = inspectDurableMigrationRoute(pathState.filePath);
+  if (migration !== null) return migration;
+  const identity = assertMythpenProjectIdentity(pathState.filePath);
+  if (identity.route === 'files') return identity.admission;
+  const database = new SQL.Database(fs.readFileSync(pathState.filePath));
+  try {
+    const rows = sqlJsQueryFacade(database).query(
+      "SELECT key, value FROM project_meta WHERE key IN ('manuscript_route', 'manuscript_route_journal', 'manuscript_project_uid', 'manuscript_projection_generation', 'project_instance_id')",
+    ).all();
+    const meta = new Map(rows.map((row) => [row.key, row.value]));
+    const route = meta.get('manuscript_route');
+    if (route === 'migrating' || route === 'retired') {
+      return Object.freeze({
+        route,
+        projectUid: meta.get('manuscript_project_uid') ?? null,
+        projectInstanceId: meta.get('project_instance_id') ?? null,
+        routeJournal: meta.get('manuscript_route_journal') ?? null,
+        projectionGeneration: Number(meta.get('manuscript_projection_generation') ?? 0),
+      });
+    }
+    return Object.freeze({ route: 'sqlite' });
+  } finally {
+    database.close();
+  }
+}
+
+const FILES_PROJECT_ICON = Object.freeze({
+  'sci-fi': 'Rocket',
+  fantasy: 'Wand',
+  romance: 'Heart',
+  history: 'Landmark',
+  urban: 'Building',
+  'power-fantasy': 'Zap',
+  biography: 'BookOpen',
+  other: 'Scroll',
+});
+const FILES_PROJECT_GENRE_LABEL = Object.freeze({
+  'sci-fi': '科幻',
+  fantasy: '玄幻',
+  romance: '言情',
+  history: '历史',
+  urban: '都市',
+  'power-fantasy': '爽文',
+  biography: '传记',
+  other: '其他',
+});
+
+function readVerifiedFilesProjectProductView(name, filePath, admission) {
+  const database = new SQL.Database(fs.readFileSync(filePath));
+  try {
+    const facade = sqlJsQueryFacade(database);
+    const meta = Object.create(null);
+    for (const row of facade.query('SELECT key, value FROM project_meta').all()) {
+      meta[row.key] = row.value;
+    }
+    if (
+      (meta.name !== undefined && meta.name !== name)
+      || (admission.activatedProof.kind === 'creation' && meta.name !== name)
+      || meta.project_instance_id !== admission.databaseFacts.projectInstanceId
+      || meta.manuscript_project_uid !== admission.databaseFacts.projectUid
+      || meta.manuscript_route !== 'files'
+    ) throw projectDatabaseError(
+      'RECOVERY_REQUIRED',
+      `Files project metadata does not match its activated route: ${filePath}`,
+    );
+    const counts = facade.query(
+      'SELECT COUNT(*) AS chapter_count, COALESCE(SUM(word_count), 0) AS word_count FROM chapters WHERE is_present = 1',
+    ).get();
+    const genres = facade.query('SELECT genre FROM project_genres ORDER BY genre').all()
+      .map((row) => row.genre);
+    const sidebarItems = facade.query(
+      'SELECT * FROM sidebar_items WHERE enabled = 1 ORDER BY sort_order',
+    ).all().filter((item) => {
+      if (item.category === 'universal') return true;
+      if (item.category !== 'genre') return false;
+      const itemGenres = item.genres ? item.genres.split(',').map((entry) => entry.trim()) : [];
+      return genres.some((genre) => itemGenres.includes(genre));
+    });
+    const wordCount = Number(counts?.word_count ?? 0);
+    const chapterCount = Number(counts?.chapter_count ?? 0);
+    const lastOpened = fs.statSync(filePath).mtime.toISOString();
+    return Object.freeze({
+      metadata: Object.freeze({ ...meta, genres: Object.freeze([...genres]), filePath }),
+      sidebarItems: Object.freeze(sidebarItems.map((item) => Object.freeze({ ...item }))),
+      summary: Object.freeze({
+        id: name,
+        name,
+        iconName: genres.map((genre) => FILES_PROJECT_ICON[genre] || 'BookOpen').join(' ') || 'BookOpen',
+        genres: Object.freeze(genres.map((genre) => FILES_PROJECT_GENRE_LABEL[genre] || genre)),
+        wordCount,
+        chapterCount,
+        lastOpened,
+        mode: meta.mode || 'medium-novel',
+        instanceId: admission.databaseFacts.projectInstanceId,
+        status: wordCount > 30000 ? '写作中' : wordCount > 5000 ? '进行中' : '刚起步',
+        openState: 'ready',
+        reasonCode: null,
+        recommendedAction: null,
+        manuscriptRoute: 'files',
+      }),
+    });
+  } finally {
+    database.close();
+  }
+}
+
+function readFilesProjectProductView(name) {
+  assertStorageAvailable();
+  if (typeof name !== 'string' || name.length === 0) {
+    throw projectDatabaseError('PROJECT_NOT_FOUND', 'Project name is required');
+  }
+  const filePath = getProjectDbPath(name);
+  const pathState = assertControlledProjectDatabasePath(filePath);
+  const identity = assertMythpenProjectIdentity(pathState.filePath);
+  if (identity.route !== 'files') {
+    throw projectDatabaseError('RECOVERY_REQUIRED', `Project is not an activated files project: ${name}`);
+  }
+  return readVerifiedFilesProjectProductView(name, pathState.filePath, identity.admission);
+}
+
+function listFilesProjectSummaries() {
+  assertStorageAvailable();
+  const summaries = [];
+  for (const item of fs.readdirSync(getStoragePaths().projectsDir, { withFileTypes: true })) {
+    if (!item.isFile() || !item.name.endsWith(PROJECT_DATABASE_SUFFIX)) continue;
+    const name = item.name.slice(0, -PROJECT_DATABASE_SUFFIX.length);
+    const filePath = getProjectDbPath(name);
+    const pathState = assertControlledProjectDatabasePath(filePath);
+    const identity = assertMythpenProjectIdentity(pathState.filePath);
+    if (identity.route !== 'files') continue;
+    summaries.push(readVerifiedFilesProjectProductView(
+      name,
+      pathState.filePath,
+      identity.admission,
+    ).summary);
+  }
+  summaries.sort((left, right) => (
+    left.lastOpened > right.lastOpened ? -1 : left.lastOpened < right.lastOpened ? 1 : 0
+  ));
+  return Object.freeze(summaries);
+}
+
+function createFilesManuscriptDatabasePort() {
+  if (!SQL || storagePaths === null) {
+    throw projectDatabaseError('RECOVERY_REQUIRED', 'Database must be initialized before files runtime construction');
+  }
+  const entries = new Map();
+  let closed = false;
+
+  function assertOpen() {
+    if (closed) throw projectDatabaseError('RECOVERY_REQUIRED', 'Files database port is closed');
+    assertStorageAvailable();
+  }
+
+  function buildCreationCandidate(input) {
+    assertOpen();
+    const {
+      buildSchema12Candidate,
+      installSchema11Contract,
+    } = require('./native/durability-schema');
+    const finalPath = input.directoryPlan.finalDatabasePath;
+    const parent = path.dirname(finalPath);
+    const publicSourcePath = path.join(
+      parent,
+      `${input.creationId}.creation-source.mythpen.db`,
+    );
+    const sourcePath = path.join(parent, `${input.creationId}.schema11-source`);
+    const candidatePath = `${finalPath}.candidate-${input.creationId}`;
+    for (const target of [finalPath, publicSourcePath, sourcePath, candidatePath]) {
+      if (fs.existsSync(target)) {
+        throw projectDatabaseError('RECOVERY_REQUIRED', `Creation database path is occupied: ${target}`);
+      }
+    }
+    const source = openProjectDb(publicSourcePath);
+    try {
+      const replaceMeta = source.prepare(
+        'INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)',
+      );
+      replaceMeta.run('project_instance_id', input.target.projectInstanceId);
+      replaceMeta.run('name', input.projectMetadata.name);
+      replaceMeta.run('mode', input.projectMetadata.mode);
+      replaceMeta.run('language', input.projectMetadata.language);
+      source.prepare('DELETE FROM project_genres').run();
+      const insertGenre = source.prepare('INSERT INTO project_genres (genre) VALUES (?)');
+      for (const genre of input.projectMetadata.genres) insertGenre.run(genre);
+      source.flush();
+    } finally {
+      closeProjectDb(publicSourcePath);
+    }
+    fs.renameSync(publicSourcePath, sourcePath);
+    fsyncFile(sourcePath);
+    fsyncDirectory(parent);
+    const { Database } = require('bun:sqlite');
+    const nativeSource = new Database(sourcePath, { create: false, strict: true });
+    try {
+      installSchema11Contract(nativeSource);
+    } finally {
+      nativeSource.clearQueryCache();
+      Bun.gc(true);
+      nativeSource.close(true);
+    }
+    fsyncFile(sourcePath);
+    fsyncDirectory(parent);
+    const built = buildSchema12Candidate(Object.freeze({
+      sourcePath,
+      candidatePath,
+      creationId: input.creationId,
+      sourceKind: input.sourceKind,
+      transitionKind: input.transitionKind,
+      target: input.target,
+    }));
+    const stats = fs.lstatSync(parent, { bigint: true });
+    return Object.freeze({
+      candidatePath: built.candidatePath,
+      candidateIdentity: built.candidateIdentity,
+      candidateSha256: built.candidateSha256,
+      finalPath,
+      finalParentIdentity: Object.freeze({ dev: String(stats.dev), ino: String(stats.ino) }),
+      finalCommitSeq: built.finalCommitSeq,
+      transitionProofDigest: built.transitionProofDigest,
+    });
+  }
+
+  function activateCreation(input) {
+    assertOpen();
+    const { installCreatedProjectDatabase } = require('./native/native-project-store');
+    return installCreatedProjectDatabase({ creationCas: input.creationCas });
+  }
+
+  function admissionUid(admission) {
+    const { verifyActivatedSchema12Admission } = require('./manuscript/runtime');
+    return verifyActivatedSchema12Admission(admission).databaseFacts.projectUid;
+  }
+
+  function findFilesPath(projectUid) {
+    let match = null;
+    for (const item of fs.readdirSync(getStoragePaths().projectsDir, { withFileTypes: true })) {
+      if (!item.isFile() || !item.name.endsWith(PROJECT_DATABASE_SUFFIX)) continue;
+      const filePath = path.join(getStoragePaths().projectsDir, item.name);
+      const identity = assertMythpenProjectIdentity(filePath);
+      if (identity.route !== 'files') continue;
+      if (identity.admission.databaseFacts.projectUid !== projectUid) continue;
+      if (match !== null) {
+        throw projectDatabaseError('RECOVERY_REQUIRED', 'Project UID resolves to multiple files databases');
+      }
+      match = Object.freeze({ admission: identity.admission, filePath });
+    }
+    if (match === null) throw projectDatabaseError('PROJECT_NOT_FOUND', 'Files project UID is not registered');
+    return match;
+  }
+
+  function locate(admission) {
+    assertOpen();
+    const projectUid = admissionUid(admission);
+    const cached = entries.get(projectUid);
+    if (cached !== undefined) return cached;
+    const found = findFilesPath(projectUid);
+    if (
+      found.admission.databaseFacts.projectInstanceId
+        !== admission.databaseFacts.projectInstanceId
+      || found.admission.databaseFacts.routeJournal !== admission.databaseFacts.routeJournal
+      || found.admission.databaseFacts.projectionGeneration
+        !== admission.databaseFacts.projectionGeneration
+    ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Files admission changed before database open');
+    const {
+      createProofBoundSchema12ProjectStore,
+    } = require('./native/native-project-store');
+    const nativeStore = createProofBoundSchema12ProjectStore({
+      admission: found.admission,
+      databasePath: found.filePath,
+      assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(found.filePath),
+    });
+    const queryDb = Object.freeze({
+      prepare(sql) {
+        return Object.freeze({
+          all(...params) { return nativeStore.readAll(sql, ...params); },
+          get(...params) { return nativeStore.readGet(sql, ...params); },
+        });
+      },
+    });
+    const entry = {
+      activeTurn: null,
+      admission: found.admission,
+      filePath: found.filePath,
+      nativeStore,
+      queryDb,
+      tail: Promise.resolve(),
+      projectStore: null,
+    };
+    entry.projectStore = Object.freeze({
+      publishProjectionTarget(input) {
+        return projectWriteCoordinator.withProjectLogicalRequestSync(
+          found.filePath,
+          () => nativeStore.publishProjectionTarget(input),
+        );
+      },
+    });
+    entries.set(projectUid, entry);
+    return entry;
+  }
+
+  function routeForName(projectName) {
+    const route = inspectProjectManuscriptRoute(projectName);
+    if (route.route === 'files') locate(route);
+    return route;
+  }
+
+  function deepFreeze(value) {
+    if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+    for (const child of Object.values(value)) deepFreeze(child);
+    return Object.freeze(value);
+  }
+
+  function captureProjection(admission) {
+    const entry = locate(admission);
+    const generation = Number(entry.nativeStore.readGet(
+      "SELECT value FROM project_meta WHERE key = 'manuscript_projection_generation'",
+    )?.value);
+    if (!Number.isSafeInteger(generation) || generation < 0) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Projection generation is invalid');
+    }
+    const volumes = entry.nativeStore.readAll(`
+      SELECT id, volume_uid, sort_order, is_present, deleted_at
+      FROM volumes ORDER BY id
+    `).map((row) => Object.freeze({
+      id: row.id,
+      uid: row.volume_uid,
+      sortOrder: row.sort_order,
+      isPresent: row.is_present,
+      deletedAt: row.deleted_at,
+    }));
+    const chapters = entry.nativeStore.readAll(`
+      SELECT id, chapter_uid, volume_id, num, is_present, deleted_at,
+             chapter_position, manuscript_position, body_raw_sha256, status
+      FROM chapters ORDER BY id
+    `).map((row) => Object.freeze({
+      id: row.id,
+      uid: row.chapter_uid,
+      volumeId: row.volume_id,
+      num: row.num,
+      isPresent: row.is_present,
+      deletedAt: row.deleted_at,
+      chapterPosition: row.chapter_position,
+      manuscriptPosition: row.manuscript_position,
+      bodyRawSha256: row.body_raw_sha256,
+      status: row.status,
+    }));
+    const sqliteSequence = entry.nativeStore.readAll(`
+      SELECT name, seq FROM sqlite_sequence
+      WHERE name IN ('chapters', 'volumes') ORDER BY name
+    `).map((row) => Object.freeze({ name: row.name, seq: row.seq }));
+    for (const name of ['chapters', 'volumes']) {
+      if (!sqliteSequence.some((row) => row.name === name)) {
+        sqliteSequence.push(Object.freeze({ name, seq: 0 }));
+      }
+    }
+    sqliteSequence.sort((left, right) => Buffer.compare(
+      Buffer.from(left.name, 'utf8'),
+      Buffer.from(right.name, 'utf8'),
+    ));
+    const ignoredLedger = entry.nativeStore.readAll(`
+      SELECT resource_kind, resource_uid, ignore_status, opaque_container_kind,
+             opaque_container_uid, is_currently_referenced, member_snapshot_json,
+             projection_generation
+      FROM manuscript_ignored_resources
+      ORDER BY resource_kind, resource_uid
+    `).map((row) => Object.freeze({ ...row }));
+    const pendingProposals = entry.nativeStore.readAll(`
+      SELECT id AS revisionId, chapter_id AS chapterId
+      FROM chapter_revisions WHERE status = 'pending' ORDER BY id
+    `).map((row) => Object.freeze({ ...row }));
+    const {
+      canonicalIgnoredLedgerDigest,
+      canonicalProjectionBasisDigest,
+    } = require('./manuscript/projection-store');
+    const basis = {
+      domain: 'mythpen.manuscript.projection-basis',
+      version: 1,
+      sourceKind: 'schema12',
+      baseGeneration: generation,
+      volumes,
+      chapters,
+      sqliteSequence,
+      ignoredBeforeDigest: canonicalIgnoredLedgerDigest(ignoredLedger),
+      pendingProposals,
+      basisDigest: '0'.repeat(64),
+    };
+    basis.basisDigest = canonicalProjectionBasisDigest(basis);
+    return deepFreeze({
+      currentProjection: {
+        projectUid: entry.admission.databaseFacts.projectUid,
+        projectInstanceId: entry.admission.databaseFacts.projectInstanceId,
+        basis,
+      },
+      ignoredLedger,
+    });
+  }
+
+  function migrationFileIdentity(filePath) {
+    const stats = fs.lstatSync(filePath, { bigint: true });
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1n) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration source is not one plain single-link file');
+    }
+    return Object.freeze({ dev: String(stats.dev), ino: String(stats.ino) });
+  }
+
+  function sameMigrationIdentity(left, right) {
+    return left?.dev === right?.dev && left?.ino === right?.ino;
+  }
+
+  function migrationSha256(filePath) {
+    return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  }
+
+  function closeCachedMigrationSource(filePath) {
+    const cacheKey = canonicalDbPath(filePath);
+    const cached = projectConnections.get(cacheKey);
+    if (!cached) return;
+    cached._flushInProjectWrite();
+    cached.close();
+    projectConnections.delete(cacheKey);
+  }
+
+  function closeNativeDatabase(database) {
+    database.clearQueryCache();
+    Bun.gc(true);
+    database.close(true);
+  }
+
+  function captureMigrationSource(projectName) {
+    assertOpen();
+    if (typeof projectName !== 'string' || projectName.length === 0) {
+      throw new TypeError('Migration projectName is required');
+    }
+    const sourcePath = getProjectDbPath(projectName);
+    return projectWriteCoordinator.withProjectWriteSync(sourcePath, () => {
+      closeCachedMigrationSource(sourcePath);
+      const pathState = assertControlledProjectDatabasePath(sourcePath);
+      const identity = assertMythpenProjectIdentity(pathState.filePath);
+      if (identity.schema !== 11 || identity.route !== undefined) {
+        throw projectDatabaseError('RECOVERY_REQUIRED', 'Files migration requires an exact admitted schema11 source');
+      }
+      const sourceIdentity = migrationFileIdentity(pathState.filePath);
+      const sourceSha256 = migrationSha256(pathState.filePath);
+      const { Database } = require('bun:sqlite');
+      const database = new Database(pathState.filePath, {
+        create: false,
+        readonly: true,
+        strict: true,
+      });
+      let captured;
+      try {
+        const committedText = database.query(
+          "SELECT value FROM project_meta WHERE key = 'durability_commit_seq'",
+        ).get()?.value;
+        if (typeof committedText !== 'string' || !/^(?:0|[1-9]\d*)$/u.test(committedText)) {
+          throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration source commit sequence is not canonical');
+        }
+        const committedSeq = Number(committedText);
+        if (!Number.isSafeInteger(committedSeq) || committedSeq < 0) {
+          throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration source commit sequence is unsafe');
+        }
+        inspectSchema11Contract(database, { expectedFinalSeq: committedSeq });
+        const projectInstanceId = database.query(
+          "SELECT value FROM project_meta WHERE key = 'project_instance_id'",
+        ).get()?.value;
+        const volumes = database.query(`
+          SELECT id, sort_order, title, summary FROM volumes ORDER BY id
+        `).all().map((row) => Object.freeze({
+          id: row.id,
+          sortOrder: row.sort_order,
+          title: row.title ?? '',
+          summary: row.summary ?? '',
+        }));
+        const chapters = database.query(`
+          SELECT id, volume_id, num, title, outline, content, summary, status,
+                 cognitive_frame, emotional_anchor, world_texture, concrete_mystery,
+                 interpersonal_tension
+          FROM chapters ORDER BY id
+        `).all().map((row) => Object.freeze({
+          id: row.id,
+          volumeId: row.volume_id ?? null,
+          num: row.num,
+          title: row.title ?? '',
+          outline: row.outline ?? '',
+          content: row.content ?? '',
+          summary: row.summary ?? '',
+          status: row.status,
+          cognitiveFrame: row.cognitive_frame ?? '',
+          emotionalAnchor: row.emotional_anchor ?? '',
+          worldTexture: row.world_texture ?? '',
+          concreteMystery: row.concrete_mystery ?? '',
+          interpersonalTension: row.interpersonal_tension ?? '',
+        }));
+        const basisVolumes = volumes.map((row) => Object.freeze({
+          id: row.id,
+          sortOrder: row.sortOrder,
+        }));
+        const basisChapters = chapters.map((row) => Object.freeze({
+          id: row.id,
+          volumeId: row.volumeId,
+          num: row.num,
+          bodyRawSha256: createHash('sha256').update(Buffer.from(row.content, 'utf8')).digest('hex'),
+          status: row.status,
+        }));
+        const sqliteSequence = database.query(`
+          SELECT name, seq FROM sqlite_sequence
+          WHERE name IN ('chapters', 'volumes') ORDER BY name
+        `).all().map((row) => ({ name: row.name, seq: row.seq }));
+        for (const [name, rows] of [['chapters', basisChapters], ['volumes', basisVolumes]]) {
+          if (!sqliteSequence.some((row) => row.name === name)) {
+            sqliteSequence.push({
+              name,
+              seq: rows.reduce((maximum, row) => Math.max(maximum, row.id), 0),
+            });
+          }
+        }
+        sqliteSequence.sort((left, right) => Buffer.compare(
+          Buffer.from(left.name, 'utf8'),
+          Buffer.from(right.name, 'utf8'),
+        ));
+        const pendingProposals = database.query(`
+          SELECT id AS revisionId, chapter_id AS chapterId
+          FROM chapter_revisions WHERE status = 'pending' ORDER BY id
+        `).all().map((row) => Object.freeze({ ...row }));
+        const {
+          canonicalIgnoredLedgerDigest,
+          canonicalProjectionBasisDigest,
+        } = require('./manuscript/projection-store');
+        const sourceBasis = {
+          domain: 'mythpen.manuscript.projection-basis',
+          version: 1,
+          sourceKind: 'schema11',
+          baseGeneration: 0,
+          volumes: basisVolumes,
+          chapters: basisChapters,
+          sqliteSequence,
+          ignoredBeforeDigest: canonicalIgnoredLedgerDigest([]),
+          pendingProposals,
+          basisDigest: '0'.repeat(64),
+        };
+        sourceBasis.basisDigest = canonicalProjectionBasisDigest(sourceBasis);
+        captured = deepFreeze({
+          projectInstanceId,
+          projectName,
+          sourceBasis,
+          sourceIdentity,
+          sourcePath: pathState.filePath,
+          sourceSha256,
+          volumes,
+          chapters,
+        });
+      } finally {
+        closeNativeDatabase(database);
+      }
+      if (
+        !sameMigrationIdentity(migrationFileIdentity(pathState.filePath), sourceIdentity)
+        || migrationSha256(pathState.filePath) !== sourceSha256
+      ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration source changed during read-only capture');
+      return captured;
+    });
+  }
+
+  function assertMigrationSource(source) {
+    const pathState = assertControlledProjectDatabasePath(source.sourcePath);
+    const identity = assertMythpenProjectIdentity(pathState.filePath);
+    if (
+      identity.schema !== 11
+      || !sameMigrationIdentity(migrationFileIdentity(pathState.filePath), source.sourceIdentity)
+      || migrationSha256(pathState.filePath) !== source.sourceSha256
+    ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration source differs from its read-only capture');
+    return pathState.filePath;
+  }
+
+  function migrationControlStore(input) {
+    const directory = path.join(
+      getStoragePaths().dataDir,
+      'control',
+      'manuscripts',
+      input.projectUid,
+      input.projectInstanceId,
+    );
+    return openControlStore(directory);
+  }
+
+  function fenceMigrationSource(input) {
+    assertOpen();
+    const sourcePath = input.source.sourcePath;
+    return projectWriteCoordinator.withProjectWriteSync(sourcePath, () => {
+      closeCachedMigrationSource(sourcePath);
+      assertMigrationSource(input.source);
+      const controlStore = migrationControlStore(input);
+      const payload = deepFreeze({
+        version: 1,
+        migrationId: input.migrationId,
+        projectUid: input.projectUid,
+        projectInstanceId: input.projectInstanceId,
+        sourcePath,
+        sourceIdentity: input.source.sourceIdentity,
+        sourceSha256: input.source.sourceSha256,
+        directoryPlan: input.directoryPlan,
+      });
+      const existing = controlStore.read().filter((event) => (
+        event.type === MIGRATION_ROUTE_FENCE_EVENT
+        && event.payload?.migrationId === input.migrationId
+      ));
+      let appended;
+      if (existing.length === 0) {
+        appended = controlStore.compareAndAppend(controlStore.tail()?.digest ?? null, {
+          type: MIGRATION_ROUTE_FENCE_EVENT,
+          payload,
+        });
+      } else if (existing.length === 1 && JSON.stringify(existing[0].payload) === JSON.stringify(payload)) {
+        appended = existing[0];
+      } else {
+        throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration route fence is duplicated or rebound');
+      }
+      assertMigrationSource(input.source);
+      return deepFreeze({
+        disposition: 'after',
+        directoryPlan: input.directoryPlan,
+        eventDigest: appended.digest,
+      });
+    });
+  }
+
+  function inspectMigrationRouteFence(input) {
+    const controlStore = migrationControlStore(input);
+    const events = controlStore.read().filter((event) => (
+      event.type === MIGRATION_ROUTE_FENCE_EVENT
+      && event.payload?.migrationId === input.migrationId
+    ));
+    if (events.length === 0) return Object.freeze({ disposition: 'before' });
+    if (events.length !== 1) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration route fence evidence is ambiguous');
+    }
+    const payload = events[0].payload;
+    if (
+      payload.sourcePath !== input.source.sourcePath
+      || payload.sourceSha256 !== input.source.sourceSha256
+      || !sameMigrationIdentity(payload.sourceIdentity, input.source.sourceIdentity)
+    ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration route fence evidence changed');
+    return deepFreeze({
+      disposition: 'after',
+      directoryPlan: payload.directoryPlan,
+      eventDigest: events[0].digest,
+    });
+  }
+
+  function buildMigrationCandidate(input) {
+    assertOpen();
+    assertMigrationSource(input.sourceSnapshot);
+    const candidatePath = `${input.sourceSnapshot.sourcePath}.candidate-${input.migrationId}`;
+    if (fs.existsSync(candidatePath)) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration candidate path is already occupied');
+    }
+    const { buildSchema12Candidate } = require('./native/durability-schema');
+    const built = buildSchema12Candidate(Object.freeze({
+      sourcePath: input.sourceSnapshot.sourcePath,
+      candidatePath,
+      migrationId: input.migrationId,
+      target: input.target,
+    }));
+    assertMigrationSource(input.sourceSnapshot);
+    const transitionProofDigest = createHash('sha256').update(JSON.stringify({
+      domain: 'mythpen.manuscript.schema12-migration-candidate-proof',
+      version: 1,
+      migrationId: input.migrationId,
+      projectUid: input.target.projectUid,
+      projectInstanceId: input.target.projectInstanceId,
+      baseGeneration: input.target.baseGeneration,
+      targetGeneration: input.target.targetGeneration,
+      sourceSha256: input.sourceSnapshot.sourceSha256,
+      candidateSha256: built.candidateSha256,
+    })).digest('hex');
+    return deepFreeze({
+      sourcePath: input.sourceSnapshot.sourcePath,
+      sourceIdentity: input.sourceSnapshot.sourceIdentity,
+      sourceSha256: input.sourceSnapshot.sourceSha256,
+      candidatePath: built.candidatePath,
+      candidateDigest: built.candidateSha256,
+      candidateIdentity: built.candidateIdentity,
+      transitionProofDigest,
+    });
+  }
+
+  function activateMigration(input) {
+    assertOpen();
+    const sourcePath = input.databaseCandidate.sourcePath;
+    return projectWriteCoordinator.withProjectLogicalRequestSync(sourcePath, () => {
+      closeCachedMigrationSource(sourcePath);
+      assertMigrationSource(input.databaseCandidate);
+      if (!nativeActivationController || nativeActivationAdmissionMode() === null) {
+        throw projectDatabaseError('NATIVE_ACTIVATION_DISABLED', 'Migration source native store is unavailable');
+      }
+      const dbKey = createHash('sha256').update(canonicalDbPath(sourcePath)).digest('hex');
+      const controlDirectory = recoveryControlDirectory(sourcePath);
+      const controlStore = openControlStore(controlDirectory);
+      const nativeStore = nativeActivationController.activate({
+        assertConfigLifecycleLease: () => configLifecycleLease.assertHeld(),
+        assertWriterLease: () => projectWriteCoordinator.assertProjectWriteLease(sourcePath),
+        controlDirectory,
+        controlStore,
+        databasePath: sourcePath,
+        dbKey,
+        sqlModule: SQL,
+      });
+      try {
+        const result = nativeStore.publishProjectionTarget({
+          target: input.target,
+          routeCas: input.routeCas,
+        });
+        if (result?.disposition !== 'after') {
+          throw projectDatabaseError('RECOVERY_REQUIRED', 'Migration database activation is not after');
+        }
+        return result;
+      } finally {
+        if (nativeStore.state === 'active') nativeStore.close();
+      }
+    });
+  }
+
+  function inspectMigrationActivation(input) {
+    assertOpen();
+    const sourcePath = input.sourcePath;
+    assertControlledProjectDatabasePath(sourcePath);
+    const { Database } = require('bun:sqlite');
+    const database = new Database(sourcePath, { create: false, readonly: true, strict: true });
+    try {
+      const committedText = database.query(
+        "SELECT value FROM project_meta WHERE key = 'durability_commit_seq'",
+      ).get()?.value;
+      if (typeof committedText !== 'string' || !/^(?:0|[1-9]\d*)$/u.test(committedText)) {
+        throw projectDatabaseError('RECOVERY_REQUIRED', 'Activated migration commit sequence is invalid');
+      }
+      const contract = inspectSchema12Contract(database, { expectedFinalSeq: Number(committedText) });
+      if (
+        contract.route !== 'files'
+        || contract.manuscriptProjectUid !== input.projectUid
+        || contract.projectInstanceId !== input.projectInstanceId
+        || contract.routeJournal !== input.migrationId
+        || contract.projectionGeneration !== input.targetGeneration
+      ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Activated migration schema12 binding differs');
+      return deepFreeze({
+        disposition: 'after',
+        generation: contract.projectionGeneration,
+        route: contract.route,
+      });
+    } finally {
+      closeNativeDatabase(database);
+    }
+  }
+
+  return Object.freeze({
+    activateCreation,
+    activateMigration,
+    buildCreationCandidate,
+    buildMigrationCandidate,
+    captureMigrationSource,
+    fenceMigrationSource,
+    inspectMigrationActivation,
+    inspectMigrationRouteFence,
+    verifyMigrationSource(source) {
+      assertOpen();
+      assertMigrationSource(source);
+      return true;
+    },
+    listFilesAdmissions() {
+      assertOpen();
+      const admissions = [];
+      for (const item of fs.readdirSync(getStoragePaths().projectsDir, { withFileTypes: true })) {
+        if (!item.isFile() || !item.name.endsWith(PROJECT_DATABASE_SUFFIX)) continue;
+        const identity = assertMythpenProjectIdentity(
+          path.join(getStoragePaths().projectsDir, item.name),
+        );
+        if (identity.route === 'files') admissions.push(identity.admission);
+      }
+      return Object.freeze(admissions);
+    },
+    enumerateUidRecords(scope) {
+      assertOpen();
+      if (
+        scope === null
+        || typeof scope !== 'object'
+        || !['project', 'chapter', 'volume'].includes(scope.objectKind)
+      ) throw new TypeError('UID source scope is invalid');
+      const records = [];
+      for (const item of fs.readdirSync(getStoragePaths().projectsDir, { withFileTypes: true })) {
+        if (!item.isFile() || !item.name.endsWith(PROJECT_DATABASE_SUFFIX)) continue;
+        const filePath = path.join(getStoragePaths().projectsDir, item.name);
+        const identity = assertMythpenProjectIdentity(filePath);
+        if (identity.route !== 'files') continue;
+        const admission = identity.admission;
+        const uid = admission.databaseFacts.projectUid;
+        if (scope.objectKind === 'project') {
+          records.push(Object.freeze({
+            ownerKind: 'registry',
+            ownerId: filePath,
+            reservationId: createHash('sha256').update(`registry:project:${uid}`).digest('hex'),
+            uid,
+          }));
+          continue;
+        }
+        if (scope.projectUid !== null && scope.projectUid !== uid) continue;
+        const entry = locate(admission);
+        const table = scope.objectKind === 'chapter' ? 'chapters' : 'volumes';
+        const column = scope.objectKind === 'chapter' ? 'chapter_uid' : 'volume_uid';
+        for (const row of entry.nativeStore.readAll(
+          `SELECT ${column} AS uid FROM ${table} WHERE ${column} IS NOT NULL ORDER BY ${column}`,
+        )) {
+          records.push(Object.freeze({
+            ownerKind: 'registry',
+            ownerId: filePath,
+            reservationId: createHash('sha256')
+              .update(`registry:${scope.objectKind}:${row.uid}`)
+              .digest('hex'),
+            uid: row.uid,
+          }));
+        }
+      }
+      return Object.freeze({
+        complete: true,
+        projectUid: scope.projectUid,
+        projectInstanceId: scope.projectInstanceId,
+        objectKind: scope.objectKind,
+        records: Object.freeze(records),
+      });
+    },
+    admit(projectSelector) {
+      assertOpen();
+      if (typeof projectSelector === 'string') return routeForName(projectSelector);
+      if (projectSelector?.projectName !== undefined) {
+        return routeForName(projectSelector.projectName);
+      }
+      if (projectSelector?.projectUid !== undefined) {
+        return findFilesPath(projectSelector.projectUid).admission;
+      }
+      return Object.freeze({ route: 'sqlite' });
+    },
+    read(admission, callback) {
+      if (typeof callback !== 'function') throw new TypeError('files read callback is required');
+      return callback(locate(admission).queryDb);
+    },
+    captureProjection,
+    filePath(admission) { return locate(admission).filePath; },
+    projectStore(admission) { return locate(admission).projectStore; },
+    inspectProjectionTarget(admission, input) {
+      return locate(admission).nativeStore.inspectProjectionTarget(input);
+    },
+    async withWriterTurn(admission, callback) {
+      if (typeof callback !== 'function') throw new TypeError('writer callback is required');
+      const entry = locate(admission);
+      const previous = entry.tail;
+      let release;
+      entry.tail = new Promise((resolve) => { release = resolve; });
+      await previous;
+      const turn = Object.freeze({ projectUid: entry.admission.databaseFacts.projectUid });
+      entry.activeTurn = turn;
+      try {
+        return await callback(turn);
+      } finally {
+        entry.activeTurn = null;
+        release();
+      }
+    },
+    assertWriterTurn(admission, turn) {
+      const entry = locate(admission);
+      if (entry.activeTurn !== turn) {
+        throw projectDatabaseError('RECOVERY_REQUIRED', 'Files writer turn is not active');
+      }
+      return true;
+    },
+    recover(admission) { return locate(admission).nativeStore.recover(); },
+    close() {
+      if (closed) return;
+      closed = true;
+      for (const entry of entries.values()) entry.nativeStore.close();
+      entries.clear();
+    },
+  });
 }
 
 function manuscriptTransactionRequired(message = 'An active owned project transaction is required') {
@@ -2949,8 +4029,12 @@ module.exports = {
   installFixtureNativeActivationController: installNativeActivationController,
   getConfigDb,
   createProjectDb,
+  createFilesManuscriptDatabasePort,
   enableNativeProject,
   getProjectDb,
+  inspectProjectManuscriptRoute,
+  listFilesProjectSummaries,
+  readFilesProjectProductView,
   getProjectDbPath,
   openProjectDb,
   closeProjectDb,

@@ -6,6 +6,32 @@ import { getProjectInstanceHeaders, PROJECT_INSTANCE_HEADER } from './projectIns
 import { runProjectRequest, suspendProjectRequests } from './projectRequestGate.ts'
 import { parseWorldTags } from './worldTags.ts'
 
+const MANUSCRIPT_REQUEST_ID_HEADER = 'X-Mythpen-Request-Id'
+
+export interface ManuscriptBaseWitness {
+  expected_data_version: number
+  generation: number
+  raw_sha256: string
+  sidecar_raw_sha256: string | null
+}
+
+export interface FilesBetaProjectStatus {
+  route: 'sqlite' | 'files' | 'migrating' | 'retired'
+  project_uid: string | null
+  project_instance_id: string | null
+}
+
+function manuscriptRequestId(): string {
+  return globalThis.crypto.randomUUID()
+}
+
+async function projectManuscriptBaseWitness(project: string): Promise<ManuscriptBaseWitness | undefined> {
+  const result = (await projectRequest(project, `/${encodeURIComponent(project)}/manuscript/witness`)) as {
+    base_witness?: ManuscriptBaseWitness | null
+  }
+  return result.base_witness ?? undefined
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly code?: string
@@ -102,12 +128,20 @@ function chapterDeleteRequest(
   if (typeof expectedInstanceId !== 'string' || !expectedInstanceId.trim()) {
     return Promise.reject(new Error('Project instance is not loaded'))
   }
-  return runProjectRequest(project, () =>
-    performRequest(`/${encodeURIComponent(project)}/chapters/${num}?chapter_id=${chapterId}&volume_id=${volumeId}`, {
-      method: 'DELETE',
-      headers: { [PROJECT_INSTANCE_HEADER]: expectedInstanceId },
-    }),
-  )
+  return runProjectRequest(project, async () => {
+    const headers = { [PROJECT_INSTANCE_HEADER]: expectedInstanceId }
+    const witnessResult = (await performRequest(`/${encodeURIComponent(project)}/manuscript/witness`, { headers })) as {
+      base_witness?: ManuscriptBaseWitness | null
+    }
+    return performRequest(
+      `/${encodeURIComponent(project)}/chapters/${num}?chapter_id=${chapterId}&volume_id=${volumeId}`,
+      {
+        method: 'DELETE',
+        headers: { ...headers, [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+        body: witnessResult.base_witness ? { base_witness: witnessResult.base_witness } : {},
+      },
+    )
+  })
 }
 
 export const suspendProjectApiRequests = suspendProjectRequests
@@ -122,6 +156,23 @@ export const projectsApi = {
     const options = { method: 'POST', body: data }
     return project ? projectRequest(project, '/projects', options) : request('/projects', options)
   },
+  createFilesBeta: (data: { name: string; mode: string; language: string; genres: string[] }) =>
+    request('/projects/files-beta', {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: data,
+    }),
+  migrateFilesBeta: (name: string) =>
+    request(`/projects/by-name/${encodeURIComponent(name)}/files-beta/migrate`, {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: {},
+    }),
+  getFilesBetaStatus: (name: string) =>
+    projectRequest(
+      name,
+      `/projects/by-name/${encodeURIComponent(name)}/files-beta/status`,
+    ) as Promise<FilesBetaProjectStatus>,
   delete: (name: string, expectedInstanceId: string) => projectDeleteRequest(name, expectedInstanceId),
   getDiagnostics: (name: string) =>
     projectDiagnosticsRequest(
@@ -168,17 +219,56 @@ export const chaptersApi = {
       project,
       `/${encodeURIComponent(project)}/chapters/${num}${volumeId ? `?volume_id=${volumeId}` : ''}`,
     ),
-  update: (project: string, num: number, data: any, chapterId?: number, expectedDataVersion?: number) =>
+  update: (
+    project: string,
+    num: number,
+    data: any,
+    chapterId?: number,
+    expectedDataVersion?: number,
+    baseWitness?: ManuscriptBaseWitness,
+  ) =>
     projectRequest(project, `/${encodeURIComponent(project)}/chapters/${num}`, {
       method: 'PUT',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
       body: {
         ...data,
         ...(chapterId === undefined ? {} : { chapter_id: chapterId }),
         ...(expectedDataVersion === undefined ? {} : { expected_data_version: expectedDataVersion }),
+        ...(baseWitness === undefined ? {} : { base_witness: baseWitness }),
       },
     }),
-  create: (project: string, data: any) =>
-    projectRequest(project, `/${encodeURIComponent(project)}/chapters`, { method: 'POST', body: data }),
+  create: async (project: string, data: any) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/chapters`, {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { ...data, ...(baseWitness ? { base_witness: baseWitness } : {}) },
+    })
+  },
+  move: async (project: string, chapterId: number, targetVolumeId: number | null, targetPosition: number) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/chapters/${chapterId}/move`, {
+      method: 'PUT',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: {
+        target_volume_id: targetVolumeId,
+        target_position: targetPosition,
+        ...(baseWitness ? { base_witness: baseWitness } : {}),
+      },
+    })
+  },
+  reorder: async (project: string, containerVolumeId: number | null, chapterIds: number[]) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/chapters/order`, {
+      method: 'PUT',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: {
+        container_volume_id: containerVolumeId,
+        chapter_ids: chapterIds,
+        ...(baseWitness ? { base_witness: baseWitness } : {}),
+      },
+    })
+  },
   delete: (project: string, num: number, chapterId: number, volumeId: number, expectedInstanceId: string) =>
     chapterDeleteRequest(project, num, chapterId, volumeId, expectedInstanceId),
 }
@@ -268,6 +358,38 @@ export const chapterRevisionsApi = {
 
 export const volumesApi = {
   list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/volumes`),
+  create: async (project: string, data: { title: string; summary?: string }) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/volumes`, {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { ...data, ...(baseWitness ? { base_witness: baseWitness } : {}) },
+    })
+  },
+  update: async (project: string, volumeId: number, data: { title?: string; summary?: string }) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/volumes/${volumeId}`, {
+      method: 'PUT',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { ...data, ...(baseWitness ? { base_witness: baseWitness } : {}) },
+    })
+  },
+  reorder: async (project: string, volumeIds: number[]) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/volumes/order`, {
+      method: 'PUT',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { volume_ids: volumeIds, ...(baseWitness ? { base_witness: baseWitness } : {}) },
+    })
+  },
+  delete: async (project: string, volumeId: number) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/volumes/${volumeId}`, {
+      method: 'DELETE',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: baseWitness ? { base_witness: baseWitness } : {},
+    })
+  },
 }
 
 // ─── Characters ───

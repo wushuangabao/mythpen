@@ -45,8 +45,10 @@ const EXPECTED_RESERVED_KEYS = Object.freeze([
 ]);
 const EXPECTED_OBJECT_NAMES = Object.freeze([
   '_durability_write_gate',
+  'chapter_revisions',
   'chapters',
   'foreshadows',
+  'idx_chapter_revisions_active',
   'idx_chapters_active_assigned_num',
   'idx_chapters_active_unassigned_num',
   'idx_chapters_chapter_uid',
@@ -153,6 +155,11 @@ test('schema 12 freezes the complete v2 manifest and uniquely generative object 
     'is_present', 'deleted_at', 'chapter_position', 'manuscript_position',
     'body_raw_sha256', 'sidecar_raw_sha256', 'content_available',
   ]);
+  assert.equal(SCHEMA12_CONTRACT.tables.chapter_revisions.strategy, 'rebuild');
+  assert.match(
+    SCHEMA12_CONTRACT.tables.chapter_revisions.createSql,
+    /status.*pending.*accepted.*rejected.*superseded.*stale/is,
+  );
   assert.equal(columnNames('foreshadows').includes('expected_resolve_chapter'), false);
   assert.equal(columnNames('foreshadows').includes('expected_resolve_manuscript_position'), true);
   assert.match(SCHEMA12_CONTRACT.tables.chapters.createSql, /body_raw_sha256.*NOT GLOB/is);

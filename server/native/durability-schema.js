@@ -1,5 +1,8 @@
 const { createHash } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { RESERVED_PROJECT_META_KEYS } = require('../manuscript/contracts');
+const { fsyncDirectory, fsyncFile } = require('../platform/durability');
 
 const GATE_TABLE = '_durability_write_gate';
 const TRIGGER_PREFIX = '_mythpen_downgrade_guard__';
@@ -510,6 +513,27 @@ function schema12Table(name, strategy, columns, tableConstraints = []) {
 }
 
 const SCHEMA12_TABLES = {
+  chapter_revisions: schema12Table('chapter_revisions', 'rebuild', [
+    schema12Column('id', 'INTEGER', { primaryKey: true, autoIncrement: true }),
+    schema12Column('chapter_id', 'INTEGER', {
+      notNull: true,
+      references: { table: 'chapters', column: 'id', onDelete: 'CASCADE' },
+    }),
+    schema12Column('base_content', 'TEXT', { notNull: true }),
+    schema12Column('proposed_content', 'TEXT', { notNull: true }),
+    schema12Column('decisions_json', 'TEXT', { notNull: true, defaultSql: "'{}'" }),
+    schema12Column('status', 'TEXT', {
+      notNull: true,
+      defaultSql: "'pending'",
+      checkSql: '"status" IN (\'pending\', \'accepted\', \'rejected\', \'superseded\', \'stale\')',
+    }),
+    schema12Column('created_at', 'TEXT', { notNull: true, defaultSql: "(datetime('now'))" }),
+    schema12Column('updated_at', 'TEXT', { notNull: true, defaultSql: "(datetime('now'))" }),
+    schema12Column('resolved_at', 'TEXT'),
+    schema12Column('previous_chapter_status', 'TEXT', {
+      checkSql: '"previous_chapter_status" IS NULL OR "previous_chapter_status" IN (\'pending\', \'writing\', \'review\', \'accepted\')',
+    }),
+  ]),
   volumes: schema12Table('volumes', 'rebuild', [
     schema12Column('id', 'INTEGER', { primaryKey: true, autoIncrement: true }),
     schema12Column('sort_order', 'INTEGER', { notNull: true }),
@@ -680,13 +704,20 @@ const SCHEMA12_TABLES = {
   ]),
 };
 
-function schema12Index(name, table, terms, where = null) {
-  const sql = `CREATE UNIQUE INDEX ${quoteIdentifier(name)} ON ${quoteIdentifier(table)}`
+function schema12Index(name, table, terms, where = null, unique = true) {
+  const sql = `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${quoteIdentifier(name)} ON ${quoteIdentifier(table)}`
     + ` (${terms.join(', ')})${where === null ? '' : ` WHERE ${where}`}`;
-  return { name, table, unique: true, terms, where, sql };
+  return { name, table, unique, terms, where, sql };
 }
 
 const SCHEMA12_INDEXES = [
+  schema12Index(
+    'idx_chapter_revisions_active',
+    'chapter_revisions',
+    [quoteIdentifier('chapter_id'), quoteIdentifier('status'), `${quoteIdentifier('id')} DESC`],
+    null,
+    false,
+  ),
   schema12Index(
     'idx_chapters_active_assigned_num',
     'chapters',
@@ -1045,6 +1076,589 @@ function inspectSchema12Contract(database, options) {
   });
 }
 
+function candidateError(code, message, cause) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.code = code;
+  return error;
+}
+
+function exactFrozenInput(value, keys, label) {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || !Object.isFrozen(value)
+    || Reflect.ownKeys(value).length !== keys.length
+    || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
+  ) throw new TypeError(`${label} must be one exact frozen data object`);
+  return value;
+}
+
+function canonicalCandidatePath(value, label) {
+  if (
+    typeof value !== 'string'
+    || !path.isAbsolute(value)
+    || path.normalize(value) !== value
+    || path.resolve(value) !== value
+  ) throw candidateError('MANUSCRIPT_PATH_UNSAFE', `${label} must be a canonical absolute path`);
+  return value;
+}
+
+function plainFileIdentity(filePath, label) {
+  let stats;
+  try {
+    stats = fs.lstatSync(filePath, { bigint: true });
+  } catch (cause) {
+    throw candidateError('RECOVERY_REQUIRED', `${label} cannot be inspected`, cause);
+  }
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1n) {
+    throw candidateError('MANUSCRIPT_PATH_UNSAFE', `${label} must be a single-link plain file`);
+  }
+  return Object.freeze({ dev: String(stats.dev), ino: String(stats.ino) });
+}
+
+function assertPlainDirectoryChain(directoryPath) {
+  const resolved = path.resolve(directoryPath);
+  const root = path.parse(resolved).root;
+  let current = root;
+  for (const segment of resolved.slice(root.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    const stats = fs.lstatSync(current);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw candidateError('MANUSCRIPT_PATH_UNSAFE', 'Candidate ancestor chain contains a reparse or non-directory entry');
+    }
+  }
+  if (fs.realpathSync.native(resolved) !== resolved) {
+    throw candidateError('MANUSCRIPT_PATH_UNSAFE', 'Candidate parent is not its canonical physical path');
+  }
+}
+
+function sha256File(filePath) {
+  return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+function identityEqual(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function rowsById(rows, label) {
+  const map = new Map();
+  for (const row of rows) {
+    if (!Number.isSafeInteger(row.id) || row.id <= 0 || map.has(row.id)) {
+      throw candidateError('RECOVERY_REQUIRED', `${label} contains duplicate or invalid IDs`);
+    }
+    map.set(row.id, row);
+  }
+  return map;
+}
+
+function assignmentMaps(target) {
+  const volumes = new Map();
+  const chapters = new Map();
+  for (const assignment of target.localIdentityPlan) {
+    const map = assignment.objectKind === 'volume' ? volumes : chapters;
+    if (map.has(assignment.id)) {
+      throw candidateError('RECOVERY_REQUIRED', 'Projection identity plan duplicates a local ID');
+    }
+    map.set(assignment.id, assignment);
+  }
+  return { volumes, chapters };
+}
+
+function run(database, sql, ...params) {
+  return database.query(sql).run(...params);
+}
+
+function insertRows(database, table, columns, rows) {
+  if (rows.length === 0) return;
+  const sql = `INSERT INTO ${quoteIdentifier(table)} (${columns.map(quoteIdentifier).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`;
+  const statement = database.query(sql);
+  try {
+    for (const row of rows) statement.run(...columns.map((column) => row[column]));
+  } finally {
+    statement.finalize();
+  }
+}
+
+function controlledIdentityJson(row) {
+  return JSON.stringify({
+    fileIdentity: row.fileIdentity,
+    parentIdentity: row.parentIdentity,
+  });
+}
+
+function assertEmptyCreationTarget(target) {
+  if (
+    target.basis.sourceKind !== 'empty'
+    || target.baseGeneration !== 0
+    || target.targetGeneration !== 1
+    || target.volumes.length !== 0
+    || target.chapters.length !== 0
+    || target.ignoredLedger.length !== 0
+    || target.proposalInvalidations.length !== 0
+    || target.localIdentityPlan.length !== 0
+    || target.controlledFiles.length !== 2
+    || JSON.stringify(target.controlledFiles.map((row) => row.role).sort())
+      !== JSON.stringify(['manuscript', 'unassigned'])
+  ) throw candidateError(
+    'RECOVERY_REQUIRED',
+    'New creation target is not the exact empty two-file projection',
+  );
+}
+
+function installEmptyCreationRows(database, target, beforeSeq) {
+  if (beforeSeq !== 0) {
+    throw candidateError('RECOVERY_REQUIRED', 'New creation source commit sequence is not zero');
+  }
+  insertRows(database, 'manuscript_controlled_files', [
+    'file_role',
+    'resource_uid',
+    'raw_sha256',
+    'byte_size',
+    'file_identity_json',
+    'projection_generation',
+  ], target.controlledFiles.map((row) => ({
+    file_role: row.role,
+    resource_uid: row.resourceUid,
+    raw_sha256: row.rawSha256,
+    byte_size: row.byteSize,
+    file_identity_json: controlledIdentityJson(row),
+    projection_generation: target.targetGeneration,
+  })));
+  const measurements = target.capacitySnapshot.measurements;
+  assertOneChange(run(database, `
+    INSERT INTO manuscript_capacity_snapshot (
+      singleton_id, chapter_identities, volume_identities, controlled_files,
+      chapter_directory_entries, controlled_bytes, projection_generation
+    ) VALUES (1, ?, ?, ?, ?, ?, ?)
+  `,
+  measurements.chapterIdentities,
+  measurements.volumeIdentities,
+  measurements.controlledFiles,
+  measurements.chapterDirectoryEntries,
+  measurements.controlledBytes,
+  target.targetGeneration), 'Installing empty creation capacity snapshot');
+  for (const sequence of target.sqliteSequence) {
+    run(database, 'DELETE FROM sqlite_sequence WHERE name = ?', sequence.name);
+    assertOneChange(
+      run(database, 'INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)', sequence.name, sequence.seq),
+      `Installing empty creation ${sequence.name} sequence`,
+    );
+  }
+  assertOneChange(
+    run(database, "UPDATE project_meta SET value = '1' WHERE key = 'durability_commit_seq' AND value = '0'"),
+    'Advancing empty creation durability sequence',
+  );
+}
+
+function installSchema12Candidate(database, input) {
+  const isCreation = Object.hasOwn(input, 'sourceKind');
+  exactFrozenInput(
+    input,
+    isCreation
+      ? ['creationId', 'sourceKind', 'transitionKind', 'target']
+      : ['migrationId', 'target'],
+    'schema 12 candidate install input',
+  );
+  const { target } = input;
+  const validatedTarget = new (require('../manuscript/projection-store').SQLiteProjectionStore)()
+    .validateTarget(target);
+  if (validatedTarget !== target) throw new TypeError('Projection target identity changed during validation');
+  const journalId = isCreation ? input.creationId : input.migrationId;
+  if (!SCHEMA12_CANONICAL_UUID_V4_PATTERN.test(journalId)) {
+    throw candidateError('RECOVERY_REQUIRED', 'Transition journal ID is invalid');
+  }
+  if (isCreation) {
+    if (input.sourceKind !== 'empty' || input.transitionKind !== 'new_creation') {
+      throw candidateError('RECOVERY_REQUIRED', 'New creation transition kind is invalid');
+    }
+    assertEmptyCreationTarget(target);
+  } else if (target.basis.sourceKind !== 'schema11') {
+    throw candidateError('SCHEMA_SWAP_UNSUPPORTED', 'Rapid candidate builder requires a schema11 source');
+  }
+  const committedSeqRaw = database.query(
+    "SELECT value FROM project_meta WHERE key = 'durability_commit_seq'",
+  ).get()?.value;
+  const expectedFinalSeq = canonicalNonNegativeInteger(
+    committedSeqRaw,
+    'durability_commit_seq',
+  );
+  const before = inspectSchema11Contract(database, { expectedFinalSeq });
+  if (before.projectInstanceId !== target.projectInstanceId) {
+    throw candidateError('PROJECT_INSTANCE_MISMATCH', 'Projection target belongs to another project instance');
+  }
+  const routeRows = database.query(
+    `SELECT key FROM project_meta WHERE key IN (${SCHEMA12_RESERVED_PROJECT_META_KEYS.map(() => '?').join(', ')})`,
+  ).all(...SCHEMA12_RESERVED_PROJECT_META_KEYS);
+  if (routeRows.length !== 0) {
+    throw candidateError('MIGRATION_STATE_MISMATCH', 'Schema11 source already contains route metadata');
+  }
+  const assignments = assignmentMaps(target);
+  const basisVolumes = rowsById(target.basis.volumes, 'projection basis volumes');
+  const basisChapters = rowsById(target.basis.chapters, 'projection basis chapters');
+  const sourceVolumes = database.query('SELECT * FROM volumes ORDER BY id').all();
+  const sourceChapters = database.query('SELECT * FROM chapters ORDER BY id').all();
+  if (
+    sourceVolumes.length !== basisVolumes.size
+    || sourceChapters.length !== basisChapters.size
+    || sourceVolumes.some((row) => {
+      const basisRow = basisVolumes.get(row.id);
+      const assignment = assignments.volumes.get(row.id);
+      return basisRow === undefined
+        || assignment?.assignmentKind !== 'bind_legacy'
+        || row.sort_order !== basisRow.sortOrder;
+    })
+    || sourceChapters.some((row) => {
+      const basisRow = basisChapters.get(row.id);
+      const assignment = assignments.chapters.get(row.id);
+      return basisRow === undefined
+        || assignment?.assignmentKind !== 'bind_legacy'
+        || assignment.num !== row.num
+        || row.volume_id !== basisRow.volumeId
+        || row.num !== basisRow.num
+        || row.status !== basisRow.status
+        || createHash('sha256').update(Buffer.from(row.content ?? '', 'utf8')).digest('hex')
+          !== basisRow.bodyRawSha256;
+    })
+  ) throw candidateError('RECOVERY_REQUIRED', 'Schema11 source rows differ from the projection basis');
+
+  const sourceForeshadows = database.query('SELECT * FROM foreshadows ORDER BY id').all();
+  const sourceRevisions = database.query('SELECT * FROM chapter_revisions ORDER BY id').all();
+  if (isCreation && (sourceForeshadows.length !== 0 || sourceRevisions.length !== 0)) {
+    throw candidateError('RECOVERY_REQUIRED', 'New creation source contains manuscript business rows');
+  }
+  const preservedObjects = database.query(
+    "SELECT type, name, tbl_name AS tableName, sql FROM sqlite_schema WHERE type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name",
+  ).all().filter((object) => (
+    ['volumes', 'chapters', 'foreshadows', 'chapter_revisions'].includes(object.tableName)
+    && !object.name.startsWith(TRIGGER_PREFIX)
+    && object.name !== 'chapters_data_version_after_update'
+    && !SCHEMA12_INDEXES.some((index) => index.name === object.name)
+  ));
+  const oldSequences = new Map(database.query(
+    "SELECT name, seq FROM sqlite_sequence WHERE name IN ('chapters', 'volumes', 'chapter_revisions') ORDER BY name",
+  ).all().map((row) => [row.name, row.seq]));
+  if (target.basis.sqliteSequence.some((row) => (oldSequences.get(row.name) ?? 0) !== row.seq)) {
+    throw candidateError('RECOVERY_REQUIRED', 'Schema11 sqlite_sequence differs from the projection basis');
+  }
+  const pendingProposals = sourceRevisions
+    .filter((row) => row.status === 'pending')
+    .map((row) => ({ revisionId: row.id, chapterId: row.chapter_id }))
+    .sort((left, right) => left.revisionId - right.revisionId || left.chapterId - right.chapterId);
+  if (JSON.stringify(pendingProposals) !== JSON.stringify(target.basis.pendingProposals)) {
+    throw candidateError('RECOVERY_REQUIRED', 'Schema11 pending proposals differ from the projection basis');
+  }
+  const manuscriptPositionsByLegacyNumber = new Map();
+  const ambiguousLegacyNumbers = new Set();
+  for (const basisRow of target.basis.chapters) {
+    const finalRow = target.chapters.find((row) => row.id === basisRow.id);
+    if (!finalRow || finalRow.is_present !== 1) continue;
+    if (manuscriptPositionsByLegacyNumber.has(basisRow.num)) ambiguousLegacyNumbers.add(basisRow.num);
+    manuscriptPositionsByLegacyNumber.set(basisRow.num, finalRow.manuscript_position);
+  }
+  for (const row of sourceForeshadows) {
+    if (
+      row.expected_resolve_chapter !== null
+      && (ambiguousLegacyNumbers.has(row.expected_resolve_chapter)
+        || !manuscriptPositionsByLegacyNumber.has(row.expected_resolve_chapter))
+    ) throw candidateError('SCHEMA_SWAP_UNSUPPORTED', 'Foreshadow position mapping is ambiguous');
+  }
+
+  let began = false;
+  let foreignKeysBefore;
+  let legacyAlterBefore;
+  try {
+    foreignKeysBefore = Number(Object.values(database.query('PRAGMA foreign_keys').get())[0]);
+    legacyAlterBefore = Number(Object.values(database.query('PRAGMA legacy_alter_table').get())[0]);
+    database.exec('PRAGMA foreign_keys = OFF');
+    database.exec('PRAGMA legacy_alter_table = ON');
+    database.exec('BEGIN EXCLUSIVE');
+    began = true;
+    assertOneChange(
+      run(database, `INSERT INTO ${quoteIdentifier(GATE_TABLE)} (${quoteIdentifier('gate_id')}) VALUES (1)`),
+      'Opening schema12 candidate gate',
+    );
+    for (const definition of canonicalTriggerDefinitions()) {
+      database.exec(`DROP TRIGGER ${quoteIdentifier(definition.name)}`);
+    }
+    database.exec('DROP TRIGGER IF EXISTS "chapters_data_version_after_update"');
+    for (const table of ['chapter_revisions', 'foreshadows', 'chapters', 'volumes']) {
+      database.exec(`ALTER TABLE ${quoteIdentifier(table)} RENAME TO ${quoteIdentifier(`_schema11_${table}`)}`);
+    }
+    for (const table of ['volumes', 'chapters', 'foreshadows', 'chapter_revisions']) {
+      database.exec(SCHEMA12_TABLES[table].createSql);
+    }
+    for (const table of ['manuscript_ignored_resources', 'manuscript_controlled_files', 'manuscript_capacity_snapshot']) {
+      database.exec(SCHEMA12_TABLES[table].createSql);
+    }
+
+    insertRows(database, 'volumes', [
+      'id', 'sort_order', 'title', 'summary', 'created_at', 'volume_uid', 'is_present', 'deleted_at',
+    ], sourceVolumes.map((row) => ({
+      ...row,
+      volume_uid: assignments.volumes.get(row.id).uid,
+      is_present: 1,
+      deleted_at: null,
+    })));
+    insertRows(database, 'chapters', [
+      'id', 'volume_id', 'num', 'title', 'outline', 'content', 'summary', 'word_count',
+      'status', 'cognitive_frame', 'emotional_anchor', 'world_texture', 'concrete_mystery',
+      'interpersonal_tension', 'created_at', 'updated_at', 'data_version', 'chapter_uid',
+      'is_present', 'deleted_at', 'chapter_position', 'manuscript_position',
+      'body_raw_sha256', 'sidecar_raw_sha256', 'content_available',
+    ], sourceChapters.map((row) => {
+      const basisRow = basisChapters.get(row.id);
+      const finalRow = target.chapters.find((candidate) => candidate.id === row.id);
+      return {
+        ...row,
+        chapter_uid: assignments.chapters.get(row.id).uid,
+        is_present: 1,
+        deleted_at: null,
+        chapter_position: finalRow?.chapter_position ?? null,
+        manuscript_position: finalRow?.manuscript_position ?? null,
+        body_raw_sha256: basisRow.bodyRawSha256,
+        sidecar_raw_sha256: null,
+        content_available: 1,
+      };
+    }));
+    insertRows(database, 'foreshadows', [
+      'id', 'title', 'description', 'status', 'planted_chapter_id',
+      'expected_resolve_manuscript_position', 'resolved_chapter_id', 'priority',
+      'created_at', 'updated_at',
+    ], sourceForeshadows.map((row) => ({
+      ...row,
+      expected_resolve_manuscript_position: row.expected_resolve_chapter === null
+        ? null
+        : manuscriptPositionsByLegacyNumber.get(row.expected_resolve_chapter),
+    })));
+    insertRows(database, 'chapter_revisions', [
+      'id', 'chapter_id', 'base_content', 'proposed_content', 'decisions_json', 'status',
+      'created_at', 'updated_at', 'resolved_at', 'previous_chapter_status',
+    ], sourceRevisions);
+    for (const table of ['chapter_revisions', 'foreshadows', 'chapters', 'volumes']) {
+      database.exec(`DROP TABLE ${quoteIdentifier(`_schema11_${table}`)}`);
+    }
+    for (const index of SCHEMA12_INDEXES) database.exec(index.sql);
+    for (const object of preservedObjects) database.exec(object.sql);
+    database.exec(`
+      CREATE TRIGGER "chapters_data_version_after_update"
+      AFTER UPDATE ON "chapters"
+      FOR EACH ROW
+      WHEN NEW.data_version = OLD.data_version
+      BEGIN
+        UPDATE "chapters" SET "data_version" = OLD.data_version + 1 WHERE "id" = OLD.id;
+      END
+    `);
+    for (const definition of schema12CanonicalTriggerDefinitions()) database.exec(definition.sql);
+    for (const [name, seq] of oldSequences) {
+      run(database, 'DELETE FROM sqlite_sequence WHERE name = ?', name);
+      run(database, 'INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)', name, seq);
+    }
+    const v2Digest = schema12CanonicalTriggerSetDigest();
+    for (const [key, value] of Object.entries({
+      schema_version: '12',
+      durability_trigger_version: String(SCHEMA12_TRIGGER_VERSION),
+      durability_trigger_set_digest: v2Digest,
+    })) {
+      assertOneChange(
+        run(database, 'UPDATE project_meta SET value = ? WHERE key = ?', value, key),
+        `Updating schema12 metadata ${key}`,
+      );
+    }
+    for (const [key, value] of Object.entries({
+      manuscript_route: isCreation ? 'files' : 'migrating',
+      manuscript_project_uid: target.projectUid,
+      manuscript_route_journal: journalId,
+      manuscript_projection_generation: String(
+        isCreation ? target.targetGeneration : target.baseGeneration
+      ),
+    })) {
+      assertOneChange(
+        run(database, 'INSERT INTO project_meta (key, value) VALUES (?, ?)', key, value),
+        `Installing schema12 route metadata ${key}`,
+      );
+    }
+    if (isCreation) installEmptyCreationRows(database, target, expectedFinalSeq);
+    assertOneChange(
+      run(database, `DELETE FROM ${quoteIdentifier(GATE_TABLE)} WHERE ${quoteIdentifier('gate_id')} = 1`),
+      'Closing schema12 candidate gate',
+    );
+    const foreignKeyRows = database.query('PRAGMA foreign_key_check').all();
+    if (foreignKeyRows.length !== 0) {
+      throw candidateError('SCHEMA_SWAP_UNSUPPORTED', 'Schema12 candidate has foreign-key violations');
+    }
+    const inspected = inspectSchema12Contract(database, {
+      expectedFinalSeq: isCreation ? expectedFinalSeq + 1 : expectedFinalSeq,
+    });
+    if (
+      inspected.projectInstanceId !== target.projectInstanceId
+      || inspected.route !== (isCreation ? 'files' : 'migrating')
+      || inspected.manuscriptProjectUid !== target.projectUid
+      || inspected.routeJournal !== journalId
+      || inspected.projectionGeneration !== (
+        isCreation ? target.targetGeneration : target.baseGeneration
+      )
+    ) throw candidateError('RECOVERY_REQUIRED', 'Schema12 candidate postcheck differs from target binding');
+    database.exec('COMMIT');
+    began = false;
+    return inspected;
+  } catch (error) {
+    if (began || database.inTransaction) rollbackInstall(database, error);
+    throw error;
+  } finally {
+    try { database.exec(`PRAGMA legacy_alter_table = ${legacyAlterBefore === 1 ? 'ON' : 'OFF'}`); } catch {}
+    try { database.exec(`PRAGMA foreign_keys = ${foreignKeysBefore === 1 ? 'ON' : 'OFF'}`); } catch {}
+  }
+}
+
+function buildSchema12Candidate(input) {
+  const isCreation = Object.hasOwn(input, 'sourceKind');
+  exactFrozenInput(
+    input,
+    isCreation
+      ? [
+        'sourcePath',
+        'candidatePath',
+        'creationId',
+        'sourceKind',
+        'transitionKind',
+        'target',
+      ]
+      : ['sourcePath', 'candidatePath', 'migrationId', 'target'],
+    'schema 12 candidate build input',
+  );
+  if (
+    isCreation
+    && (input.sourceKind !== 'empty' || input.transitionKind !== 'new_creation')
+  ) throw candidateError('RECOVERY_REQUIRED', 'New creation builder kind is invalid');
+  const sourcePath = canonicalCandidatePath(input.sourcePath, 'sourcePath');
+  const candidatePath = canonicalCandidatePath(input.candidatePath, 'candidatePath');
+  if (sourcePath === candidatePath || path.dirname(sourcePath) !== path.dirname(candidatePath)) {
+    throw candidateError('MANUSCRIPT_PATH_UNSAFE', 'Candidate must be side-by-side with its source');
+  }
+  assertPlainDirectoryChain(path.dirname(sourcePath));
+  if (fs.realpathSync.native(sourcePath) !== sourcePath) {
+    throw candidateError('MANUSCRIPT_PATH_UNSAFE', 'Source path is not canonical physical identity');
+  }
+  const sourceIdentity = plainFileIdentity(sourcePath, 'source database');
+  const sourceSha256 = sha256File(sourcePath);
+  if (fs.existsSync(candidatePath)) {
+    throw candidateError('RECOVERY_REQUIRED', 'Schema12 candidate path is already occupied');
+  }
+  let created = false;
+  let database;
+  try {
+    fs.copyFileSync(sourcePath, candidatePath, fs.constants.COPYFILE_EXCL);
+    created = true;
+    fsyncFile(candidatePath);
+    fsyncDirectory(path.dirname(candidatePath));
+    const { Database } = require('bun:sqlite');
+    database = new Database(candidatePath, { create: false, strict: true });
+    const inspected = installSchema12Candidate(database, Object.freeze(isCreation ? {
+      creationId: input.creationId,
+      sourceKind: input.sourceKind,
+      transitionKind: input.transitionKind,
+      target: input.target,
+    } : {
+      migrationId: input.migrationId,
+      target: input.target,
+    }));
+    database.clearQueryCache();
+    Bun.gc(true);
+    database.close(true);
+    database = null;
+    fsyncFile(candidatePath);
+    fsyncDirectory(path.dirname(candidatePath));
+    if (
+      !identityEqual(plainFileIdentity(sourcePath, 'source database'), sourceIdentity)
+      || sha256File(sourcePath) !== sourceSha256
+    ) throw candidateError('RECOVERY_REQUIRED', 'Source database changed while building its candidate');
+    const candidateIdentity = plainFileIdentity(candidatePath, 'schema12 candidate');
+    const candidateSha256 = sha256File(candidatePath);
+    const transitionProofDigest = isCreation
+      ? createHash('sha256').update(JSON.stringify({
+        domain: 'mythpen.manuscript.schema12-transition-proof',
+        version: 1,
+        transitionKind: 'new_creation',
+        sourceKind: 'empty',
+        creationId: input.creationId,
+        projectUid: input.target.projectUid,
+        projectInstanceId: inspected.projectInstanceId,
+        beforeSchemaVersion: 11,
+        afterSchemaVersion: 12,
+        beforeTriggerSetDigest: canonicalTriggerSetDigest(),
+        afterTriggerSetDigest: schema12CanonicalTriggerSetDigest(),
+        beforeCommitSeq: inspected.finalSeq - 1,
+        finalCommitSeq: inspected.finalSeq,
+        baseGeneration: input.target.baseGeneration,
+        targetGeneration: input.target.targetGeneration,
+        candidateIdentity,
+        candidateSha256,
+      })).digest('hex')
+      : null;
+    return Object.freeze({
+      sourcePath,
+      sourceIdentity,
+      sourceSha256,
+      candidatePath,
+      candidateIdentity,
+      candidateSha256,
+      projectInstanceId: inspected.projectInstanceId,
+      ...(isCreation ? {
+        sourceKind: 'empty',
+        transitionKind: 'new_creation',
+        finalCommitSeq: inspected.finalSeq,
+        transitionProofDigest,
+      } : {}),
+    });
+  } catch (error) {
+    let closeError;
+    try {
+      database?.clearQueryCache();
+      Bun.gc(true);
+      database?.close(true);
+    } catch (cause) {
+      closeError = cause;
+    }
+    if (closeError !== undefined) {
+      const uncertain = candidateError(
+        'RECOVERY_REQUIRED',
+        'Schema12 candidate close disposition is unknown; preserving candidate evidence',
+        error,
+      );
+      try {
+        Object.defineProperty(uncertain, 'closeError', { value: closeError });
+      } catch {}
+      throw uncertain;
+    }
+    if (error?.rollbackError !== undefined) {
+      throw candidateError(
+        'RECOVERY_REQUIRED',
+        'Schema12 candidate rollback disposition is unknown; preserving candidate evidence',
+        error,
+      );
+    }
+    if (
+      created
+      && ![
+        'MANUSCRIPT_PATH_UNSAFE',
+        'MIGRATION_STATE_MISMATCH',
+        'PROJECT_INSTANCE_MISMATCH',
+        'RECOVERY_REQUIRED',
+        'SCHEMA_SWAP_UNSUPPORTED',
+      ].includes(error?.code)
+    ) {
+      throw candidateError(
+        'RECOVERY_REQUIRED',
+        'Schema12 candidate build disposition is unknown; preserving candidate evidence',
+        error,
+      );
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   WRITABLE_PROJECT_TABLES,
   canonicalTriggerDefinitions,
@@ -1056,4 +1670,6 @@ module.exports = {
   schema12CanonicalTriggerDefinitions,
   schema12CanonicalTriggerSetDigest,
   inspectSchema12Contract,
+  installSchema12Candidate,
+  buildSchema12Candidate,
 };

@@ -4,6 +4,8 @@ const { createHash } = require('node:crypto');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
+const { installManuscriptRuntime } = require('./manuscript/runtime');
+const { createProductionManuscriptRuntime } = require('./manuscript/production-runtime');
 const apiRoutes = require('./routes/api');
 const { TOOLS, executeTool } = require('./tools');
 const {
@@ -600,7 +602,9 @@ db.invalidateAiConfigCache = invalidateAiConfigCache;
 function createApp({
   instanceNonceMiddleware = null,
   lifecycleAdmissionMiddleware = null,
+  manuscriptRuntime = null,
 } = {}) {
+  if (manuscriptRuntime !== null) installManuscriptRuntime(manuscriptRuntime);
   activeInstanceNonceMiddleware = instanceNonceMiddleware;
   activeLifecycleAdmissionMiddleware = lifecycleAdmissionMiddleware;
   return app;
@@ -614,12 +618,23 @@ async function startMainServer() {
   } else {
     console.log('[Server] Mythpen API Server starting...');
   }
+  let manuscriptRuntime = null;
+  const closeProductionDatabases = async () => {
+    try {
+      manuscriptRuntime?.close();
+    } finally {
+      await db.closeAllDatabases();
+    }
+  };
   const runtime = await startServerRuntime({
     assertDurabilitySupported,
-    closeDatabases: db.closeAllDatabases,
+    closeDatabases: closeProductionDatabases,
     configureRecoveryDiagnosticsCapabilities: db.configureRecoveryDiagnosticsCapabilities,
     coordinator: db.getProjectWriteLifecycle(),
-    createApp,
+    createApp(options) {
+      manuscriptRuntime = createProductionManuscriptRuntime();
+      return createApp({ ...options, manuscriptRuntime });
+    },
     detectCapabilities,
     initDatabase: db.initDatabase,
     inspectProjectDatabasesAtStartup: db.inspectProjectDatabasesAtStartup,

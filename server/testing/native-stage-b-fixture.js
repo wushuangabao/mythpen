@@ -198,7 +198,8 @@ function postCheckGenesis({ controlDirectory, databasePath, payload, appended })
   try {
     contract = inspectSchema11Contract(database);
   } finally {
-    database.close();
+    database.clearQueryCache();
+    database.close(true);
   }
   const evidence = inspectControlStoreEvidence(controlDirectory);
   if (evidence.events.length !== 1) throw new Error('Stage B fixture ControlStore must contain exactly one event');
@@ -234,7 +235,8 @@ function createNativeStageBFixture(options = {}) {
     try {
       contract = installSchema11Contract(database);
     } finally {
-      database.close();
+      database.clearQueryCache();
+      database.close(true);
     }
 
     const dbKey = sha256(canonicalDatabasePath(databasePath));

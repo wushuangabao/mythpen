@@ -8,6 +8,12 @@ import {
   type ProjectSummaryRecord,
   upsertProjectFallback,
 } from '@/lib/projectCreationFallback'
+import {
+  createProjectForStorage,
+  DEFAULT_PROJECT_STORAGE,
+  initialChapterForStorage,
+  type ProjectStorage,
+} from '@/lib/projectCreationStorage'
 import { removeDeletedProject } from '@/lib/projectDeletion'
 import { discardProjectDraftRecoveries } from '@/lib/projectDraftRecovery'
 import { deleteCapturedProjectInstance, finalizeCapturedProjectDeletion } from '@/lib/projectInstanceDeletion'
@@ -53,7 +59,10 @@ interface ProjectState {
   loadProjects: (options?: ProjectListLoadOptions) => Promise<void>
   loadPhase: (project: string) => Promise<void>
   setPhase: (project: string, phase: WorkflowPhase) => Promise<void>
-  createProject: (name: string, opts?: { mode?: string; language?: string; genres?: string[] }) => Promise<void>
+  createProject: (
+    name: string,
+    opts?: { mode?: string; language?: string; genres?: string[]; storage?: ProjectStorage },
+  ) => Promise<void>
   deleteProject: (name: string) => Promise<void>
 }
 
@@ -238,11 +247,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   createProject: async (name, opts = {}) => {
-    const { mode = 'medium-novel', language = 'zh', genres = ['sci-fi', 'romance'] } = opts
+    const {
+      mode = 'medium-novel',
+      language = 'zh',
+      genres = ['sci-fi', 'romance'],
+      storage = DEFAULT_PROJECT_STORAGE,
+    } = opts
     set({ loading: true, error: null })
     try {
       // 1. Create the project
-      const createdProject = await projectsApi.create({ name, mode, language, genres })
+      const createdProject = await createProjectForStorage(projectsApi, storage, { name, mode, language, genres })
       // A list read that started before creation must not erase the new token
       // or hide the new project if the follow-up authority read fails.
       projectListRequests.invalidate('projects')
@@ -262,7 +276,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }))
 
       // 2. Auto-create Chapter 1 so user can start writing immediately
-      await chaptersApi.create(name, { title: t('chapter.firstChapterTitle') })
+      await chaptersApi.create(name, initialChapterForStorage(storage, t('chapter.firstChapterTitle')))
 
       // 3. Reload project list & set current
       await useProjectStore.getState().loadProjects()

@@ -1,4 +1,6 @@
 const { createHash, randomUUID } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { Database } = require('bun:sqlite');
 
 const controlStoreModule = require('../control-store');
@@ -7,7 +9,19 @@ const {
   auditWritableTableManifest,
   canonicalTriggerDefinitions,
   canonicalTriggerSetDigest,
+  inspectSchema12Contract,
 } = require('./durability-schema');
+const { SQLiteProjectionStore } = require('../manuscript/projection-store');
+const {
+  consumeCreationRouteCas,
+  consumeRouteCas,
+} = require('../manuscript/route-store');
+const {
+  atomicReplace,
+  fsyncDirectory,
+  fsyncFile,
+  installAbsentFromVerifiedSource,
+} = require('../platform/durability');
 const {
   classifyNativeSql,
   classifyNativeTransactionSql,
@@ -69,6 +83,10 @@ function nativeError(code, message, cause) {
   const error = new Error(message, cause ? { cause } : undefined);
   error.code = code;
   return error;
+}
+
+function creationRecoveryRequired(message, cause) {
+  return nativeError('RECOVERY_REQUIRED', message, cause);
 }
 
 function deepFreeze(value) {
@@ -944,6 +962,613 @@ function validateExecuteInput(input, callback) {
   ) {
     throw nativeError('NATIVE_TRANSACTION_INPUT_INVALID', 'executeTransaction input is not exact');
   }
+}
+
+function sha256File(filePath) {
+  return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+function canonicalPhysicalName(value) {
+  const normalized = path.normalize(path.resolve(value));
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function closeSqliteExactly(database) {
+  database.clearQueryCache();
+  Bun.gc(true);
+  database.close(true);
+}
+
+function fileIdentity(filePath) {
+  const stats = fs.lstatSync(filePath, { bigint: true });
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1n) {
+    throw nativeError('RECOVERY_REQUIRED', 'Migration file is not one single-link plain file');
+  }
+  return Object.freeze({ dev: String(stats.dev), ino: String(stats.ino) });
+}
+
+function assertMigrationFile(filePath, expectedIdentity, expectedParent) {
+  if (
+    typeof filePath !== 'string'
+    || path.resolve(filePath) !== filePath
+    || path.dirname(filePath) !== expectedParent
+    || fs.realpathSync.native(filePath) !== filePath
+    || !sameIdentity(fileIdentity(filePath), expectedIdentity)
+  ) {
+    throw nativeError('RECOVERY_REQUIRED', 'Migration file path or physical identity changed');
+  }
+}
+
+function assertCreationParent(context) {
+  const parentPath = path.dirname(context.finalPath);
+  if (
+    typeof context.candidatePath !== 'string'
+    || typeof context.finalPath !== 'string'
+    || path.resolve(context.candidatePath) !== context.candidatePath
+    || path.resolve(context.finalPath) !== context.finalPath
+    || path.dirname(context.candidatePath) !== parentPath
+    || context.candidatePath === context.finalPath
+  ) throw creationRecoveryRequired('Creation database paths escaped their controlled parent');
+  let stats;
+  let realParent;
+  try {
+    stats = fs.lstatSync(parentPath, { bigint: true });
+    realParent = fs.realpathSync.native(parentPath);
+  } catch (cause) {
+    throw creationRecoveryRequired('Creation database parent cannot be inspected', cause);
+  }
+  if (
+    !stats.isDirectory()
+    || stats.isSymbolicLink()
+    || String(stats.dev) !== context.finalParentIdentity.dev
+    || String(stats.ino) !== context.finalParentIdentity.ino
+    || canonicalPhysicalName(realParent) !== canonicalPhysicalName(parentPath)
+  ) throw nativeError('MANUSCRIPT_PATH_UNSAFE', 'Creation database parent is unsafe');
+  return parentPath;
+}
+
+function assertCreationFile(filePath, expectedIdentity, expectedParent) {
+  let actualIdentity;
+  let realPath;
+  try {
+    actualIdentity = fileIdentity(filePath);
+    realPath = fs.realpathSync.native(filePath);
+  } catch (cause) {
+    throw creationRecoveryRequired('Creation database file cannot be inspected', cause);
+  }
+  if (
+    typeof filePath !== 'string'
+    || path.resolve(filePath) !== filePath
+    || path.dirname(filePath) !== expectedParent
+    || canonicalPhysicalName(realPath) !== canonicalPhysicalName(filePath)
+    || !sameIdentity(actualIdentity, expectedIdentity)
+  ) throw creationRecoveryRequired('Creation database file path or physical identity changed');
+}
+
+function verifyCreatedDatabase(filePath, context) {
+  const parentPath = assertCreationParent(context);
+  let database;
+  try {
+    assertCreationFile(filePath, context.candidateIdentity, parentPath);
+    if (sha256File(filePath) !== context.candidateSha256) {
+      throw creationRecoveryRequired('Creation database checksum differs from journal binding');
+    }
+    database = new Database(filePath, { create: false, readonly: true, strict: true });
+    const inspected = inspectSchema12Contract(database, {
+      expectedFinalSeq: context.finalCommitSeq,
+    });
+    if (
+      inspected.projectInstanceId !== context.projectInstanceId
+      || inspected.route !== 'files'
+      || inspected.manuscriptProjectUid !== context.projectUid
+      || inspected.routeJournal !== context.creationId
+      || inspected.projectionGeneration !== context.targetGeneration
+    ) throw creationRecoveryRequired('Created schema12 database binding differs from its journal');
+  } catch (cause) {
+    if (cause?.code === 'RECOVERY_REQUIRED' || cause?.code === 'MANUSCRIPT_PATH_UNSAFE') throw cause;
+    throw creationRecoveryRequired('Created schema12 database cannot be verified', cause);
+  } finally {
+    if (database !== undefined) {
+      try {
+        closeSqliteExactly(database);
+      } catch (cause) {
+        throw creationRecoveryRequired('Created schema12 database close is ambiguous', cause);
+      }
+    }
+  }
+}
+
+function pathDisposition(filePath) {
+  try {
+    fs.lstatSync(filePath);
+    return 'present';
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') return 'absent';
+    throw creationRecoveryRequired('Creation database path disposition is unprovable', cause);
+  }
+}
+
+function installCreatedProjectDatabase(input) {
+  if (!exactKeys(input, ['creationCas'])) {
+    throw new TypeError('installCreatedProjectDatabase input must contain exact creationCas');
+  }
+  return consumeCreationRouteCas(input.creationCas, {
+    purpose: 'new_creation_install',
+    apply({ creationContext: context }) {
+      const parentPath = assertCreationParent(context);
+      const candidateDisposition = pathDisposition(context.candidatePath);
+      const finalDisposition = pathDisposition(context.finalPath);
+      if (candidateDisposition === 'present' && finalDisposition === 'absent') {
+        verifyCreatedDatabase(context.candidatePath, context);
+        try {
+          installAbsentFromVerifiedSource(
+            context.candidatePath,
+            context.finalPath,
+            context.candidateIdentity,
+            context.candidateSha256,
+          );
+          fsyncDirectory(parentPath);
+        } catch (cause) {
+          throw creationRecoveryRequired('Final project database absent-install is ambiguous', cause);
+        }
+        if (
+          pathDisposition(context.candidatePath) !== 'absent'
+          || pathDisposition(context.finalPath) !== 'present'
+        ) throw creationRecoveryRequired('Final project database install disposition is ambiguous');
+        verifyCreatedDatabase(context.finalPath, context);
+        return Object.freeze({ disposition: 'after', generation: 1, route: 'files' });
+      }
+      if (candidateDisposition === 'absent' && finalDisposition === 'present') {
+        verifyCreatedDatabase(context.finalPath, context);
+        return Object.freeze({ disposition: 'after', generation: 1, route: 'files' });
+      }
+      throw creationRecoveryRequired('Creation candidate/final disposition is ambiguous');
+    },
+  });
+}
+
+function candidateMeta(database) {
+  const rows = database.query(
+    "SELECT key, value, typeof(value) AS storageType FROM project_meta WHERE key IN ('durability_commit_seq', 'project_instance_id', 'manuscript_route', 'manuscript_project_uid', 'manuscript_route_journal', 'manuscript_projection_generation') ORDER BY key",
+  ).all();
+  if (rows.length !== 6 || rows.some((row) => row.storageType !== 'text')) {
+    throw nativeError('RECOVERY_REQUIRED', 'Schema12 candidate metadata is incomplete');
+  }
+  return new Map(rows.map(({ key, value }) => [key, value]));
+}
+
+function canonicalCandidateSequence(meta) {
+  const raw = meta.get('durability_commit_seq');
+  if (typeof raw !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(raw)) {
+    throw nativeError('RECOVERY_REQUIRED', 'Schema12 candidate sequence is not canonical');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0 || String(value) !== raw) {
+    throw nativeError('RECOVERY_REQUIRED', 'Schema12 candidate sequence exceeds the safe range');
+  }
+  return value;
+}
+
+function assertCandidateMeta(meta, context, route, generation) {
+  if (
+    meta.get('project_instance_id') !== context.projectInstanceId
+    || meta.get('manuscript_route') !== route
+    || meta.get('manuscript_project_uid') !== context.projectUid
+    || meta.get('manuscript_route_journal') !== context.migrationId
+    || meta.get('manuscript_projection_generation') !== String(generation)
+  ) {
+    throw nativeError('RECOVERY_REQUIRED', 'Schema12 candidate route binding is stale or ambiguous');
+  }
+}
+
+function runCandidate(database, sql, ...params) {
+  return database.query(sql).run(...params);
+}
+
+function assertCandidateChange(result, label) {
+  if (result?.changes !== 1) {
+    throw nativeError('RECOVERY_REQUIRED', `${label} did not affect exactly one row`);
+  }
+}
+
+function controlledIdentityJson(row) {
+  return JSON.stringify({
+    fileIdentity: row.fileIdentity,
+    parentIdentity: row.parentIdentity,
+  });
+}
+
+function installTargetRows(database, target, context, beforeSeq, expectedRoute = 'migrating') {
+  let began = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    began = true;
+    assertCandidateChange(
+      runCandidate(database, 'INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)'),
+      'Opening schema12 publication gate',
+    );
+
+    database.exec('UPDATE volumes SET is_present = 0');
+    database.exec('UPDATE chapters SET is_present = 0, volume_id = NULL, chapter_position = NULL, manuscript_position = NULL');
+
+    const activeVolume = database.query(`
+      INSERT INTO volumes (
+        id, sort_order, title, summary, volume_uid, is_present, deleted_at
+      ) VALUES (?, ?, ?, ?, ?, 1, NULL)
+      ON CONFLICT(id) DO UPDATE SET
+        sort_order = excluded.sort_order,
+        title = excluded.title,
+        summary = excluded.summary,
+        volume_uid = excluded.volume_uid,
+        is_present = 1,
+        deleted_at = NULL
+    `);
+    const tombstoneVolume = database.query(`
+      UPDATE volumes
+      SET volume_uid = ?, is_present = 0, deleted_at = ?
+      WHERE id = ?
+    `);
+    try {
+      for (const row of target.volumes) {
+        if (row.is_present === 1) {
+          activeVolume.run(
+            row.id,
+            row.sort_order,
+            row.title,
+            row.summary,
+            row.volume_uid,
+          );
+        } else {
+          assertCandidateChange(
+            tombstoneVolume.run(row.volume_uid, row.deleted_at, row.id),
+            `Tombstoning volume ${row.id}`,
+          );
+        }
+      }
+    } finally {
+      activeVolume.finalize();
+      tombstoneVolume.finalize();
+    }
+
+    const activeChapter = database.query(`
+      INSERT INTO chapters (
+        id, volume_id, num, title, outline, content, summary, word_count, status,
+        cognitive_frame, emotional_anchor, world_texture, concrete_mystery,
+        interpersonal_tension, chapter_uid, is_present, deleted_at,
+        chapter_position, manuscript_position, body_raw_sha256,
+        sidecar_raw_sha256, content_available
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        volume_id = excluded.volume_id,
+        num = excluded.num,
+        title = excluded.title,
+        outline = excluded.outline,
+        content = excluded.content,
+        summary = excluded.summary,
+        word_count = excluded.word_count,
+        status = excluded.status,
+        cognitive_frame = excluded.cognitive_frame,
+        emotional_anchor = excluded.emotional_anchor,
+        world_texture = excluded.world_texture,
+        concrete_mystery = excluded.concrete_mystery,
+        interpersonal_tension = excluded.interpersonal_tension,
+        chapter_uid = excluded.chapter_uid,
+        is_present = 1,
+        deleted_at = NULL,
+        chapter_position = excluded.chapter_position,
+        manuscript_position = excluded.manuscript_position,
+        body_raw_sha256 = excluded.body_raw_sha256,
+        sidecar_raw_sha256 = excluded.sidecar_raw_sha256,
+        content_available = excluded.content_available
+    `);
+    const tombstoneChapter = database.query(`
+      UPDATE chapters
+      SET volume_id = NULL,
+          num = ?,
+          chapter_uid = ?,
+          is_present = 0,
+          deleted_at = ?,
+          data_version = data_version + 1,
+          chapter_position = NULL,
+          manuscript_position = NULL
+      WHERE id = ?
+    `);
+    try {
+      for (const row of target.chapters) {
+        if (row.is_present === 1) {
+          activeChapter.run(
+            row.id,
+            row.volume_id,
+            row.num,
+            row.title,
+            row.outline,
+            row.content,
+            row.summary,
+            row.word_count,
+            row.status,
+            row.cognitive_frame,
+            row.emotional_anchor,
+            row.world_texture,
+            row.concrete_mystery,
+            row.interpersonal_tension,
+            row.chapter_uid,
+            row.chapter_position,
+            row.manuscript_position,
+            row.body_raw_sha256,
+            row.sidecar_raw_sha256,
+            row.content_available,
+          );
+        } else {
+          assertCandidateChange(
+            tombstoneChapter.run(row.num, row.chapter_uid, row.deleted_at, row.id),
+            `Tombstoning chapter ${row.id}`,
+          );
+        }
+      }
+    } finally {
+      activeChapter.finalize();
+      tombstoneChapter.finalize();
+    }
+
+    database.exec('DELETE FROM manuscript_controlled_files');
+    const insertControlled = database.query(`
+      INSERT INTO manuscript_controlled_files (
+        file_role, resource_uid, raw_sha256, byte_size,
+        file_identity_json, projection_generation
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    try {
+      for (const row of target.controlledFiles) {
+        insertControlled.run(
+          row.role,
+          row.resourceUid,
+          row.rawSha256,
+          row.byteSize,
+          controlledIdentityJson(row),
+          target.targetGeneration,
+        );
+      }
+    } finally {
+      insertControlled.finalize();
+    }
+
+    database.exec('DELETE FROM manuscript_ignored_resources');
+    const insertIgnored = database.query(`
+      INSERT INTO manuscript_ignored_resources (
+        resource_kind, resource_uid, ignore_status, opaque_container_kind,
+        opaque_container_uid, is_currently_referenced, member_snapshot_json,
+        projection_generation
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    try {
+      for (const row of target.ignoredLedger) {
+        insertIgnored.run(
+          row.resource_kind,
+          row.resource_uid,
+          row.ignore_status,
+          row.opaque_container_kind,
+          row.opaque_container_uid,
+          row.is_currently_referenced,
+          row.member_snapshot_json,
+          row.projection_generation,
+        );
+      }
+    } finally {
+      insertIgnored.finalize();
+    }
+
+    database.exec('DELETE FROM manuscript_capacity_snapshot');
+    const measurements = target.capacitySnapshot.measurements;
+    assertCandidateChange(runCandidate(database, `
+      INSERT INTO manuscript_capacity_snapshot (
+        singleton_id, chapter_identities, volume_identities, controlled_files,
+        chapter_directory_entries, controlled_bytes, projection_generation
+      ) VALUES (1, ?, ?, ?, ?, ?, ?)
+    `,
+    measurements.chapterIdentities,
+    measurements.volumeIdentities,
+    measurements.controlledFiles,
+    measurements.chapterDirectoryEntries,
+    measurements.controlledBytes,
+    target.targetGeneration), 'Installing schema12 capacity snapshot');
+
+    for (const invalidation of target.proposalInvalidations) {
+      assertCandidateChange(runCandidate(
+        database,
+        "UPDATE chapter_revisions SET status = 'stale', updated_at = ? WHERE id = ? AND chapter_id = ? AND status = 'pending'",
+        target.projectedAt,
+        invalidation.revisionId,
+        invalidation.chapterId,
+      ), `Invalidating proposal ${invalidation.revisionId}`);
+    }
+
+    for (const sequence of target.sqliteSequence) {
+      const updated = runCandidate(
+        database,
+        'UPDATE sqlite_sequence SET seq = ? WHERE name = ?',
+        sequence.seq,
+        sequence.name,
+      );
+      if (updated?.changes === 0) {
+        assertCandidateChange(
+          runCandidate(database, 'INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)', sequence.name, sequence.seq),
+          `Installing ${sequence.name} sequence`,
+        );
+      } else if (updated?.changes !== 1) {
+        throw nativeError('RECOVERY_REQUIRED', `${sequence.name} sequence is ambiguous`);
+      }
+    }
+
+    assertCandidateChange(runCandidate(
+      database,
+      "UPDATE project_meta SET value = ? WHERE key = 'manuscript_projection_generation' AND value = ?",
+      String(context.targetGeneration),
+      String(context.baseGeneration),
+    ), 'Advancing manuscript projection generation');
+    assertCandidateChange(runCandidate(
+      database,
+      "UPDATE project_meta SET value = 'files' WHERE key = 'manuscript_route' AND value = ?",
+      expectedRoute,
+    ), 'Switching candidate route');
+    assertCandidateChange(runCandidate(
+      database,
+      "UPDATE project_meta SET value = ? WHERE key = 'durability_commit_seq' AND value = ?",
+      String(beforeSeq + 1),
+      String(beforeSeq),
+    ), 'Advancing schema12 durability sequence');
+    assertCandidateChange(
+      runCandidate(database, 'DELETE FROM "_durability_write_gate" WHERE "gate_id" = 1'),
+      'Closing schema12 publication gate',
+    );
+    assertCandidateProjection(database, target, context, beforeSeq + 1);
+    database.exec('COMMIT');
+    began = false;
+  } catch (error) {
+    if (began || database.inTransaction) {
+      try { database.exec('ROLLBACK'); } catch (rollbackError) {
+        throw nativeError('RECOVERY_REQUIRED', 'Schema12 candidate rollback is uncertain', rollbackError);
+      }
+    }
+    throw error;
+  }
+}
+
+function comparableVolume(row) {
+  return row.is_present === 1
+    ? {
+      id: row.id,
+      sort_order: row.sort_order,
+      title: row.title,
+      summary: row.summary,
+      volume_uid: row.volume_uid,
+      is_present: row.is_present,
+      deleted_at: row.deleted_at,
+    }
+    : {
+      id: row.id,
+      volume_uid: row.volume_uid,
+      is_present: row.is_present,
+      deleted_at: row.deleted_at,
+    };
+}
+
+function comparableChapter(row) {
+  return row.is_present === 1
+    ? {
+      id: row.id,
+      volume_id: row.volume_id,
+      num: row.num,
+      title: row.title,
+      outline: row.outline,
+      content: row.content,
+      summary: row.summary,
+      word_count: row.word_count,
+      status: row.status,
+      cognitive_frame: row.cognitive_frame,
+      emotional_anchor: row.emotional_anchor,
+      world_texture: row.world_texture,
+      concrete_mystery: row.concrete_mystery,
+      interpersonal_tension: row.interpersonal_tension,
+      chapter_uid: row.chapter_uid,
+      is_present: row.is_present,
+      deleted_at: row.deleted_at,
+      chapter_position: row.chapter_position,
+      manuscript_position: row.manuscript_position,
+      body_raw_sha256: row.body_raw_sha256,
+      sidecar_raw_sha256: row.sidecar_raw_sha256,
+      content_available: row.content_available,
+    }
+    : {
+      id: row.id,
+      num: row.num,
+      chapter_uid: row.chapter_uid,
+      is_present: row.is_present,
+      deleted_at: row.deleted_at,
+      chapter_position: row.chapter_position,
+      manuscript_position: row.manuscript_position,
+    };
+}
+
+function assertJsonEqual(actual, expected, label) {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw nativeError('RECOVERY_REQUIRED', `${label} differs from the projection target`);
+  }
+}
+
+function assertCandidateProjection(database, target, context, expectedFinalSeq) {
+  inspectSchema12Contract(database, { expectedFinalSeq });
+  const meta = candidateMeta(database);
+  assertCandidateMeta(meta, context, 'files', context.targetGeneration);
+  const volumes = database.query(`
+    SELECT id, sort_order, title, summary, volume_uid, is_present, deleted_at
+    FROM volumes ORDER BY id
+  `).all().map(comparableVolume);
+  const chapters = database.query(`
+    SELECT id, volume_id, num, title, outline, content, summary, word_count,
+           status, cognitive_frame, emotional_anchor, world_texture,
+           concrete_mystery, interpersonal_tension, chapter_uid, is_present,
+           deleted_at, chapter_position, manuscript_position, body_raw_sha256,
+           sidecar_raw_sha256, content_available
+    FROM chapters ORDER BY id
+  `).all().map(comparableChapter);
+  assertJsonEqual(volumes, target.volumes.map(comparableVolume), 'Schema12 volumes');
+  assertJsonEqual(chapters, target.chapters.map(comparableChapter), 'Schema12 chapters');
+
+  const controlled = database.query(`
+    SELECT file_role, resource_uid, raw_sha256, byte_size,
+           file_identity_json, projection_generation
+    FROM manuscript_controlled_files
+    ORDER BY file_role, COALESCE(resource_uid, '')
+  `).all();
+  const expectedControlled = target.controlledFiles.map((row) => ({
+    file_role: row.role,
+    resource_uid: row.resourceUid,
+    raw_sha256: row.rawSha256,
+    byte_size: row.byteSize,
+    file_identity_json: controlledIdentityJson(row),
+    projection_generation: target.targetGeneration,
+  })).sort((left, right) => (
+    left.file_role.localeCompare(right.file_role, 'en')
+    || String(left.resource_uid ?? '').localeCompare(String(right.resource_uid ?? ''), 'en')
+  ));
+  assertJsonEqual(controlled, expectedControlled, 'Schema12 controlled files');
+
+  const ignored = database.query(`
+    SELECT resource_kind, resource_uid, ignore_status, opaque_container_kind,
+           opaque_container_uid, is_currently_referenced, member_snapshot_json,
+           projection_generation
+    FROM manuscript_ignored_resources ORDER BY resource_kind, resource_uid
+  `).all();
+  assertJsonEqual(ignored, target.ignoredLedger, 'Schema12 ignored ledger');
+
+  const measurements = target.capacitySnapshot.measurements;
+  const capacity = database.query(`
+    SELECT singleton_id, chapter_identities, volume_identities, controlled_files,
+           chapter_directory_entries, controlled_bytes, projection_generation
+    FROM manuscript_capacity_snapshot
+  `).get();
+  assertJsonEqual(capacity, {
+    singleton_id: 1,
+    chapter_identities: measurements.chapterIdentities,
+    volume_identities: measurements.volumeIdentities,
+    controlled_files: measurements.controlledFiles,
+    chapter_directory_entries: measurements.chapterDirectoryEntries,
+    controlled_bytes: measurements.controlledBytes,
+    projection_generation: target.targetGeneration,
+  }, 'Schema12 capacity snapshot');
+  for (const invalidation of target.proposalInvalidations) {
+    const status = database.query(
+      'SELECT status FROM chapter_revisions WHERE id = ? AND chapter_id = ?',
+    ).get(invalidation.revisionId, invalidation.chapterId)?.status;
+    if (status !== 'stale') {
+      throw nativeError('RECOVERY_REQUIRED', 'Schema12 proposal invalidation is missing');
+    }
+  }
+  const sequences = database.query(
+    "SELECT name, seq FROM sqlite_sequence WHERE name IN ('chapters', 'volumes') ORDER BY name",
+  ).all();
+  assertJsonEqual(sequences, target.sqliteSequence, 'Schema12 sqlite_sequence');
+  return meta;
 }
 
 function createNativeProjectStoreCore(options = {}) {
@@ -2208,6 +2833,116 @@ function createNativeProjectStoreCore(options = {}) {
     });
   }
 
+  function publishSchema12ProjectionTarget(input) {
+    if (!exactKeys(input, ['target', 'routeCas'])) {
+      throw new TypeError('publishProjectionTarget input must contain exact target and routeCas');
+    }
+    if (state !== 'active') throw stateError();
+    const target = new SQLiteProjectionStore().validateTarget(input.target);
+    if (target !== input.target) {
+      throw new TypeError('Projection target validation changed object identity');
+    }
+    assertProjectLogicalRequest();
+    assertActive();
+    return consumeRouteCas(input.routeCas, {
+      purpose: 'projection_target',
+      apply({ migrationContext: context }) {
+        if (
+          target.projectUid !== context.projectUid
+          || target.projectInstanceId !== context.projectInstanceId
+          || target.baseGeneration !== context.baseGeneration
+          || target.targetGeneration !== context.targetGeneration
+        ) {
+          throw recoveryRequired('Projection target differs from MigrationContext');
+        }
+        const sourceParent = path.dirname(context.sourcePath);
+        if (path.dirname(context.candidatePath) !== sourceParent) {
+          throw recoveryRequired('Migration candidate is not side-by-side with its source');
+        }
+        let candidateDatabase;
+        let candidateCommitted = false;
+        try {
+          guard.assertCurrent();
+          assertMigrationFile(context.sourcePath, context.sourceIdentity, sourceParent);
+          if (
+            context.sourcePath !== guard.canonicalPath
+            || sha256File(context.sourcePath) !== context.sourceSha256
+          ) throw recoveryRequired('Migration source differs from its journal checksum binding');
+          assertMigrationFile(context.candidatePath, context.candidateIdentity, sourceParent);
+          const observedCandidateSha256 = sha256File(context.candidatePath);
+          candidateDatabase = new Database(context.candidatePath, {
+            create: false,
+            strict: true,
+          });
+          configureConnection(candidateDatabase, DURABILITY_SQL_CAPABILITY);
+          const beforeMeta = candidateMeta(candidateDatabase);
+          const beforeSeq = canonicalCandidateSequence(beforeMeta);
+          if (observedCandidateSha256 === context.candidateSha256) {
+            inspectSchema12Contract(candidateDatabase, { expectedFinalSeq: beforeSeq });
+            assertCandidateMeta(
+              beforeMeta,
+              context,
+              'migrating',
+              context.baseGeneration,
+            );
+            installTargetRows(candidateDatabase, target, context, beforeSeq);
+            candidateCommitted = true;
+          } else {
+            assertCandidateProjection(candidateDatabase, target, context, beforeSeq);
+          }
+          closeSqliteExactly(candidateDatabase);
+          candidateDatabase = null;
+          fsyncFile(context.candidatePath);
+          fsyncDirectory(sourceParent);
+          assertMigrationFile(context.candidatePath, context.candidateIdentity, sourceParent);
+          assertMigrationFile(context.sourcePath, context.sourceIdentity, sourceParent);
+          if (sha256File(context.sourcePath) !== context.sourceSha256) {
+            throw recoveryRequired('Migration source changed before final route publication');
+          }
+          if (candidateCommitted) {
+            faultPoint(
+              FAULT_POINTS.NATIVE_TX_AFTER_COMMIT_RETURN,
+              Object.freeze({
+                operationKind: 'schema12_projection_activation',
+                migrationId: context.migrationId,
+                targetGeneration: context.targetGeneration,
+              }),
+            );
+          }
+        } catch (cause) {
+          try { if (candidateDatabase) closeSqliteExactly(candidateDatabase); } catch (closeError) {
+            throw recoveryRequired('Schema12 candidate close disposition is uncertain', closeError);
+          }
+          if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
+          throw recoveryRequired('Schema12 candidate publication requires recovery', cause);
+        }
+
+        try {
+          closeSqliteExactly(database);
+          database = null;
+          guard.close();
+          state = 'fenced';
+        } catch (cause) {
+          state = 'disposition_unknown';
+          throw recoveryRequired('Source handles could not close before route publication', cause);
+        }
+        try {
+          atomicReplace(context.candidatePath, context.sourcePath);
+          fsyncDirectory(sourceParent);
+          state = 'released';
+          return Object.freeze({
+            disposition: 'after',
+            generation: context.targetGeneration,
+            route: 'files',
+          });
+        } catch (cause) {
+          state = 'disposition_unknown';
+          throw recoveryRequired('Final schema12 route publication is ambiguous', cause);
+        }
+      },
+    });
+  }
+
   const facade = {
     get connectionEpoch() {
       return connectionEpoch;
@@ -2244,6 +2979,12 @@ function createNativeProjectStoreCore(options = {}) {
       }
       return unsupported('NATIVE_OPERATION_NOT_IMPLEMENTED', 'Native checkpoint is not implemented in Task 2');
     },
+    publishProjectionTarget(input) {
+      return withOperation(
+        'native projection publication',
+        () => publishSchema12ProjectionTarget(input),
+      );
+    },
     close() {
       return withOperation('native close operation', () => closeWithState('released'));
     },
@@ -2257,4 +2998,188 @@ function createNativeProjectStoreCore(options = {}) {
   return Object.freeze(facade);
 }
 
-module.exports = { createNativeProjectStore, createNativeProjectStoreCore };
+function createProofBoundSchema12ProjectStore(options) {
+  if (!exactKeys(options, ['admission', 'assertWriterLease', 'databasePath'])) {
+    throw new TypeError('schema12 project store options are inexact');
+  }
+  if (
+    typeof options.databasePath !== 'string'
+    || !path.isAbsolute(options.databasePath)
+    || path.resolve(options.databasePath) !== options.databasePath
+    || typeof options.assertWriterLease !== 'function'
+  ) throw new TypeError('schema12 project store dependencies are invalid');
+  const { verifyActivatedSchema12Admission } = require('../manuscript/runtime');
+  const admission = verifyActivatedSchema12Admission(options.admission);
+  const databasePath = options.databasePath;
+  const parentPath = path.dirname(databasePath);
+  const identity = fileIdentity(databasePath);
+  assertMigrationFile(databasePath, identity, parentPath);
+  const guard = createDatabaseIdentityGuard({ databasePath });
+  let database;
+  let state = 'active';
+  let activeOperation = false;
+
+  function recoveryRequiredHere(message, cause) {
+    return nativeError('RECOVERY_REQUIRED', message, cause);
+  }
+
+  function closeResources(nextState) {
+    if (state !== 'active') return;
+    let primary = null;
+    try {
+      if (database !== undefined) closeSqliteExactly(database);
+    } catch (cause) {
+      primary = recoveryRequiredHere('Schema12 database close is ambiguous', cause);
+    } finally {
+      database = undefined;
+    }
+    try {
+      guard.close();
+    } catch (cause) {
+      if (primary === null) primary = recoveryRequiredHere('Schema12 identity guard close is ambiguous', cause);
+    }
+    state = primary === null ? nextState : 'disposition_unknown';
+    if (primary !== null) throw primary;
+  }
+
+  function requireActive() {
+    if (state !== 'active' || database === undefined) {
+      throw recoveryRequiredHere('Schema12 project store is not active');
+    }
+    guard.assertCurrent();
+  }
+
+  function withOperation(label, operation) {
+    if (activeOperation) throw recoveryRequiredHere(`${label} cannot overlap another operation`);
+    activeOperation = true;
+    try {
+      requireActive();
+      return operation();
+    } finally {
+      activeOperation = false;
+    }
+  }
+
+  function inspectContract() {
+    const meta = candidateMeta(database);
+    const finalSeq = canonicalCandidateSequence(meta);
+    const contract = inspectSchema12Contract(database, { expectedFinalSeq: finalSeq });
+    const facts = admission.databaseFacts;
+    if (
+      contract.route !== 'files'
+      || contract.manuscriptProjectUid !== facts.projectUid
+      || contract.projectInstanceId !== facts.projectInstanceId
+      || contract.routeJournal !== facts.routeJournal
+    ) throw recoveryRequiredHere('Schema12 live database differs from activated admission');
+    return Object.freeze({ contract, finalSeq, meta });
+  }
+
+  function targetContext(target) {
+    return Object.freeze({
+      migrationId: admission.databaseFacts.routeJournal,
+      projectUid: admission.databaseFacts.projectUid,
+      projectInstanceId: admission.databaseFacts.projectInstanceId,
+      baseGeneration: target.baseGeneration,
+      targetGeneration: target.targetGeneration,
+    });
+  }
+
+  function disposition(target) {
+    const validated = new SQLiteProjectionStore().validateTarget(target);
+    if (validated !== target) throw new TypeError('Projection target validation changed object identity');
+    const current = inspectContract();
+    if (current.contract.projectionGeneration === target.baseGeneration) return 'base';
+    if (current.contract.projectionGeneration !== target.targetGeneration) return 'unknown';
+    assertCandidateProjection(
+      database,
+      target,
+      targetContext(target),
+      current.finalSeq,
+    );
+    return 'target';
+  }
+
+  try {
+    database = new Database(databasePath, { create: false, strict: true });
+    configureConnection(database, DURABILITY_SQL_CAPABILITY);
+    const current = inspectContract();
+    if (current.contract.projectionGeneration !== admission.databaseFacts.projectionGeneration) {
+      throw recoveryRequiredHere('Schema12 generation differs from activated admission');
+    }
+  } catch (cause) {
+    try { if (database !== undefined) closeSqliteExactly(database); } catch {}
+    try { guard.close(); } catch {}
+    state = 'disposition_unknown';
+    if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
+    throw recoveryRequiredHere('Schema12 project store open failed', cause);
+  }
+
+  return Object.freeze({
+    get state() { return state; },
+    readAll(sql, ...params) {
+      return withOperation('schema12 read', () => database.query(sql).all(...params));
+    },
+    readGet(sql, ...params) {
+      return withOperation('schema12 read', () => database.query(sql).get(...params) ?? null);
+    },
+    inspectProjectionTarget(input) {
+      if (!exactKeys(input, ['target'])) {
+        throw new TypeError('inspectProjectionTarget input must contain exact target');
+      }
+      return withOperation('schema12 projection inspection', () => disposition(input.target));
+    },
+    publishProjectionTarget(input) {
+      if (!exactKeys(input, ['target'])) {
+        throw new TypeError('publishProjectionTarget input must contain exact target');
+      }
+      return withOperation('schema12 projection publication', () => {
+        options.assertWriterLease();
+        const target = new SQLiteProjectionStore().validateTarget(input.target);
+        if (target !== input.target) {
+          throw new TypeError('Projection target validation changed object identity');
+        }
+        const before = inspectContract();
+        const beforeDisposition = disposition(target);
+        if (beforeDisposition === 'target') {
+          return Object.freeze({
+            disposition: 'after',
+            generation: target.targetGeneration,
+            route: 'files',
+          });
+        }
+        if (beforeDisposition !== 'base') {
+          throw recoveryRequiredHere('Schema12 projection disposition is not the exact base');
+        }
+        installTargetRows(database, target, targetContext(target), before.finalSeq, 'files');
+        fsyncFile(databasePath);
+        fsyncDirectory(parentPath);
+        guard.assertCurrent();
+        if (disposition(target) !== 'target') {
+          throw recoveryRequiredHere('Schema12 projection publication is not durably observable');
+        }
+        return Object.freeze({
+          disposition: 'after',
+          generation: target.targetGeneration,
+          route: 'files',
+        });
+      });
+    },
+    recover() {
+      return withOperation('schema12 recovery', () => {
+        const current = inspectContract();
+        return Object.freeze({
+          status: 'clean',
+          generation: current.contract.projectionGeneration,
+        });
+      });
+    },
+    close() { closeResources('released'); },
+  });
+}
+
+module.exports = {
+  createNativeProjectStore,
+  createNativeProjectStoreCore,
+  createProofBoundSchema12ProjectStore,
+  installCreatedProjectDatabase,
+};

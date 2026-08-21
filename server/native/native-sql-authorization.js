@@ -1,3 +1,4 @@
+const { RESERVED_PROJECT_META_KEYS } = require('../manuscript/contracts');
 const { WRITABLE_PROJECT_TABLES } = require('./durability-schema');
 
 const BUSINESS_TABLES = new Set(WRITABLE_PROJECT_TABLES);
@@ -9,6 +10,7 @@ const RESERVED_META_KEYS = new Set([
   'durability_commit_seq',
   'durability_trigger_version',
   'durability_trigger_set_digest',
+  ...RESERVED_PROJECT_META_KEYS,
 ]);
 const FROM_LIST_TERMINATORS = new Set([
   'where',
@@ -308,7 +310,11 @@ function assertStaticProjectMetaKey(tokens, operation) {
   return assertStaticProjectMetaDelete(tokens);
 }
 
-function classifyNativeSql(sql) {
+function classifyNativeSql(sql, options = {}) {
+  const schemaVersion = options.schemaVersion ?? 11;
+  if (schemaVersion !== 11 && schemaVersion !== 12) {
+    throw forbidden('Native SQL schema version is unsupported');
+  }
   const tokens = tokenize(sql);
   assertSingleStatement(tokens);
   assertNoInternalReference(tokens);
@@ -318,6 +324,13 @@ function classifyNativeSql(sql) {
   }
   if (operation === 'INSERT' || operation === 'UPDATE' || operation === 'DELETE') {
     const table = dmlTable(tokens, operation);
+    if (
+      schemaVersion === 12
+      && operation === 'DELETE'
+      && ['chapters', 'volumes'].includes(table)
+    ) {
+      throw forbidden('Schema 12 manuscript identities cannot be physically deleted');
+    }
     if (
       table === 'project_meta'
       && tokens.some((token) => token.type === 'string' && RESERVED_META_KEYS.has(token.value.toLowerCase()))

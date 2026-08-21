@@ -1,4 +1,12 @@
 import { isolateProjectDraft } from './projectDraftRecovery.ts'
+import type { ManuscriptBaseWitness } from './api.ts'
+import {
+  discardManuscriptDirtyResource,
+  markManuscriptResourceDirty,
+  markManuscriptResourceSaving,
+  settleManuscriptResource,
+  type ManuscriptDirtyBinding,
+} from './manuscriptDirtyResources.ts'
 
 export interface TitleSaveEntry {
   project: string
@@ -6,6 +14,8 @@ export interface TitleSaveEntry {
   chapterNum: number
   title: string
   version: number
+  dirtyBinding?: ManuscriptDirtyBinding
+  baseWitness?: ManuscriptBaseWitness
 }
 
 export interface TitleSaveQueueSnapshot {
@@ -19,6 +29,7 @@ const pendingSaves = new Map<string, TitleSaveEntry>()
 const visibleDrafts = new Map<string, TitleSaveEntry>()
 const saveQueues = new Map<string, Promise<void>>()
 const failedSaves = new Map<string, string>()
+const failedSaveCodes = new Map<string, string>()
 const latestVersionByTarget = new Map<string, number>()
 const projectEpochs = new Map<string, number>()
 const listeners = new Set<() => void>()
@@ -61,6 +72,24 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || '保存失败')
 }
 
+function errorCode(error: unknown): string | null {
+  if (error === null || typeof error !== 'object') return null
+  const descriptor = Object.getOwnPropertyDescriptor(error, 'code')
+  return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value') && typeof descriptor.value === 'string'
+    ? descriptor.value
+    : null
+}
+
+function snapshotBaseWitness(value: ManuscriptBaseWitness | undefined): ManuscriptBaseWitness | undefined {
+  if (value === undefined) return undefined
+  return Object.freeze({
+    expected_data_version: value.expected_data_version,
+    generation: value.generation,
+    raw_sha256: value.raw_sha256,
+    sidecar_raw_sha256: value.sidecar_raw_sha256,
+  })
+}
+
 export function subscribeTitleSaveQueue(listener: () => void): () => void {
   listeners.add(listener)
   return () => listeners.delete(listener)
@@ -74,8 +103,23 @@ export function getTitleSaveDraft(project: string, chapterId: number): TitleSave
   return visibleDrafts.get(titleSaveKey(project, chapterId)) || null
 }
 
+export function getTitleSaveFailure(
+  project: string,
+  chapterId: number,
+): Readonly<{ message: string; code: string | null }> | null {
+  const saveKey = titleSaveKey(project, chapterId)
+  const message = failedSaves.get(saveKey)
+  if (message === undefined) return null
+  return Object.freeze({ message, code: failedSaveCodes.get(saveKey) ?? null })
+}
+
 function clearProjectTitleSaves(project: string): void {
   projectEpochs.set(project, projectEpoch(project) + 1)
+  for (const [saveKey, entry] of visibleDrafts) {
+    if (saveKeyBelongsToProject(saveKey, project) && entry.dirtyBinding) {
+      discardManuscriptDirtyResource(entry.dirtyBinding)
+    }
+  }
   for (const saveKey of [...pendingSaves.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) pendingSaves.delete(saveKey)
   }
@@ -84,6 +128,9 @@ function clearProjectTitleSaves(project: string): void {
   }
   for (const saveKey of [...failedSaves.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) failedSaves.delete(saveKey)
+  }
+  for (const saveKey of [...failedSaveCodes.keys()]) {
+    if (saveKeyBelongsToProject(saveKey, project)) failedSaveCodes.delete(saveKey)
   }
   for (const saveKey of [...latestVersionByTarget.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) latestVersionByTarget.delete(saveKey)
@@ -122,13 +169,31 @@ export function retireStaleProjectTitleSaves(project: string, sourceInstanceId: 
  * Keep the newest title draft outside React so it survives navigation and can
  * supersede an older in-flight save without being cleared by that save.
  */
-export function stageTitleSave(project: string, chapterId: number, chapterNum: number, title: string): TitleSaveEntry {
+export function stageTitleSave(
+  project: string,
+  chapterId: number,
+  chapterNum: number,
+  title: string,
+  dirtyBinding?: ManuscriptDirtyBinding,
+  baseWitness?: ManuscriptBaseWitness,
+): TitleSaveEntry {
   const saveKey = titleSaveKey(project, chapterId)
-  const entry = { project, chapterId, chapterNum, title, version: ++nextSaveVersion }
+  const existingDraft = visibleDrafts.get(saveKey)
+  const entry = {
+    project,
+    chapterId,
+    chapterNum,
+    title,
+    version: ++nextSaveVersion,
+    dirtyBinding: existingDraft ? existingDraft.dirtyBinding : dirtyBinding,
+    baseWitness: existingDraft ? existingDraft.baseWitness : snapshotBaseWitness(baseWitness),
+  }
   latestVersionByTarget.set(saveKey, entry.version)
   pendingSaves.set(saveKey, entry)
   visibleDrafts.set(saveKey, entry)
   failedSaves.delete(saveKey)
+  failedSaveCodes.delete(saveKey)
+  if (entry.dirtyBinding) markManuscriptResourceDirty(entry.dirtyBinding, entry.version, { title })
   publishSnapshot()
   return entry
 }
@@ -148,10 +213,13 @@ export function setTitleSaveError(project: string, chapterId: number, version: n
  */
 export function discardTitleSave(project: string, chapterId: number): void {
   const saveKey = titleSaveKey(project, chapterId)
+  const dirtyBinding = visibleDrafts.get(saveKey)?.dirtyBinding
   latestVersionByTarget.set(saveKey, ++nextSaveVersion)
   pendingSaves.delete(saveKey)
   visibleDrafts.delete(saveKey)
   failedSaves.delete(saveKey)
+  failedSaveCodes.delete(saveKey)
+  if (dirtyBinding) discardManuscriptDirtyResource(dirtyBinding)
   publishSnapshot()
 }
 
@@ -166,6 +234,7 @@ export function flushTitleSave(project: string, chapterId: number, writer: Title
   if (!pending) return saveQueues.get(saveKey) ?? Promise.resolve()
   pendingSaves.delete(saveKey)
   const requestEpoch = projectEpoch(project)
+  const requestId = `title-save-${pending.version}`
 
   const previousSave = saveQueues.get(saveKey) ?? Promise.resolve()
   const currentSave = previousSave
@@ -175,6 +244,9 @@ export function flushTitleSave(project: string, chapterId: number, writer: Title
       // If the request has not started yet and the user already replaced the
       // draft, only the newer queued write is relevant.
       if (latestVersionByTarget.get(saveKey) !== pending.version) return
+      if (pending.dirtyBinding) {
+        markManuscriptResourceSaving(pending.dirtyBinding, pending.version, requestId)
+      }
       await writer(pending)
     })
     .then(
@@ -183,6 +255,10 @@ export function flushTitleSave(project: string, chapterId: number, writer: Title
         if (latestVersionByTarget.get(saveKey) === pending.version) {
           if (visibleDrafts.get(saveKey)?.version === pending.version) visibleDrafts.delete(saveKey)
           failedSaves.delete(saveKey)
+          failedSaveCodes.delete(saveKey)
+          if (pending.dirtyBinding) {
+            settleManuscriptResource(pending.dirtyBinding, pending.version, requestId, 'saved')
+          }
         }
         publishSnapshot()
       },
@@ -194,6 +270,17 @@ export function flushTitleSave(project: string, chapterId: number, writer: Title
         ) {
           pendingSaves.set(saveKey, pending)
           failedSaves.set(saveKey, errorMessage(error))
+          const code = errorCode(error)
+          if (code) failedSaveCodes.set(saveKey, code)
+          else failedSaveCodes.delete(saveKey)
+          if (pending.dirtyBinding) {
+            settleManuscriptResource(
+              pending.dirtyBinding,
+              pending.version,
+              requestId,
+              code === 'EXTERNAL_DRAFT_CONFLICT' ? 'stale' : 'failed',
+            )
+          }
         }
         publishSnapshot()
         throw error

@@ -85,7 +85,11 @@
     "rejectChange": "Reject",
     "clickRevisionToReview": "Click to review this change",
     "revisionActions": "Revision actions",
-    "revisionSaving": "Saving revisions…"
+    "revisionSaving": "Saving revisions…",
+    "filesConflictTitle": "External changes detected; local draft retained",
+    "filesConflictDescription": "The editor is read-only to prevent overwriting external files. Keep the draft and resolve the conflict explicitly.",
+    "filesRecoveryTitle": "Project recovery is required",
+    "filesRecoveryDescription": "Mythpen retained the files and local draft. The editor is read-only until recovery is completed."
   },
   "status": {
     "pending": "Pending",
@@ -200,7 +204,19 @@
       "medium-novel": "Medium",
       "short-story": "Short Story"
     },
-    "createFailed": "Create failed"
+    "createFailed": "Create failed",
+    "storageLabel": "Storage",
+    "storageSqlite": "SQLite (default)",
+    "storageFilesBeta": "files Beta",
+    "storageFilesBetaWarning": "Explicit Beta: manuscript files become authoritative. SQLite remains the default for other projects; ambiguous state is retained for recovery.",
+    "filesBetaMigrate": "Migrate to files Beta",
+    "filesBetaMigrating": "Migrating…",
+    "filesBetaActive": "files Beta (active)",
+    "filesBetaRecoveryRequired": "This files project needs recovery; its on-disk state was retained.",
+    "filesBetaMigrationTitle": "Migrate to files Beta",
+    "filesBetaMigrationDescription": "Convert “{name}” to file-authority storage. This remains an explicit Beta and does not change other SQLite projects.",
+    "filesBetaMigrationSafety": "The source SQLite database stays read-only and is not deleted before migration completes. Ambiguous state is preserved for recovery; Mythpen never silently falls back or dual-writes.",
+    "filesBetaMigrationBlocked": "Unsaved drafts detected: {body} body draft(s), {title} title draft(s). Save or handle them before migration."
   },
   "recovery": {
     "title": "Project recovery check required",

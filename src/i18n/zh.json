@@ -85,7 +85,11 @@
     "rejectChange": "拒绝",
     "clickRevisionToReview": "点击以处理此修订",
     "revisionActions": "修订操作",
-    "revisionSaving": "正在保存修订…"
+    "revisionSaving": "正在保存修订…",
+    "filesConflictTitle": "检测到外部修改，本地草稿已保留",
+    "filesConflictDescription": "为避免覆盖外部文件，当前正文已切换为只读。请保留草稿并在确认现场后手动处理冲突。",
+    "filesRecoveryTitle": "项目状态需要恢复",
+    "filesRecoveryDescription": "Mythpen 已保留文件和本地草稿，当前正文只读。请从项目列表进入恢复流程。"
   },
   "status": {
     "pending": "待办",
@@ -200,7 +204,19 @@
       "medium-novel": "中篇",
       "short-story": "短篇"
     },
-    "createFailed": "创建失败"
+    "createFailed": "创建失败",
+    "storageLabel": "存储方式",
+    "storageSqlite": "SQLite（默认）",
+    "storageFilesBeta": "files Beta",
+    "storageFilesBetaWarning": "显式 Beta：正文和结构文件将成为权威数据。SQLite 仍是其他项目的默认方式；出现不明确状态时会保留现场并要求恢复。",
+    "filesBetaMigrate": "迁移到 files Beta",
+    "filesBetaMigrating": "正在迁移…",
+    "filesBetaActive": "files Beta（已启用）",
+    "filesBetaRecoveryRequired": "files 项目需要恢复检查，现场已保留。",
+    "filesBetaMigrationTitle": "迁移到 files Beta",
+    "filesBetaMigrationDescription": "将「{name}」转换为文件权威项目。此功能仍处于显式 Beta，不会改变其他 SQLite 项目。",
+    "filesBetaMigrationSafety": "迁移完成前，源 SQLite 数据库保持只读且不会被删除。若现场不明确，Mythpen 会保留文件并要求恢复，不会静默回退或双写。",
+    "filesBetaMigrationBlocked": "检测到未保存草稿：正文 {body} 份，标题 {title} 份。请先保存或处理草稿。"
   },
   "recovery": {
     "title": "项目需要恢复检查",

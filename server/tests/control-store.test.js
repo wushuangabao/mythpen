@@ -2912,6 +2912,61 @@ test('ControlStore reserves manuscript file-assets directory with an exact case-
   }
 });
 
+test('ControlStore reserves manuscript draft-conflict directory for legacy and bounded reads', (t) => {
+  for (const bounded of [false, true]) {
+    const controlDir = createControlDir(t);
+    const store = openControlStore(controlDir, { bounded });
+    store.append({ type: 'draft-conflict.seed', payload: { version: 1 } });
+    const before = store.read();
+    const conflictDirectory = path.join(controlDir, 'draft-conflict');
+    fs.mkdirSync(path.join(conflictDirectory, '33333333-3333-4333-8333-333333333333'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(conflictDirectory, '33333333-3333-4333-8333-333333333333', 'manifest.json'),
+      '{not-an-event',
+    );
+
+    assert.deepEqual(store.read(), before, `bounded=${bounded}`);
+    if (bounded) assert.deepEqual(store.readEvidence().events, before);
+  }
+});
+
+test('ControlStore reserves manuscript draft-conflict directory only as the exact plain non-symlink name', (t) => {
+  for (const bounded of [false, true]) {
+    for (const [name, kind] of [
+      ['draft-conflict', 'file'],
+      ['draft-conflict', 'symlink'],
+      ['Draft-Conflict', 'directory'],
+      ['draft-conflicts', 'directory'],
+    ]) {
+      const controlDir = createControlDir(t);
+      const store = openControlStore(controlDir, { bounded });
+      const candidate = path.join(controlDir, name);
+      if (kind === 'file') fs.writeFileSync(candidate, 'not-a-directory');
+      else if (kind === 'directory') fs.mkdirSync(candidate);
+      else {
+        const target = path.join(path.dirname(controlDir), `draft-conflict-target-${bounded}`);
+        fs.mkdirSync(target);
+        fs.symlinkSync(target, candidate, process.platform === 'win32' ? 'junction' : 'dir');
+      }
+
+      assert.throws(
+        () => store.read(),
+        (error) => (
+          error.code === 'CONTROL_STORE_CORRUPT'
+          && (
+            name === 'draft-conflict'
+              ? /draft-conflict.*plain directory/i.test(error.message)
+              : /unknown control store entry/i.test(error.message)
+          )
+        ),
+        `bounded=${bounded} ${name} ${kind}`,
+      );
+    }
+  }
+});
+
 test('read fails closed on every entry outside the exact lock and production-temp whitelist', (t) => {
   const controlDir = createControlDir(t);
   const store = openControlStore(controlDir);

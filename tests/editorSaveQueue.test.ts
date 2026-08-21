@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import type { ManuscriptBaseWitness } from '../src/lib/api.ts'
 import {
   type EditorSaveEntry,
   discardEditorSave,
@@ -9,7 +10,13 @@ import {
   flushEditorSave,
   getEditorSaveDraft,
   getEditorSaveQueueSnapshot,
+  getEditorSaveFailure,
 } from '../src/lib/editorSaveQueue.ts'
+import {
+  discardManuscriptDirtyResource,
+  getManuscriptDirtySnapshot,
+  type ManuscriptDirtyBinding,
+} from '../src/lib/manuscriptDirtyResources.ts'
 
 interface Deferred {
   promise: Promise<void>
@@ -162,29 +169,64 @@ test('a CAS conflict retains the original draft version and exposes the server e
   const project = 'cas-conflict-project'
   const chapterId = 222
   const saveKey = editorSaveKey(project, chapterId)
+  const dirtyBinding: ManuscriptDirtyBinding = {
+    identity: {
+      projectUid: '11111111-1111-4111-8111-111111111111',
+      projectInstanceId: '22222222-2222-4222-8222-222222222222',
+      resourceKind: 'chapter',
+      resourceUid: '33333333-3333-4333-8333-333333333333',
+      domain: 'body',
+      windowId: 'editor-window',
+    },
+    baseRawSha256: 'a'.repeat(64),
+  }
+  const originalWitness: ManuscriptBaseWitness = {
+    expected_data_version: 3,
+    generation: 7,
+    raw_sha256: 'a'.repeat(64),
+    sidecar_raw_sha256: 'b'.repeat(64),
+  }
+  const refreshedWitness: ManuscriptBaseWitness = {
+    expected_data_version: 3,
+    generation: 7,
+    raw_sha256: 'c'.repeat(64),
+    sidecar_raw_sha256: 'd'.repeat(64),
+  }
 
-  enqueueEditorSave(project, chapterId, 2, 'stale queued draft', 3)
-  await assert.rejects(
-    flushEditorSave(project, chapterId, async () => {
-      throw new Error('正文已在其他窗口更新，请处理冲突')
-    }),
-    /正文已在其他窗口更新/,
-  )
+  try {
+    enqueueEditorSave(project, chapterId, 2, 'stale queued draft', 3, dirtyBinding, originalWitness)
+    assert.equal(getManuscriptDirtySnapshot()[0]?.status, 'dirty')
+    await assert.rejects(
+      flushEditorSave(project, chapterId, async () => {
+        throw Object.assign(new Error('正文已在其他窗口更新，请处理冲突'), {
+          code: 'EXTERNAL_DRAFT_CONFLICT',
+        })
+      }),
+      /正文已在其他窗口更新/,
+    )
 
-  const retainedDraft = getEditorSaveDraft(project, chapterId)
-  assert.equal(retainedDraft?.content, 'stale queued draft')
-  assert.equal(retainedDraft?.baseDataVersion, 3)
-  assert.match(getEditorSaveQueueSnapshot().errors[saveKey] || '', /正文已在其他窗口更新/)
+    const retainedDraft = getEditorSaveDraft(project, chapterId)
+    assert.equal(retainedDraft?.content, 'stale queued draft')
+    assert.equal(retainedDraft?.baseDataVersion, 3)
+    assert.match(getEditorSaveQueueSnapshot().errors[saveKey] || '', /正文已在其他窗口更新/)
+    assert.equal(getEditorSaveFailure(project, chapterId)?.code, 'EXTERNAL_DRAFT_CONFLICT')
+    assert.equal(getManuscriptDirtySnapshot()[0]?.status, 'stale')
 
-  // Even if the chapter store has since loaded a newer authoritative version,
-  // editing the retained draft must not silently grant it permission to
-  // overwrite that version.
-  enqueueEditorSave(project, chapterId, 2, 'edited after conflict', 99)
-  assert.equal(getEditorSaveDraft(project, chapterId)?.baseDataVersion, 3)
-  await flushEditorSave(project, chapterId, async (entry) => {
-    assert.equal(entry.baseDataVersion, 3)
-    return 4
-  })
+    // Even if the chapter store has since loaded a newer authoritative version,
+    // editing the retained draft must not silently grant it permission to
+    // overwrite that version.
+    enqueueEditorSave(project, chapterId, 2, 'edited after conflict', 99, dirtyBinding, refreshedWitness)
+    assert.equal(getEditorSaveDraft(project, chapterId)?.baseDataVersion, 3)
+    await flushEditorSave(project, chapterId, async (entry) => {
+      assert.equal(entry.baseDataVersion, 3)
+      assert.deepEqual(entry.baseWitness, originalWitness)
+      return 4
+    })
+    assert.deepEqual(getManuscriptDirtySnapshot(), [])
+  } finally {
+    discardEditorSave(project, chapterId)
+    discardManuscriptDirtyResource(dirtyBinding)
+  }
 })
 
 test('an older failed write cannot restore over a newer queued snapshot', async () => {

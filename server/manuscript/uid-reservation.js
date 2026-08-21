@@ -11,12 +11,24 @@ const {
 
 const RESERVATION_DOMAIN = 'mythpen.manuscript.uid-reservation';
 const RESERVATION_VERSION = 1;
+const MIGRATION_RESERVATION_DOMAIN = 'mythpen.manuscript.migration-uid-reservation';
+const MIGRATION_RESERVATION_VERSION = 1;
+const MIGRATION_RESERVATION_ID_DOMAIN = 'mythpen.manuscript.migration-reservation-id';
+const CREATION_RESERVATION_DOMAIN = 'mythpen.manuscript.project-creation-uid-reservation';
+const CREATION_RESERVATION_VERSION = 1;
+const CREATION_RESERVATION_ID_DOMAIN = 'mythpen.manuscript.project-creation-reservation-id';
 const CREATE_LOGICAL_INPUT_DOMAIN = 'mythpen.manuscript.create-logical-input';
 const CREATE_LOGICAL_INPUT_VERSION = 1;
 const MAX_UID_ATTEMPTS = 32;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
-const SOURCE_OWNER_KINDS = new Set(['file_publication', 'migration']);
+const SOURCE_OWNER_KINDS = new Set([
+  'creation',
+  'existing_root',
+  'file_publication',
+  'migration',
+  'registry',
+]);
 const CHAPTER_STATUSES = new Set(['pending', 'writing', 'review', 'accepted']);
 const CHAPTER_SIDECAR_KEYS = Object.freeze([
   'title',
@@ -549,15 +561,438 @@ function mintIdentityReservationManifest(material) {
   });
 }
 
+function utf8Compare(left, right) {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
+function compareIdentityAssignments(left, right) {
+  return utf8Compare(left.objectKind, right.objectKind) || utf8Compare(left.uid, right.uid);
+}
+
+function migrationReservationId(material) {
+  return createHash('sha256')
+    .update(`${MIGRATION_RESERVATION_ID_DOMAIN}.v1\0`, 'utf8')
+    .update(JSON.stringify(material), 'utf8')
+    .digest('hex');
+}
+
+function projectReservationMaterial({ migrationId, projectInstanceId, sourceBasisDigest, uid }) {
+  return {
+    domain: MIGRATION_RESERVATION_ID_DOMAIN,
+    version: 1,
+    assignmentKind: 'project',
+    objectKind: 'project',
+    migrationId,
+    projectInstanceId,
+    sourceBasisDigest,
+    sourceId: null,
+    sourceNum: null,
+    uid,
+  };
+}
+
+function legacyReservationMaterial({
+  migrationId,
+  projectInstanceId,
+  sourceBasisDigest,
+  row,
+}) {
+  return {
+    domain: MIGRATION_RESERVATION_ID_DOMAIN,
+    version: 1,
+    assignmentKind: 'bind_legacy',
+    objectKind: row.objectKind,
+    migrationId,
+    projectInstanceId,
+    sourceBasisDigest,
+    sourceId: row.id,
+    sourceNum: row.objectKind === 'chapter' ? row.num : null,
+    uid: row.uid,
+  };
+}
+
+function normalizeMigrationBasis(value) {
+  assertDeepFrozenPlainData(value, 'sourceBasis');
+  const digest = canonicalProjectionBasisDigest(value);
+  if (value.sourceKind !== 'schema11' || value.basisDigest !== digest) {
+    invalid('migration sourceBasis must be a current canonical schema11 basis');
+  }
+  if (value.volumes.length > LIMITS.volumeIdentities) {
+    throw manuscriptError('MANUSCRIPT_CONTENT_TOO_LARGE', {
+      dimension: 'volumeIdentities',
+      observed: value.volumes.length,
+      allowed: LIMITS.volumeIdentities,
+    });
+  }
+  if (value.chapters.length > LIMITS.chapterIdentities) {
+    throw manuscriptError('MANUSCRIPT_CONTENT_TOO_LARGE', {
+      dimension: 'chapterIdentities',
+      observed: value.chapters.length,
+      allowed: LIMITS.chapterIdentities,
+    });
+  }
+  return { basis: value, sourceBasisDigest: digest };
+}
+
+function normalizeMigrationRequest(value) {
+  const request = exactObject(value, [
+    'migrationId',
+    'projectInstanceId',
+    'sourceBasis',
+    'projectRootProbe',
+  ], 'migration UID reservation request');
+  canonicalUuid(request.migrationId, 'migrationId');
+  canonicalUuid(request.projectInstanceId, 'projectInstanceId');
+  if (
+    request.projectRootProbe === null
+    || typeof request.projectRootProbe !== 'object'
+    || typeof request.projectRootProbe.probe !== 'function'
+  ) invalid('projectRootProbe must provide probe()');
+  return {
+    ...request,
+    ...normalizeMigrationBasis(request.sourceBasis),
+    probeRoot: request.projectRootProbe.probe.bind(request.projectRootProbe),
+  };
+}
+
+function normalizeMigrationSourceBasisInput(value) {
+  const input = exactObject(
+    value,
+    ['journalAuthority', 'migrationReserved', 'sourceBasis'],
+    'migration UID resume request',
+  );
+  return { ...input, ...normalizeMigrationBasis(input.sourceBasis) };
+}
+
+function normalizeProjectRootObservation(value) {
+  if (!isPlainObject(value)) invalid('projectRootProbe result must be a plain object');
+  const observation = exactObject(value, ['disposition'], 'projectRootProbe result');
+  if (observation.disposition === 'collision') return false;
+  if (observation.disposition !== 'absent') invalid('projectRootProbe did not prove absence');
+  return true;
+}
+
+function normalizeCreationRequest(value) {
+  const request = exactObject(value, [
+    'logicalRequestId',
+    'logicalInputDigest',
+    'projectInstanceId',
+    'projectRootProbe',
+  ], 'project creation UID reservation request');
+  nonEmptyString(request.logicalRequestId, 'logicalRequestId');
+  canonicalDigest(request.logicalInputDigest, 'logicalInputDigest');
+  canonicalUuid(request.projectInstanceId, 'projectInstanceId');
+  if (
+    request.projectRootProbe === null
+    || typeof request.projectRootProbe !== 'object'
+    || typeof request.projectRootProbe.probe !== 'function'
+  ) invalid('projectRootProbe must provide probe()');
+  return {
+    ...request,
+    probeRoot: request.projectRootProbe.probe.bind(request.projectRootProbe),
+  };
+}
+
+function creationProjectReservationMaterial({
+  creationId,
+  logicalInputDigest,
+  logicalRequestId,
+  projectInstanceId,
+  uid,
+}) {
+  return {
+    domain: CREATION_RESERVATION_ID_DOMAIN,
+    version: 1,
+    assignmentKind: 'project',
+    objectKind: 'project',
+    creationId,
+    logicalInputDigest,
+    logicalRequestId,
+    projectInstanceId,
+    uid,
+  };
+}
+
+function creationReservationId(material) {
+  return createHash('sha256')
+    .update(`${CREATION_RESERVATION_ID_DOMAIN}.v1\0`, 'utf8')
+    .update(JSON.stringify(material), 'utf8')
+    .digest('hex');
+}
+
+function canonicalCreationReservationMaterial(value) {
+  const manifest = exactObject(value, [
+    'domain',
+    'version',
+    'creationId',
+    'projectInstanceId',
+    'logicalRequestId',
+    'logicalInputDigest',
+    'projectReservation',
+    'reservationId',
+  ], 'project creation identity reservation');
+  if (
+    manifest.domain !== CREATION_RESERVATION_DOMAIN
+    || manifest.version !== CREATION_RESERVATION_VERSION
+  ) invalid('project creation identity reservation domain/version is invalid');
+  canonicalUuid(manifest.creationId, 'project creation reservation creationId');
+  canonicalUuid(manifest.projectInstanceId, 'project creation reservation projectInstanceId');
+  nonEmptyString(manifest.logicalRequestId, 'project creation reservation logicalRequestId');
+  canonicalDigest(manifest.logicalInputDigest, 'project creation reservation logicalInputDigest');
+  const project = exactObject(
+    manifest.projectReservation,
+    ['uid', 'reservationId'],
+    'project creation projectReservation',
+  );
+  canonicalUuid(project.uid, 'project creation project UID');
+  canonicalDigest(project.reservationId, 'project creation project reservationId');
+  canonicalDigest(manifest.reservationId, 'project creation reservationId');
+  if (manifest.creationId === project.uid) {
+    invalid('project creation IDs must be distinct');
+  }
+  const projectMaterial = creationProjectReservationMaterial({
+    creationId: manifest.creationId,
+    logicalInputDigest: manifest.logicalInputDigest,
+    logicalRequestId: manifest.logicalRequestId,
+    projectInstanceId: manifest.projectInstanceId,
+    uid: project.uid,
+  });
+  if (creationReservationId(projectMaterial) !== project.reservationId) {
+    invalid('project creation project reservation checksum is invalid');
+  }
+  const material = {
+    domain: CREATION_RESERVATION_DOMAIN,
+    version: CREATION_RESERVATION_VERSION,
+    creationId: manifest.creationId,
+    projectInstanceId: manifest.projectInstanceId,
+    logicalRequestId: manifest.logicalRequestId,
+    logicalInputDigest: manifest.logicalInputDigest,
+    projectReservation: {
+      uid: project.uid,
+      reservationId: project.reservationId,
+    },
+  };
+  return { material, reservationId: manifest.reservationId };
+}
+
+function validateCreationReservationManifest(value) {
+  const { material, reservationId } = canonicalCreationReservationMaterial(value);
+  const expected = creationReservationId(material);
+  if (reservationId !== expected) invalid('project creation reservation checksum is invalid');
+  return deepFreeze({ ...material, reservationId: expected });
+}
+
+function mintCreationReservationManifest(material) {
+  return validateCreationReservationManifest({
+    ...material,
+    reservationId: creationReservationId(material),
+  });
+}
+
+function normalizeMigrationAssignment(value, manifest, index) {
+  if (!isPlainObject(value)) invalid(`localIdentityPlan[${index}] must be a plain object`);
+  const objectKindDescriptor = Object.getOwnPropertyDescriptor(value, 'objectKind');
+  const objectKind = objectKindDescriptor?.value;
+  if (objectKind !== 'chapter' && objectKind !== 'volume') {
+    invalid(`localIdentityPlan[${index}].objectKind is invalid`);
+  }
+  const row = exactObject(value, [
+    'assignmentKind',
+    'objectKind',
+    'uid',
+    'id',
+    ...(objectKind === 'chapter' ? ['num'] : []),
+    'reservationId',
+  ], `localIdentityPlan[${index}]`);
+  if (row.assignmentKind !== 'bind_legacy') {
+    invalid(`localIdentityPlan[${index}] must use bind_legacy`);
+  }
+  canonicalUuid(row.uid, `localIdentityPlan[${index}].uid`);
+  positiveInteger(row.id, `localIdentityPlan[${index}].id`);
+  if (objectKind === 'chapter') positiveInteger(row.num, `localIdentityPlan[${index}].num`);
+  canonicalDigest(row.reservationId, `localIdentityPlan[${index}].reservationId`);
+  const material = legacyReservationMaterial({
+    migrationId: manifest.migrationId,
+    projectInstanceId: manifest.projectInstanceId,
+    sourceBasisDigest: manifest.sourceBasisDigest,
+    row,
+  });
+  if (migrationReservationId(material) !== row.reservationId) {
+    invalid(`localIdentityPlan[${index}] reservation checksum is invalid`);
+  }
+  return {
+    assignmentKind: 'bind_legacy',
+    objectKind,
+    uid: row.uid,
+    id: row.id,
+    ...(objectKind === 'chapter' ? { num: row.num } : {}),
+    reservationId: row.reservationId,
+  };
+}
+
+function validateMigrationReservationManifest(value) {
+  const manifest = exactObject(value, [
+    'domain',
+    'version',
+    'migrationId',
+    'projectInstanceId',
+    'sourceBasisDigest',
+    'projectReservation',
+    'localIdentityPlan',
+  ], 'migration identity reservation');
+  if (
+    manifest.domain !== MIGRATION_RESERVATION_DOMAIN
+    || manifest.version !== MIGRATION_RESERVATION_VERSION
+  ) invalid('migration identity reservation domain/version is invalid');
+  canonicalUuid(manifest.migrationId, 'migration identity reservation migrationId');
+  canonicalUuid(manifest.projectInstanceId, 'migration identity reservation projectInstanceId');
+  canonicalDigest(manifest.sourceBasisDigest, 'migration identity reservation sourceBasisDigest');
+  const project = exactObject(
+    manifest.projectReservation,
+    ['uid', 'reservationId'],
+    'migration identity reservation projectReservation',
+  );
+  canonicalUuid(project.uid, 'migration identity reservation project UID');
+  canonicalDigest(project.reservationId, 'migration identity reservation project reservationId');
+  const projectMaterial = projectReservationMaterial({
+    migrationId: manifest.migrationId,
+    projectInstanceId: manifest.projectInstanceId,
+    sourceBasisDigest: manifest.sourceBasisDigest,
+    uid: project.uid,
+  });
+  if (migrationReservationId(projectMaterial) !== project.reservationId) {
+    invalid('migration project reservation checksum is invalid');
+  }
+  const plan = denseArray(manifest.localIdentityPlan, 'localIdentityPlan').map(
+    (row, index) => normalizeMigrationAssignment(row, manifest, index),
+  );
+  const sorted = [...plan].sort(compareIdentityAssignments);
+  if (plan.some((row, index) => (
+    row.objectKind !== sorted[index].objectKind || row.uid !== sorted[index].uid
+  ))) invalid('localIdentityPlan must be sorted by objectKind and UID');
+  const uids = new Set([project.uid]);
+  const ids = new Set();
+  for (const row of plan) {
+    const idKey = `${row.objectKind}:${row.id}`;
+    if (uids.has(row.uid) || ids.has(idKey)) {
+      invalid('migration identity reservation contains duplicate identities');
+    }
+    uids.add(row.uid);
+    ids.add(idKey);
+  }
+  return deepFreeze({
+    domain: MIGRATION_RESERVATION_DOMAIN,
+    version: MIGRATION_RESERVATION_VERSION,
+    migrationId: manifest.migrationId,
+    projectInstanceId: manifest.projectInstanceId,
+    sourceBasisDigest: manifest.sourceBasisDigest,
+    projectReservation: {
+      uid: project.uid,
+      reservationId: project.reservationId,
+    },
+    localIdentityPlan: plan,
+  });
+}
+
+function assertMigrationManifestMatchesBasis(manifest, basis) {
+  if (manifest.sourceBasisDigest !== basis.basisDigest) {
+    invalid('migration identity reservation belongs to another source basis');
+  }
+  const expected = [
+    ...basis.volumes.map((row) => ({ objectKind: 'volume', id: row.id })),
+    ...basis.chapters.map((row) => ({ objectKind: 'chapter', id: row.id, num: row.num })),
+  ];
+  if (manifest.localIdentityPlan.length !== expected.length) {
+    invalid('migration identity reservation does not cover the source basis');
+  }
+  const bySource = new Map(manifest.localIdentityPlan.map((row) => [
+    `${row.objectKind}:${row.id}`,
+    row,
+  ]));
+  for (const source of expected) {
+    const row = bySource.get(`${source.objectKind}:${source.id}`);
+    if (row === undefined || (source.objectKind === 'chapter' && row.num !== source.num)) {
+      invalid('migration identity reservation does not bind the exact legacy row');
+    }
+  }
+  return manifest.localIdentityPlan;
+}
+
+function snapshotJournalAuthority(value) {
+  const keys = [
+    'readObservation',
+    'describeObservation',
+    'assertTransitionAllowed',
+    'readMigrationReserved',
+    'describeMigrationReserved',
+  ];
+  if (isPlainObject(value) && Object.hasOwn(value, 'assertMigrationContext')) {
+    keys.push('assertMigrationContext');
+  }
+  const authority = exactObject(value, keys, 'journalAuthority');
+  if (!Object.isFrozen(value)) invalid('journalAuthority must be frozen');
+  for (const [name, member] of Object.entries(authority)) {
+    if (typeof member !== 'function') invalid(`journalAuthority.${name} must be a function`);
+  }
+  return value;
+}
+
+function normalizeMigrationReservedDescription(value) {
+  const descriptor = exactObject(value, [
+    'version',
+    'projectUid',
+    'projectInstanceId',
+    'migrationId',
+    'logicalRequestId',
+    'baseGeneration',
+    'targetGeneration',
+    'sourceBasisDigest',
+    'migrationReservation',
+    'reservationDigest',
+    'createdAt',
+  ], 'migration_reserved description');
+  if (descriptor.version !== 1) invalid('migration_reserved description version is invalid');
+  canonicalUuid(descriptor.projectUid, 'migration_reserved projectUid');
+  canonicalUuid(descriptor.projectInstanceId, 'migration_reserved projectInstanceId');
+  canonicalUuid(descriptor.migrationId, 'migration_reserved migrationId');
+  nonEmptyString(descriptor.logicalRequestId, 'migration_reserved logicalRequestId');
+  canonicalDigest(descriptor.sourceBasisDigest, 'migration_reserved sourceBasisDigest');
+  canonicalDigest(descriptor.reservationDigest, 'migration_reserved reservationDigest');
+  if (!Number.isSafeInteger(descriptor.createdAt) || descriptor.createdAt < 0) {
+    invalid('migration_reserved createdAt must be non-negative integer milliseconds');
+  }
+  if (
+    !Number.isSafeInteger(descriptor.baseGeneration)
+    || descriptor.baseGeneration < 0
+    || !Number.isSafeInteger(descriptor.targetGeneration)
+    || descriptor.targetGeneration <= descriptor.baseGeneration
+  ) invalid('migration_reserved generations are invalid');
+  return descriptor;
+}
+
 class ManuscriptUidReservation {
   #authorities = new WeakMap();
 
+  #creationContexts = new WeakMap();
+
   #enumerateSources;
+
+  #lookupCreation;
+
+  #journalAuthority;
+
+  #migrationContexts = new WeakMap();
 
   #uuidV4;
 
   constructor(options) {
-    const value = exactObject(options, ['reservationSources', 'uuidV4'], 'options');
+    const hasJournalAuthority = isPlainObject(options)
+      && Object.hasOwn(options, 'journalAuthority');
+    const value = exactObject(
+      options,
+      ['reservationSources', 'uuidV4', ...(hasJournalAuthority ? ['journalAuthority'] : [])],
+      'options',
+    );
     if (typeof value.uuidV4 !== 'function') invalid('uuidV4 must be a function');
     if (
       value.reservationSources === null
@@ -569,6 +1004,12 @@ class ManuscriptUidReservation {
     }
     this.#uuidV4 = value.uuidV4;
     this.#enumerateSources = value.reservationSources.enumerate.bind(value.reservationSources);
+    this.#lookupCreation = typeof value.reservationSources.lookupCreation === 'function'
+      ? value.reservationSources.lookupCreation.bind(value.reservationSources)
+      : null;
+    this.#journalAuthority = hasJournalAuthority
+      ? snapshotJournalAuthority(value.journalAuthority)
+      : null;
   }
 
   async reserveNewIdentity(input) {
@@ -662,10 +1103,329 @@ class ManuscriptUidReservation {
     }
     return value.identityReservation;
   }
+
+  async reserveCreationIdentity(input) {
+    const request = normalizeCreationRequest(input);
+    if (this.#lookupCreation === null) {
+      throw recoveryRequired('creation_reservation_source_incomplete');
+    }
+
+    let durable;
+    try {
+      durable = await this.#lookupCreation(Object.freeze({
+        logicalRequestId: request.logicalRequestId,
+      }));
+    } catch (cause) {
+      throw recoveryRequired('creation_reservation_lookup_unproven', cause);
+    }
+    if (durable !== null) {
+      let creationReservation;
+      try {
+        creationReservation = validateCreationReservationManifest(durable);
+      } catch (cause) {
+        throw recoveryRequired('creation_reservation_resume_unproven', cause);
+      }
+      if (
+        creationReservation.logicalRequestId !== request.logicalRequestId
+        || creationReservation.logicalInputDigest !== request.logicalInputDigest
+        || creationReservation.projectInstanceId !== request.projectInstanceId
+      ) {
+        throw recoveryRequired('creation_reservation_request_binding_changed');
+      }
+      return this.#mintCreationContext(creationReservation);
+    }
+
+    const scope = Object.freeze({
+      projectUid: null,
+      projectInstanceId: request.projectInstanceId,
+      objectKind: 'project',
+    });
+    let catalog;
+    try {
+      catalog = normalizeSourceSnapshot(await this.#enumerateSources(scope), scope);
+    } catch (cause) {
+      throw recoveryRequired('uid_reservation_source_incomplete', cause);
+    }
+
+    for (let attempt = 0; attempt < MAX_UID_ATTEMPTS; attempt += 1) {
+      const creationId = this.#uuidV4();
+      canonicalUuid(creationId, 'uuidV4 creationId result');
+      let projectUid;
+      for (let projectAttempt = 0; projectAttempt < MAX_UID_ATTEMPTS; projectAttempt += 1) {
+        const candidate = this.#uuidV4();
+        canonicalUuid(candidate, 'uuidV4 projectUid result');
+        if (candidate !== creationId && !catalog.has(candidate)) {
+          projectUid = candidate;
+          break;
+        }
+      }
+      if (projectUid === undefined) break;
+
+      let absent;
+      try {
+        absent = normalizeProjectRootObservation(await request.probeRoot(Object.freeze({
+          creationId,
+          projectUid,
+          projectInstanceId: request.projectInstanceId,
+          logicalRequestId: request.logicalRequestId,
+          logicalInputDigest: request.logicalInputDigest,
+        })));
+      } catch (cause) {
+        throw recoveryRequired('creation_project_root_unproven', cause);
+      }
+      if (!absent) continue;
+
+      const projectMaterial = creationProjectReservationMaterial({
+        creationId,
+        logicalInputDigest: request.logicalInputDigest,
+        logicalRequestId: request.logicalRequestId,
+        projectInstanceId: request.projectInstanceId,
+        uid: projectUid,
+      });
+      const material = {
+        domain: CREATION_RESERVATION_DOMAIN,
+        version: CREATION_RESERVATION_VERSION,
+        creationId,
+        projectInstanceId: request.projectInstanceId,
+        logicalRequestId: request.logicalRequestId,
+        logicalInputDigest: request.logicalInputDigest,
+        projectReservation: {
+          uid: projectUid,
+          reservationId: creationReservationId(projectMaterial),
+        },
+      };
+      return this.#mintCreationContext(mintCreationReservationManifest(material));
+    }
+
+    throw manuscriptError('UID_RESERVATION_COLLISION', {
+      attempts: MAX_UID_ATTEMPTS,
+      objectKind: 'project',
+    });
+  }
+
+  assertCreationIdentity(input) {
+    const value = exactObject(
+      input,
+      ['authority', 'creationReservation'],
+      'project creation identity assertion',
+    );
+    validateCreationReservationManifest(value.creationReservation);
+    const context = (
+      (typeof value.authority === 'object' || typeof value.authority === 'function')
+      && value.authority !== null
+    ) ? this.#creationContexts.get(value.authority) : undefined;
+    if (
+      context === undefined
+      || context.creationReservation !== value.creationReservation
+    ) invalid('creation authority and manifest must be the original matching pair');
+    return value.creationReservation;
+  }
+
+  async reserveMigrationIdentities(input) {
+    const request = normalizeMigrationRequest(input);
+    if (this.#journalAuthority === null) {
+      invalid('journalAuthority is required for migration UID reservations');
+    }
+
+    let migrationReserved;
+    try {
+      migrationReserved = await this.#journalAuthority.readMigrationReserved(request.migrationId);
+    } catch (cause) {
+      throw recoveryRequired('migration_reservation_lookup_unproven', cause);
+    }
+    if (migrationReserved !== null) {
+      return this.resumeMigrationIdentities({
+        journalAuthority: this.#journalAuthority,
+        migrationReserved,
+        sourceBasis: request.basis,
+      });
+    }
+
+    const scopes = ['project', 'chapter', 'volume'].map((objectKind) => Object.freeze({
+      projectUid: null,
+      projectInstanceId: request.projectInstanceId,
+      objectKind,
+    }));
+    const catalogs = new Map();
+    try {
+      for (const scope of scopes) {
+        catalogs.set(
+          scope.objectKind,
+          normalizeSourceSnapshot(await this.#enumerateSources(scope), scope),
+        );
+      }
+    } catch (cause) {
+      throw recoveryRequired('uid_reservation_source_incomplete', cause);
+    }
+
+    const generated = new Set();
+    const drawUid = (objectKind) => {
+      for (let attempt = 0; attempt < MAX_UID_ATTEMPTS; attempt += 1) {
+        const uid = this.#uuidV4();
+        canonicalUuid(uid, 'uuidV4 result');
+        if (!generated.has(uid) && !catalogs.get(objectKind).has(uid)) {
+          generated.add(uid);
+          return uid;
+        }
+      }
+      throw manuscriptError('UID_RESERVATION_COLLISION', {
+        attempts: MAX_UID_ATTEMPTS,
+        objectKind,
+      });
+    };
+
+    let projectUid = null;
+    for (let attempt = 0; attempt < MAX_UID_ATTEMPTS; attempt += 1) {
+      const candidate = this.#uuidV4();
+      canonicalUuid(candidate, 'uuidV4 result');
+      if (generated.has(candidate) || catalogs.get('project').has(candidate)) continue;
+      generated.add(candidate);
+      let absent;
+      try {
+        absent = normalizeProjectRootObservation(await request.probeRoot(Object.freeze({
+          migrationId: request.migrationId,
+          projectInstanceId: request.projectInstanceId,
+          sourceBasisDigest: request.sourceBasisDigest,
+          projectUid: candidate,
+        })));
+      } catch (cause) {
+        throw recoveryRequired('migration_project_root_unproven', cause);
+      }
+      if (absent) {
+        projectUid = candidate;
+        break;
+      }
+    }
+    if (projectUid === null) {
+      throw manuscriptError('UID_RESERVATION_COLLISION', {
+        attempts: MAX_UID_ATTEMPTS,
+        objectKind: 'project',
+      });
+    }
+
+    const assignments = [];
+    for (const source of [...request.basis.volumes].sort((left, right) => left.id - right.id)) {
+      const row = {
+        assignmentKind: 'bind_legacy',
+        objectKind: 'volume',
+        uid: drawUid('volume'),
+        id: source.id,
+      };
+      const material = legacyReservationMaterial({
+        migrationId: request.migrationId,
+        projectInstanceId: request.projectInstanceId,
+        sourceBasisDigest: request.sourceBasisDigest,
+        row,
+      });
+      assignments.push({ ...row, reservationId: migrationReservationId(material) });
+    }
+    for (const source of [...request.basis.chapters].sort((left, right) => left.id - right.id)) {
+      const row = {
+        assignmentKind: 'bind_legacy',
+        objectKind: 'chapter',
+        uid: drawUid('chapter'),
+        id: source.id,
+        num: source.num,
+      };
+      const material = legacyReservationMaterial({
+        migrationId: request.migrationId,
+        projectInstanceId: request.projectInstanceId,
+        sourceBasisDigest: request.sourceBasisDigest,
+        row,
+      });
+      assignments.push({ ...row, reservationId: migrationReservationId(material) });
+    }
+    assignments.sort(compareIdentityAssignments);
+    const projectMaterial = projectReservationMaterial({
+      migrationId: request.migrationId,
+      projectInstanceId: request.projectInstanceId,
+      sourceBasisDigest: request.sourceBasisDigest,
+      uid: projectUid,
+    });
+    const migrationReservation = validateMigrationReservationManifest({
+      domain: MIGRATION_RESERVATION_DOMAIN,
+      version: MIGRATION_RESERVATION_VERSION,
+      migrationId: request.migrationId,
+      projectInstanceId: request.projectInstanceId,
+      sourceBasisDigest: request.sourceBasisDigest,
+      projectReservation: {
+        uid: projectUid,
+        reservationId: migrationReservationId(projectMaterial),
+      },
+      localIdentityPlan: assignments,
+    });
+    assertMigrationManifestMatchesBasis(migrationReservation, request.basis);
+    return this.#mintMigrationContext(migrationReservation);
+  }
+
+  async resumeMigrationIdentities(input) {
+    const request = normalizeMigrationSourceBasisInput(input);
+    if (
+      this.#journalAuthority === null
+      || request.journalAuthority !== this.#journalAuthority
+    ) invalid('resume journalAuthority must be the constructor-bound original');
+    try {
+      const descriptor = normalizeMigrationReservedDescription(
+        await this.#journalAuthority.describeMigrationReserved(request.migrationReserved),
+      );
+      const manifest = descriptor.migrationReservation;
+      validateMigrationReservationManifest(manifest);
+      if (
+        descriptor.migrationReservation !== manifest
+        || descriptor.projectUid !== manifest.projectReservation.uid
+        || descriptor.projectInstanceId !== manifest.projectInstanceId
+        || descriptor.migrationId !== manifest.migrationId
+        || descriptor.sourceBasisDigest !== manifest.sourceBasisDigest
+        || descriptor.sourceBasisDigest !== request.sourceBasisDigest
+      ) invalid('migration_reserved description does not match the durable reservation');
+      assertMigrationManifestMatchesBasis(manifest, request.basis);
+      return this.#mintMigrationContext(manifest);
+    } catch (cause) {
+      if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
+      throw recoveryRequired('migration_reservation_resume_unproven', cause);
+    }
+  }
+
+  assertMigrationIdentities(input) {
+    const value = exactObject(input, [
+      'authority',
+      'migrationReservation',
+      'localIdentityPlan',
+    ], 'migration identity assertion');
+    validateMigrationReservationManifest(value.migrationReservation);
+    const context = (
+      (typeof value.authority === 'object' || typeof value.authority === 'function')
+      && value.authority !== null
+    ) ? this.#migrationContexts.get(value.authority) : undefined;
+    if (
+      context === undefined
+      || context.migrationReservation !== value.migrationReservation
+      || context.localIdentityPlan !== value.localIdentityPlan
+      || value.migrationReservation.localIdentityPlan !== value.localIdentityPlan
+    ) invalid('migration authority, manifest, and localIdentityPlan must be the original matching set');
+    return value.localIdentityPlan;
+  }
+
+  #mintMigrationContext(migrationReservation) {
+    const authority = Object.freeze(() => {});
+    this.#migrationContexts.set(authority, Object.freeze({
+      migrationReservation,
+      localIdentityPlan: migrationReservation.localIdentityPlan,
+    }));
+    return Object.freeze({ migrationReservation, authority });
+  }
+
+  #mintCreationContext(creationReservation) {
+    const authority = Object.freeze(() => {});
+    this.#creationContexts.set(authority, Object.freeze({ creationReservation }));
+    return Object.freeze({ creationReservation, authority });
+  }
 }
 
 module.exports = {
   ManuscriptUidReservation,
   canonicalCreateLogicalInputDigest,
+  validateCreationReservationManifest,
   validateIdentityReservationManifest,
+  validateMigrationReservationManifest,
 };

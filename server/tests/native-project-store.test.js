@@ -376,6 +376,26 @@ test('SQL classifier requires every project_meta key mutation to be statically n
     classifyNativeSql("DELETE FROM project_meta WHERE key = 'safe_key'"),
     { kind: 'business_dml', operation: 'DELETE' },
   );
+  for (const key of [
+    'manuscript_route',
+    'manuscript_project_uid',
+    'manuscript_route_journal',
+    'manuscript_projection_generation',
+  ]) {
+    assert.throws(
+      () => classifyNativeSql(`UPDATE project_meta SET value = 'forged' WHERE key = '${key}'`),
+      (error) => error?.code === 'NATIVE_SQL_FORBIDDEN',
+      key,
+    );
+  }
+  assert.throws(
+    () => classifyNativeSql('DELETE FROM chapters WHERE id = ?', { schemaVersion: 12 }),
+    (error) => error?.code === 'NATIVE_SQL_FORBIDDEN',
+  );
+  assert.deepEqual(
+    classifyNativeSql('DELETE FROM chapters WHERE id = ?', { schemaVersion: 11 }),
+    { kind: 'business_dml', operation: 'DELETE' },
+  );
 });
 
 test('database identity guard freezes canonical path and read-only handle identity', (t) => {
@@ -668,6 +688,7 @@ test('testing factory opens exact genesis with the frozen read-only facade and P
     'executeTransaction',
     'recover',
     'checkpoint',
+    'publishProjectionTarget',
     'close',
     'fence',
   ]);

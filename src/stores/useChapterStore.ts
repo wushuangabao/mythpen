@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { t } from '@/i18n'
-import { chaptersApi, volumesApi } from '@/lib/api'
+import { chaptersApi, type ManuscriptBaseWitness, volumesApi } from '@/lib/api'
 import { createChapterDataJournal, shouldApplyChapterDataVersion } from '@/lib/chapterDataJournal'
 import { getChapterDeletionFallbackId } from '@/lib/chapterDeletionFallback'
 import { discardEditorSave } from '@/lib/editorSaveQueue'
@@ -8,7 +8,7 @@ import { createRequestCommitTracker } from '@/lib/requestCommitTracker'
 import { discardTitleSave } from '@/lib/titleSaveQueue'
 import { useProjectStore } from '@/stores/useProjectStore'
 
-interface Chapter {
+export interface Chapter {
   id: number
   volumeId: number
   num: number
@@ -23,6 +23,10 @@ interface Chapter {
   worldTexture?: string
   concreteMystery?: string
   interpersonalTension?: string
+  baseWitness?: ManuscriptBaseWitness
+  chapterUid?: string
+  manuscriptProjectUid?: string
+  projectInstanceId?: string
 }
 
 interface ApiChapterRow {
@@ -40,6 +44,10 @@ interface ApiChapterRow {
   world_texture?: string | null
   concrete_mystery?: string | null
   interpersonal_tension?: string | null
+  base_witness?: ManuscriptBaseWitness
+  chapter_uid?: string | null
+  manuscript_project_uid?: string | null
+  project_instance_id?: string | null
 }
 
 interface Volume {
@@ -76,6 +84,7 @@ interface ChapterState {
     data: Partial<Chapter>,
     chapterId?: number,
     expectedDataVersion?: number,
+    expectedBaseWitness?: ManuscriptBaseWitness,
   ) => Promise<number | undefined>
   createChapter: (project: string, title?: string, outline?: string, volumeId?: number) => Promise<any>
   deleteChapter: (
@@ -149,6 +158,10 @@ function mapApiChapter(chapter: ApiChapterRow): Chapter {
     worldTexture: chapter.world_texture || '',
     concreteMystery: chapter.concrete_mystery || '',
     interpersonalTension: chapter.interpersonal_tension || '',
+    baseWitness: chapter.base_witness,
+    chapterUid: chapter.chapter_uid || undefined,
+    manuscriptProjectUid: chapter.manuscript_project_uid || undefined,
+    projectInstanceId: chapter.project_instance_id || undefined,
   }
 }
 
@@ -426,7 +439,7 @@ export const useChapterStore = create<ChapterState>((set, get) => ({
     return applied
   },
 
-  updateChapter: async (project, num, data, chapterId, expectedDataVersion) => {
+  updateChapter: async (project, num, data, chapterId, expectedDataVersion, expectedBaseWitness) => {
     const projectEpochAtStart = getChapterProjectEpoch(project)
     try {
       const apiData: any = {}
@@ -440,7 +453,20 @@ export const useChapterStore = create<ChapterState>((set, get) => ({
       if (data.concreteMystery !== undefined) apiData.concrete_mystery = data.concreteMystery
       if (data.interpersonalTension !== undefined) apiData.interpersonal_tension = data.interpersonalTension
 
-      const updated = await chaptersApi.update(project, num, apiData, chapterId, expectedDataVersion)
+      const current =
+        get().currentChapter?.id === chapterId
+          ? get().currentChapter
+          : get()
+              .volumes.flatMap((volume) => volume.chapters)
+              .find((chapter) => chapter.id === chapterId)
+      const updated = await chaptersApi.update(
+        project,
+        num,
+        apiData,
+        chapterId,
+        expectedDataVersion,
+        expectedBaseWitness ?? current?.baseWitness,
+      )
       if (getChapterProjectEpoch(project) !== projectEpochAtStart) return
 
       // A queue entry owns a stable chapter id even while A -> B -> A navigation

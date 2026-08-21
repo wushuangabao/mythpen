@@ -481,10 +481,18 @@ export function AIPanel() {
     // This is deliberately the only replay path. It stages an unsaved overlay
     // for the current instance; it does not issue a network write by itself.
     if (draft.content !== undefined) {
-      enqueueEditorSave(project, draft.chapterId, draft.chapterNum, draft.content, targetChapter.dataVersion)
+      enqueueEditorSave(
+        project,
+        draft.chapterId,
+        draft.chapterNum,
+        draft.content,
+        targetChapter.dataVersion,
+        undefined,
+        targetChapter.baseWitness,
+      )
     }
     if (draft.title !== undefined) {
-      stageTitleSave(project, draft.chapterId, draft.chapterNum, draft.title)
+      stageTitleSave(project, draft.chapterId, draft.chapterNum, draft.title, undefined, targetChapter.baseWitness)
     }
     showToast(t('ai.projectDraftRestored'), 'success')
   }
