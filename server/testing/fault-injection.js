@@ -40,6 +40,24 @@ const FAULT_POINTS = Object.freeze({
   CONTROL_STORE_CHECKPOINT_BEFORE_GC_DIR_FSYNC:
     'controlstore.checkpoint.before-gc-dir-fsync',
   CONTROL_STORE_RETIRE_BEFORE_DIR_FSYNC: 'controlstore.retire.before-dir-fsync',
+  FILE_PUBLICATION_AFTER_ASSETS_RESERVED:
+    'file-publication.after-assets-reserved',
+  FILE_PUBLICATION_AFTER_ASSET_CREATE:
+    'file-publication.after-asset-create',
+  FILE_PUBLICATION_AFTER_TARGET_ASSET_CREATE:
+    'file-publication.after-target-asset-create',
+  FILE_PUBLICATION_AFTER_TARGET_RESERVED:
+    'file-publication.after-target-reserved',
+  FILE_PUBLICATION_AFTER_PREPARED:
+    'file-publication.after-prepared',
+  FILE_PUBLICATION_AFTER_RELOCATE:
+    'file-publication.after-relocate',
+  FILE_PUBLICATION_AFTER_FILES_PUBLISHED:
+    'file-publication.after-files-published',
+  FILE_PUBLICATION_AFTER_PROJECTION_PUBLISH:
+    'file-publication.after-projection-publish',
+  FILE_PUBLICATION_AFTER_ASSET_DELETE:
+    'file-publication.after-asset-delete',
   NATIVE_CALLER_AFTER_SOURCE_POSTCHECK: 'native.caller.after-source-postcheck',
   NATIVE_TX_AFTER_PREPARED_POSTCHECK: 'native.tx.after-prepared-postcheck',
   NATIVE_TX_AFTER_BEGIN_ACQUIRED: 'native.tx.after-begin-acquired',

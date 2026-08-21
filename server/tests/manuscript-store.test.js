@@ -4,11 +4,8 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const { LIMITS } = require('../manuscript/contracts');
-const {
-  ManuscriptStore,
-  createFileBoundaryCapability,
-  createJournalAuthorityCapability,
-} = require('../manuscript/store');
+const storeModule = require('../manuscript/store');
+const { ManuscriptStore } = storeModule;
 const {
   CHAPTER_UID,
   PROJECT_UID,
@@ -56,8 +53,8 @@ function validationOptions(fixture, overrides = {}) {
 
 test('ManuscriptStore exposes only explicit read capabilities and has no filesystem fallback', () => {
   assert.equal(typeof ManuscriptStore, 'function');
-  assert.equal(typeof createFileBoundaryCapability, 'function');
-  assert.equal(typeof createJournalAuthorityCapability, 'function');
+  assert.equal(storeModule.createFileBoundaryCapability, undefined);
+  assert.equal(storeModule.createJournalAuthorityCapability, undefined);
   const fixture = createManuscriptTreeFixture();
   assert.throws(
     () => new ManuscriptStore({
@@ -77,8 +74,6 @@ test('ManuscriptStore exposes only explicit read capabilities and has no filesys
     }),
     TypeError,
   );
-  assert.throws(() => createFileBoundaryCapability({}), TypeError);
-  assert.throws(() => createJournalAuthorityCapability({}), TypeError);
   const store = createStore(fixture);
   assert.equal(store.buildClosure, undefined);
 });

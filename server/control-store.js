@@ -18,6 +18,7 @@ const INCARNATION_TEMP_PATTERN = /^\.controlstore-incarnation-[0-9a-f]{8}-[0-9a-
 const INCARNATION_VERSION = 1;
 const WRITER_LOCK_NAME = '.controlstore-writer.lock';
 const SQLITE_RECOVERY_DIR_NAME = 'sqlite-recovery';
+const MANUSCRIPT_FILE_ASSETS_DIR_NAME = 'file-assets';
 const BOUNDED_CONTROL_PROTOCOL_EPOCH = 2;
 const BOUNDED_TAIL_FILE_NAME = '.controlstore-tail.json';
 const BOUNDED_TAIL_CANDIDATE_PATTERN = /^\.controlstore-tail-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.tmp$/;
@@ -1405,14 +1406,18 @@ function readBoundedActiveEvents(controlDir, tail, options = {}) {
       if (allowTailCandidates && BOUNDED_TAIL_CANDIDATE_PATTERN.test(name)) continue;
       throw recoveryRequired(`Control store has an unresolved bounded candidate: ${name}`);
     }
-    if (name === SQLITE_RECOVERY_DIR_NAME) {
-      const recoveryDirectory = path.join(controlDir, name);
+    if (
+      name === SQLITE_RECOVERY_DIR_NAME
+      || name === MANUSCRIPT_FILE_ASSETS_DIR_NAME
+    ) {
+      const reservedDirectory = path.join(controlDir, name);
+      const label = name === SQLITE_RECOVERY_DIR_NAME ? 'recovery' : 'manuscript file-assets';
       const stats = runIo(
-        `inspecting recovery directory ${recoveryDirectory}`,
-        () => fs.lstatSync(recoveryDirectory),
+        `inspecting ${label} directory ${reservedDirectory}`,
+        () => fs.lstatSync(reservedDirectory),
       );
       if (!stats.isDirectory() || stats.isSymbolicLink()) {
-        throw corrupt(`Control store recovery entry is not a plain directory: ${name}`);
+        throw corrupt(`Control store ${label} entry is not a plain directory: ${name}`);
       }
       continue;
     }
@@ -2030,14 +2035,18 @@ function readEvents(controlDir) {
   );
   for (const name of names) {
     if (name === INCARNATION_FILE_NAME) continue;
-    if (name === SQLITE_RECOVERY_DIR_NAME) {
-      const recoveryDirectory = path.join(controlDir, name);
+    if (
+      name === SQLITE_RECOVERY_DIR_NAME
+      || name === MANUSCRIPT_FILE_ASSETS_DIR_NAME
+    ) {
+      const reservedDirectory = path.join(controlDir, name);
+      const label = name === SQLITE_RECOVERY_DIR_NAME ? 'recovery' : 'manuscript file-assets';
       const stats = runIo(
-        `inspecting recovery directory ${recoveryDirectory}`,
-        () => fs.lstatSync(recoveryDirectory),
+        `inspecting ${label} directory ${reservedDirectory}`,
+        () => fs.lstatSync(reservedDirectory),
       );
       if (!stats.isDirectory() || stats.isSymbolicLink()) {
-        throw corrupt(`Control store recovery entry is not a plain directory: ${name}`);
+        throw corrupt(`Control store ${label} entry is not a plain directory: ${name}`);
       }
       continue;
     }

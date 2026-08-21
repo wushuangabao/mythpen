@@ -96,9 +96,15 @@ function getBackend() {
     backend = {
       backend: process.platform === 'win32' ? 'win32' : 'posix',
       acquireExclusiveLease: unsupportedOperation,
+      createAssetVerified: unsupportedOperation,
+      deleteVerified: unsupportedOperation,
+      enumerateDirectoryVerified: unsupportedOperation,
       fsyncFile: unsupportedOperation,
       fsyncDirectory: unsupportedOperation,
+      inspectPath: unsupportedOperation,
       installAbsentFromVerifiedSource: unsupportedOperation,
+      readVerified: unsupportedOperation,
+      relocateVerifiedToAbsent: unsupportedOperation,
       rename: unsupportedOperation,
     };
   }
@@ -115,6 +121,22 @@ function fsyncFile(filePath) {
 
 function fsyncDirectory(dirPath) {
   return getBackend().fsyncDirectory(dirPath);
+}
+
+function enumerateDirectoryVerified(dirPath, expectedIdentity) {
+  const identity = snapshotVerifiedIdentity(
+    expectedIdentity,
+    'Enumerated directory identity',
+  );
+  const activeBackend = getBackend();
+  if (typeof activeBackend.enumerateDirectoryVerified !== 'function') return unsupportedOperation();
+  const names = activeBackend.enumerateDirectoryVerified(dirPath, identity);
+  if (!Array.isArray(names) || names.some((name) => typeof name !== 'string')) {
+    throw new VerifiedSourceTopologyError(
+      `Verified directory enumeration returned invalid names: ${dirPath}`,
+    );
+  }
+  return Object.freeze([...names]);
 }
 
 function installAbsentFromVerifiedSource(sourcePath, targetPath, expectedIdentity, expectedSha256) {
@@ -141,6 +163,384 @@ function installAbsentFromVerifiedSource(sourcePath, targetPath, expectedIdentit
   );
 }
 
+function createAssetVerified(filePath, expected) {
+  if (
+    typeof filePath !== 'string'
+    || filePath.length === 0
+    || filePath.includes('\0')
+    || !path.isAbsolute(filePath)
+    || path.resolve(filePath) !== filePath
+    || expected === null
+    || typeof expected !== 'object'
+    || Array.isArray(expected)
+    || Object.keys(expected).sort().join(',') !== 'byteSize,bytes,parentIdentity,sha256'
+    || (!Buffer.isBuffer(expected.bytes) && !(expected.bytes instanceof Uint8Array))
+    || !Number.isSafeInteger(expected.byteSize)
+    || expected.byteSize < 0
+    || typeof expected.sha256 !== 'string'
+    || !SHA256_PATTERN.test(expected.sha256)
+  ) {
+    throw new TypeError('createAssetVerified input is invalid');
+  }
+  const bytes = Buffer.from(expected.bytes);
+  if (
+    bytes.length !== expected.byteSize
+    || crypto.createHash('sha256').update(bytes).digest('hex') !== expected.sha256
+  ) {
+    throw new TypeError('createAssetVerified bytes do not match the expected facts');
+  }
+  const facts = Object.freeze({
+    byteSize: bytes.length,
+    bytes,
+    parentIdentity: snapshotVerifiedIdentity(
+      expected.parentIdentity,
+      'Verified asset parent identity',
+    ),
+    sha256: expected.sha256,
+  });
+  const activeBackend = getBackend();
+  if (typeof activeBackend.createAssetVerified !== 'function') return unsupportedOperation();
+  const result = activeBackend.createAssetVerified(filePath, facts);
+  if (
+    result?.byteSize !== facts.byteSize
+    || result.fileFsync !== true
+    || result.parentFsync !== true
+    || result.sha256 !== facts.sha256
+  ) {
+    const error = new VerifiedInstallError(`Verified asset creation disposition is uncertain: ${filePath}`);
+    error.created = true;
+    throw error;
+  }
+  let identity;
+  try {
+    identity = snapshotVerifiedIdentity(result.identity, 'Created asset identity');
+  } catch (error) {
+    error.created = true;
+    throw error;
+  }
+  let reopened;
+  try {
+    reopened = readVerified(filePath, {
+      byteSize: facts.byteSize,
+      disposition: 'present',
+      identity,
+      parentIdentity: facts.parentIdentity,
+      sha256: facts.sha256,
+    });
+  } catch (error) {
+    error.created = true;
+    throw error;
+  }
+  return Object.freeze({
+    byteSize: reopened.byteSize,
+    fileFsync: true,
+    identity: reopened.identity,
+    parentFsync: true,
+    parentIdentity: facts.parentIdentity,
+    sha256: reopened.sha256,
+  });
+}
+
+function snapshotVerifiedIdentity(value, label) {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || Object.keys(value).length !== 2
+    || typeof value.dev !== 'string'
+    || !/^\d+$/.test(value.dev)
+    || typeof value.ino !== 'string'
+    || !/^\d+$/.test(value.ino)
+  ) {
+    throw new VerifiedSourceMismatchError(`${label} must contain exact dev and ino strings`);
+  }
+  return Object.freeze({ dev: value.dev, ino: value.ino });
+}
+
+function sameIdentity(left, right) {
+  return (
+    left !== null
+    && typeof left === 'object'
+    && right !== null
+    && typeof right === 'object'
+    && left.dev === right.dev
+    && left.ino === right.ino
+  );
+}
+
+function snapshotVerifiedReadFacts(expected) {
+  if (
+    expected !== null
+    && typeof expected === 'object'
+    && !Array.isArray(expected)
+    && Object.keys(expected).sort().join(',') === 'disposition,parentIdentity'
+    && expected.disposition === 'absent'
+  ) {
+    return Object.freeze({
+      disposition: 'absent',
+      parentIdentity: snapshotVerifiedIdentity(
+        expected.parentIdentity,
+        'Verified source parent identity',
+      ),
+    });
+  }
+  if (
+    expected === null
+    || typeof expected !== 'object'
+    || Array.isArray(expected)
+    || Object.keys(expected).sort().join(',') !== 'byteSize,disposition,identity,parentIdentity,sha256'
+    || expected.disposition !== 'present'
+    || !Number.isSafeInteger(expected.byteSize)
+    || expected.byteSize < 0
+    || typeof expected.sha256 !== 'string'
+    || !SHA256_PATTERN.test(expected.sha256)
+  ) {
+    throw new VerifiedSourceMismatchError(
+      'Verified read facts must contain exact byteSize, identity, parentIdentity, and SHA-256',
+    );
+  }
+  return Object.freeze({
+    byteSize: expected.byteSize,
+    disposition: 'present',
+    identity: snapshotVerifiedIdentity(expected.identity, 'Verified source identity'),
+    parentIdentity: snapshotVerifiedIdentity(
+      expected.parentIdentity,
+      'Verified source parent identity',
+    ),
+    sha256: expected.sha256,
+  });
+}
+
+function readVerified(filePath, expected) {
+  const facts = snapshotVerifiedReadFacts(expected);
+  const activeBackend = getBackend();
+  if (typeof activeBackend.readVerified !== 'function') return unsupportedOperation();
+  const result = activeBackend.readVerified(filePath, facts);
+  if (facts.disposition === 'absent') {
+    if (result?.disposition !== 'ABSENT') {
+      throw new VerifiedSourceMismatchError(`Unable to prove verified source absence: ${filePath}`);
+    }
+    return Object.freeze({ disposition: 'ABSENT' });
+  }
+  let resultBytes;
+  try {
+    if (!Buffer.isBuffer(result?.bytes) && !(result?.bytes instanceof Uint8Array)) {
+      throw new TypeError('verified read bytes are invalid');
+    }
+    resultBytes = Buffer.from(result.bytes);
+  } catch (cause) {
+    throw new VerifiedSourceMismatchError(
+      `Verified source read result is invalid: ${filePath}`,
+      { cause },
+    );
+  }
+  if (
+    result?.byteSize !== facts.byteSize
+    || resultBytes.length !== facts.byteSize
+    || result.sha256 !== facts.sha256
+    || crypto.createHash('sha256').update(resultBytes).digest('hex') !== facts.sha256
+    || !sameIdentity(result.identity, facts.identity)
+  ) {
+    throw new VerifiedSourceMismatchError(
+      `Verified source result no longer matches the expected facts: ${filePath}`,
+    );
+  }
+  return Object.freeze({
+    byteSize: facts.byteSize,
+    bytes: resultBytes,
+    disposition: 'PRESENT',
+    identity: facts.identity,
+    parentIdentity: facts.parentIdentity,
+    sha256: facts.sha256,
+  });
+}
+
+function inspectPath(targetPath) {
+  const activeBackend = getBackend();
+  if (typeof activeBackend.inspectPath !== 'function') return unsupportedOperation();
+  return activeBackend.inspectPath(targetPath);
+}
+
+function readObserved(filePath, expected) {
+  if (
+    expected === null
+    || typeof expected !== 'object'
+    || Array.isArray(expected)
+    || Object.keys(expected).sort().join(',') !== 'byteSize,identity,parentIdentity'
+    || !Number.isSafeInteger(expected.byteSize)
+    || expected.byteSize < 0
+  ) {
+    throw new VerifiedSourceMismatchError(
+      'Observed read facts must contain exact byteSize, identity, and parentIdentity',
+    );
+  }
+  const facts = Object.freeze({
+    byteSize: expected.byteSize,
+    identity: snapshotVerifiedIdentity(expected.identity, 'Observed source identity'),
+    parentIdentity: snapshotVerifiedIdentity(
+      expected.parentIdentity,
+      'Observed source parent identity',
+    ),
+    sha256: null,
+  });
+  const activeBackend = getBackend();
+  if (typeof activeBackend.readVerified !== 'function') return unsupportedOperation();
+  const result = activeBackend.readVerified(filePath, facts);
+  if (result?.byteSize !== facts.byteSize) {
+    throw new VerifiedSourceMismatchError(
+      `Observed source length no longer matches the expected facts: ${filePath}`,
+    );
+  }
+  return Object.freeze({
+    byteSize: result.byteSize,
+    bytes: Buffer.from(result.bytes),
+    identity: Object.freeze({ ...result.identity }),
+    parentIdentity: facts.parentIdentity,
+    sha256: result.sha256,
+  });
+}
+
+function relocateVerifiedToAbsent(sourcePath, targetPath, expected) {
+  if (
+    expected === null
+    || typeof expected !== 'object'
+    || Array.isArray(expected)
+    || Object.keys(expected).sort().join(',')
+      !== 'byteSize,identity,sha256,sourceParentIdentity,targetParentIdentity'
+    || !Number.isSafeInteger(expected.byteSize)
+    || expected.byteSize < 0
+    || typeof expected.sha256 !== 'string'
+    || !SHA256_PATTERN.test(expected.sha256)
+  ) {
+    throw new VerifiedSourceMismatchError('Verified relocation facts are invalid');
+  }
+  const facts = Object.freeze({
+    byteSize: expected.byteSize,
+    identity: snapshotVerifiedIdentity(expected.identity, 'Verified relocation identity'),
+    sha256: expected.sha256,
+    sourceParentIdentity: snapshotVerifiedIdentity(
+      expected.sourceParentIdentity,
+      'Verified source parent identity',
+    ),
+    targetParentIdentity: snapshotVerifiedIdentity(
+      expected.targetParentIdentity,
+      'Verified target parent identity',
+    ),
+  });
+  const sourceParent = path.dirname(sourcePath);
+  const targetParent = path.dirname(targetPath);
+  const sourceParentBefore = inspectPath(sourceParent);
+  const targetParentBefore = inspectPath(targetParent);
+  if (
+    !sameIdentity(sourceParentBefore.identity, facts.sourceParentIdentity)
+    || !sameIdentity(targetParentBefore.identity, facts.targetParentIdentity)
+    || facts.identity.dev !== facts.sourceParentIdentity.dev
+    || facts.identity.dev !== facts.targetParentIdentity.dev
+  ) {
+    throw new VerifiedSourceTopologyError(
+      `Verified relocation parents are not one physical volume: ${sourcePath} -> ${targetPath}`,
+    );
+  }
+  const activeBackend = getBackend();
+  if (typeof activeBackend.relocateVerifiedToAbsent !== 'function') return unsupportedOperation();
+  const result = retryTargetLock(
+    () => activeBackend.relocateVerifiedToAbsent(sourcePath, targetPath, facts),
+    'Verified relocation source',
+    sourcePath,
+  );
+  if (
+    result?.byteSize !== facts.byteSize
+    || result.relocated !== true
+    || result.sha256 !== facts.sha256
+    || !sameIdentity(result.identity, facts.identity)
+    || result.sourceParentFsync !== true
+    || result.targetParentFsync !== true
+  ) {
+    const error = new VerifiedSourceMismatchError(
+      `Relocated source no longer matches the expected durable facts: ${targetPath}`,
+    );
+    error.relocated = result?.relocated === true;
+    throw error;
+  }
+  try {
+    readVerified(targetPath, {
+      byteSize: facts.byteSize,
+      disposition: 'present',
+      identity: facts.identity,
+      parentIdentity: facts.targetParentIdentity,
+      sha256: facts.sha256,
+    });
+  } catch (error) {
+    error.relocated = true;
+    throw error;
+  }
+  return Object.freeze({
+    byteSize: facts.byteSize,
+    identity: facts.identity,
+    relocated: true,
+    sha256: facts.sha256,
+    sourceParentFsync: true,
+    sourceParentIdentity: facts.sourceParentIdentity,
+    targetParentFsync: true,
+    targetParentIdentity: facts.targetParentIdentity,
+  });
+}
+
+function deleteVerified(filePath, expected) {
+  if (
+    expected === null
+    || typeof expected !== 'object'
+    || Array.isArray(expected)
+    || Object.keys(expected).sort().join(',') !== 'byteSize,identity,parentIdentity,sha256'
+    || !Number.isSafeInteger(expected.byteSize)
+    || expected.byteSize < 0
+    || typeof expected.sha256 !== 'string'
+    || !SHA256_PATTERN.test(expected.sha256)
+  ) {
+    throw new VerifiedSourceMismatchError('Verified delete facts are invalid');
+  }
+  const facts = Object.freeze({
+    byteSize: expected.byteSize,
+    identity: snapshotVerifiedIdentity(expected.identity, 'Verified delete identity'),
+    parentIdentity: snapshotVerifiedIdentity(
+      expected.parentIdentity,
+      'Verified delete parent identity',
+    ),
+    sha256: expected.sha256,
+  });
+  const activeBackend = getBackend();
+  if (typeof activeBackend.deleteVerified !== 'function') return unsupportedOperation();
+  const result = retryTargetLock(
+    () => activeBackend.deleteVerified(filePath, facts),
+    'Verified delete source',
+    filePath,
+  );
+  if (result?.alreadyAbsent === true && result.deleted === false) {
+    return Object.freeze({
+      alreadyAbsent: true,
+      deleted: false,
+      parentFsync: false,
+      parentIdentity: facts.parentIdentity,
+    });
+  }
+  if (
+    result?.deleted !== true
+    || result.parentFsync !== true
+    || !sameIdentity(result.identity, facts.identity)
+  ) {
+    const error = new VerifiedInstallError(`Verified delete disposition is uncertain: ${filePath}`);
+    error.deleted = result?.deleted === true;
+    throw error;
+  }
+  return Object.freeze({
+    alreadyAbsent: false,
+    deleted: true,
+    identity: facts.identity,
+    parentFsync: true,
+    parentIdentity: facts.parentIdentity,
+  });
+}
+
 function validateAtomicReplaceOptions(options) {
   if (options === undefined) return { attempts: 5, backoffMs: 20 };
   if (options === null || typeof options !== 'object' || Array.isArray(options)) {
@@ -161,6 +561,31 @@ function validateAtomicReplaceOptions(options) {
 function sleepSync(milliseconds) {
   if (milliseconds <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function retryTargetLock(operation, label, targetPath) {
+  const { attempts, backoffMs } = validateAtomicReplaceOptions();
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return operation();
+    } catch (error) {
+      if (
+        error?.code !== 'TARGET_LOCKED'
+        || error.relocated === true
+        || error.deleted === true
+      ) {
+        throw error;
+      }
+      if (attempt === attempts) {
+        throw new TargetLockedError(
+          `${label} remained locked after ${attempts} attempts: ${targetPath}`,
+          { cause: error },
+        );
+      }
+      sleepSync(backoffMs * attempt);
+    }
+  }
+  throw new TargetLockedError(`${label} remained locked: ${targetPath}`);
 }
 
 function atomicReplace(tempPath, targetPath, options) {
@@ -376,8 +801,15 @@ module.exports = {
   acquireExclusiveLease,
   assertDurabilitySupported,
   atomicReplace,
+  createAssetVerified,
   detectCapabilities,
+  deleteVerified,
+  enumerateDirectoryVerified,
   fsyncDirectory,
   fsyncFile,
+  inspectPath,
   installAbsentFromVerifiedSource,
+  readObserved,
+  readVerified,
+  relocateVerifiedToAbsent,
 };

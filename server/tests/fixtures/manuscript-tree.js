@@ -3,9 +3,9 @@
 const path = require('node:path');
 
 const {
-  createFileBoundaryCapability,
-  createJournalAuthorityCapability,
-} = require('../../manuscript/store');
+  createTestFileBoundaryCapability,
+  createTestJournalAuthorityCapability,
+} = require('../../testing/manuscript-capability-mint');
 const {
   deriveControlledFileRef,
   deriveManuscriptPaths,
@@ -248,7 +248,7 @@ function createManuscriptTreeFixture({ dataRoot, largeChapterPairs = 0 } = {}) {
     return key === undefined ? null : (files.get(key) || null);
   }
 
-  const fileBoundary = createFileBoundaryCapability({
+  const fileBoundary = createTestFileBoundaryCapability({
     async inspectDirectory({ directoryRole }) {
       counters.directoryInspects.push(directoryRole);
       const observation = directoryObservation(directoryRole);
@@ -356,7 +356,7 @@ function createManuscriptTreeFixture({ dataRoot, largeChapterPairs = 0 } = {}) {
     return `${projectUid}|${journalId}|${refKey(targetRef)}|${actualName}`;
   }
 
-  const journalAuthority = createJournalAuthorityCapability({
+  const journalAuthority = createTestJournalAuthorityCapability({
     async resolveCandidate(input) {
       counters.authorityLookups.push({
         actualName: input.actualName,

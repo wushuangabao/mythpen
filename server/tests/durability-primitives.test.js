@@ -19,10 +19,13 @@ const {
   acquireExclusiveLease,
   assertDurabilitySupported,
   atomicReplace,
+  deleteVerified,
   detectCapabilities,
   fsyncDirectory,
   fsyncFile,
   installAbsentFromVerifiedSource,
+  readVerified,
+  relocateVerifiedToAbsent,
 } = require('../platform/durability');
 const { createPosixBackend } = require('../platform/durability-posix');
 const { createWin32Backend } = require('../platform/durability-win32');
@@ -72,13 +75,17 @@ function readableKernel32(overrides, bytes = VERIFIED_SOURCE_BYTES) {
 
 function writeWin32FileInformation(buffer, {
   attributes = 0x00000020,
+  byteSize = 0,
   dev,
   ino,
   links = 1,
 }) {
+  const size = BigInt(byteSize);
   const fileId = BigInt(ino);
   buffer.writeUInt32LE(attributes, 0);
   buffer.writeUInt32LE(Number(BigInt(dev)), 28);
+  buffer.writeUInt32LE(Number((size >> 32n) & 0xffffffffn), 32);
+  buffer.writeUInt32LE(Number(size & 0xffffffffn), 36);
   buffer.writeUInt32LE(links, 40);
   buffer.writeUInt32LE(Number((fileId >> 32n) & 0xffffffffn), 44);
   buffer.writeUInt32LE(Number(fileId & 0xffffffffn), 48);
@@ -125,6 +132,23 @@ function createTempDir(t, prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+function withIsolatedWin32Durability(createBackend, run) {
+  const durabilityPath = require.resolve('../platform/durability');
+  const win32Path = require.resolve('../platform/durability-win32');
+  const cachedDurability = require.cache[durabilityPath];
+  const win32Module = require(win32Path);
+  const originalFactory = win32Module.createWin32Backend;
+  win32Module.createWin32Backend = createBackend;
+  delete require.cache[durabilityPath];
+  try {
+    return run(require(durabilityPath));
+  } finally {
+    delete require.cache[durabilityPath];
+    win32Module.createWin32Backend = originalFactory;
+    if (cachedDurability !== undefined) require.cache[durabilityPath] = cachedDurability;
+  }
 }
 
 function waitForLine(child, expected, timeoutMs = 10_000) {
@@ -252,6 +276,1217 @@ test('file and directory fsync complete on the active backend', (t) => {
 
   fsyncFile(filePath);
   fsyncDirectory(dir);
+});
+
+test('manuscript verified read pins one no-delete-share handle and returns its exact bytes', () => {
+  const sourcePath = 'C:\\controlled\\chapter.md';
+  const expectedIdentity = { dev: '211', ino: '223' };
+  const bytes = Buffer.from('handle-bound manuscript bytes');
+  const calls = {};
+  let readOffset = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(source, desiredAccess, shareMode, security, disposition, flags, template) {
+        calls.open = {
+          source: decodeWideString(source),
+          desiredAccess,
+          shareMode,
+          security,
+          disposition,
+          flags,
+          template,
+        };
+        return 201n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        calls.informationCalls = (calls.informationCalls || 0) + 1;
+        writeWin32FileInformation(information, {
+          ...expectedIdentity,
+          byteSize: bytes.length,
+        });
+        return 1;
+      },
+      ReadFile(handle, output, requested, bytesRead) {
+        const count = Math.min(requested, bytes.length - readOffset);
+        bytes.copy(output, 0, readOffset, readOffset + count);
+        bytesRead.writeUInt32LE(count, 0);
+        readOffset += count;
+        return 1;
+      },
+      CloseHandle(handle) {
+        calls.closed = handle;
+        return 1;
+      },
+      GetLastError: () => 0,
+    },
+    ptr: (value) => value,
+    realpathSync: (value) => value,
+  });
+
+  const result = backend.readVerified(sourcePath, {
+    identity: expectedIdentity,
+    sha256: sha256(bytes),
+  });
+
+  assert.deepEqual(result, {
+    byteSize: bytes.length,
+    bytes,
+    identity: expectedIdentity,
+    sha256: sha256(bytes),
+  });
+  assert.notStrictEqual(result.bytes, bytes);
+  assert.deepEqual(calls.open, {
+    source: path.win32.toNamespacedPath(sourcePath),
+    desiredAccess: 0x80000080,
+    shareMode: 0x00000001,
+    security: 0,
+    disposition: 3,
+    flags: 0x00200000,
+    template: 0,
+  });
+  assert.equal(calls.informationCalls, 2);
+  assert.equal(calls.closed, 201n);
+});
+
+test('manuscript verified read rejects a changed parent before reading the file', () => {
+  const sourcePath = 'C:\\controlled\\chapter.md';
+  const expectedIdentity = { dev: '211', ino: '223' };
+  const expectedParentIdentity = { dev: '211', ino: '227' };
+  const bytes = Buffer.from('must remain unread');
+  let readOffset = 0;
+  let readCalls = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(target) {
+        return decodeWideString(target) === path.win32.toNamespacedPath(path.win32.dirname(sourcePath))
+          ? 211n
+          : 212n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, handle === 211n
+          ? { dev: '211', ino: '229', attributes: 0x00000010 }
+          : { ...expectedIdentity, byteSize: bytes.length });
+        return 1;
+      },
+      ReadFile(handle, output, requested, bytesRead) {
+        readCalls += 1;
+        const count = Math.min(requested, bytes.length - readOffset);
+        bytes.copy(output, 0, readOffset, readOffset + count);
+        bytesRead.writeUInt32LE(count, 0);
+        readOffset += count;
+        return 1;
+      },
+      CloseHandle: () => 1,
+      GetLastError: () => 0,
+    },
+    ptr: (value) => value,
+    realpathSync: (value) => value,
+  });
+
+  assert.throws(
+    () => backend.readVerified(sourcePath, {
+      identity: expectedIdentity,
+      parentIdentity: expectedParentIdentity,
+      sha256: sha256(bytes),
+    }),
+    { code: 'VERIFIED_SOURCE_TOPOLOGY_CHANGED' },
+  );
+  assert.equal(readCalls, 0);
+});
+
+test('manuscript verified create flushes its already pinned parent handle before close', (t) => {
+  const parentPath = createTempDir(t, 'mythpen-create-pinned-parent-');
+  const assetPath = path.join(parentPath, 'staged-after.bin');
+  const parentIdentity = fileIdentity(parentPath);
+  const bytes = Buffer.from('create with pinned parent');
+  const events = [];
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW() {
+        events.push('open-parent:231');
+        return 231n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        assert.equal(handle, 231n);
+        writeWin32FileInformation(information, {
+          ...parentIdentity,
+          attributes: 0x00000010,
+        });
+        return 1;
+      },
+      FlushFileBuffers(handle) {
+        events.push(`flush:${handle}`);
+        return 1;
+      },
+      CloseHandle(handle) {
+        events.push(`close:${handle}`);
+        return 1;
+      },
+      GetLastError: () => 0,
+    },
+    ptr: (value) => value,
+  });
+
+  const result = backend.createAssetVerified(assetPath, {
+    byteSize: bytes.length,
+    bytes,
+    parentIdentity,
+    sha256: sha256(bytes),
+  });
+
+  assert.deepEqual(result, {
+    byteSize: bytes.length,
+    fileFsync: true,
+    identity: fileIdentity(assetPath),
+    parentFsync: true,
+    sha256: sha256(bytes),
+  });
+  assert.deepEqual(events, ['open-parent:231', 'flush:231', 'close:231']);
+});
+
+test('manuscript verified create marks every pinned flush or close fault as created', (t) => {
+  const parentPath = createTempDir(t, 'mythpen-create-disposition-');
+  const parentIdentity = fileIdentity(parentPath);
+  const bytes = Buffer.from('created despite postcheck fault');
+  for (const fault of ['flush', 'close']) {
+    const assetPath = path.join(parentPath, `${fault}.bin`);
+    let lastError = 0;
+    const backend = createWin32Backend(durabilityErrors, {
+      kernel32: {
+        CreateFileW: () => 232n,
+        GetFileInformationByHandle(handle, information) {
+          writeWin32FileInformation(information, {
+            ...parentIdentity,
+            attributes: 0x00000010,
+          });
+          return 1;
+        },
+        FlushFileBuffers() {
+          if (fault !== 'flush') return 1;
+          lastError = 5;
+          return 0;
+        },
+        CloseHandle() {
+          if (fault !== 'close') return 1;
+          lastError = 6;
+          return 0;
+        },
+        GetLastError: () => lastError,
+      },
+      ptr: (value) => value,
+    });
+
+    assert.throws(
+      () => backend.createAssetVerified(assetPath, {
+        byteSize: bytes.length,
+        bytes,
+        parentIdentity,
+        sha256: sha256(bytes),
+      }),
+      (error) => error.created === true,
+    );
+    assert.equal(fs.existsSync(assetPath), true);
+  }
+});
+
+test('manuscript verified relocate pins the destination parent and never enables replacement', () => {
+  const sourcePath = 'C:\\articles\\chapter.md';
+  const targetPath = 'C:\\recovery\\displaced-before.bin';
+  const sourceParentPath = path.win32.dirname(sourcePath);
+  const targetParentPath = path.win32.dirname(targetPath);
+  const expectedIdentity = { dev: '211', ino: '223' };
+  const expectedSourceParentIdentity = { dev: '211', ino: '225' };
+  const expectedTargetParentIdentity = { dev: '211', ino: '227' };
+  const bytes = Buffer.from('relocated manuscript bytes');
+  const calls = { closes: [], events: [], opens: [] };
+  let readOffset = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(target, desiredAccess, shareMode, security, disposition, flags, template) {
+        const decoded = decodeWideString(target);
+        calls.opens.push({ decoded, desiredAccess, shareMode, security, disposition, flags, template });
+        if (decoded === path.win32.toNamespacedPath(targetParentPath)) return 203n;
+        if (decoded === path.win32.toNamespacedPath(sourceParentPath)) return 204n;
+        return 202n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        if (handle === 203n) {
+          writeWin32FileInformation(information, {
+            ...expectedTargetParentIdentity,
+            attributes: 0x00000010,
+          });
+        } else if (handle === 204n) {
+          writeWin32FileInformation(information, {
+            ...expectedSourceParentIdentity,
+            attributes: 0x00000010,
+          });
+        } else {
+          writeWin32FileInformation(information, {
+            ...expectedIdentity,
+            byteSize: bytes.length,
+          });
+        }
+        return 1;
+      },
+      ReadFile(handle, output, requested, bytesRead) {
+        assert.equal(handle, 202n);
+        const count = Math.min(requested, bytes.length - readOffset);
+        bytes.copy(output, 0, readOffset, readOffset + count);
+        bytesRead.writeUInt32LE(count, 0);
+        readOffset += count;
+        return 1;
+      },
+      SetFileInformationByHandle(handle, informationClass, information, byteLength) {
+        calls.events.push(`relocate:${handle}`);
+        calls.relocate = {
+          handle,
+          informationClass,
+          byteLength,
+          replaceIfExists: information.readUInt32LE(0),
+          rootDirectory: information.readBigUInt64LE(8),
+          target: information.subarray(20, 20 + information.readUInt32LE(16)).toString('utf16le'),
+        };
+        return 1;
+      },
+      FlushFileBuffers(handle) {
+        calls.events.push(`flush:${handle}`);
+        return 1;
+      },
+      CloseHandle(handle) {
+        calls.closes.push(handle);
+        calls.events.push(`close:${handle}`);
+        return 1;
+      },
+      GetLastError: () => 0,
+    },
+    ptr: (value) => value,
+    realpathSync: (value) => value,
+  });
+
+  assert.deepEqual(
+    backend.relocateVerifiedToAbsent(sourcePath, targetPath, {
+      byteSize: bytes.length,
+      identity: expectedIdentity,
+      sha256: sha256(bytes),
+      sourceParentIdentity: expectedSourceParentIdentity,
+      targetParentIdentity: expectedTargetParentIdentity,
+    }),
+    {
+      byteSize: bytes.length,
+      identity: expectedIdentity,
+      relocated: true,
+      sha256: sha256(bytes),
+      sourceParentFsync: true,
+      targetParentFsync: true,
+    },
+  );
+  assert.deepEqual(calls.opens, [
+    {
+      decoded: path.win32.toNamespacedPath(targetParentPath),
+      desiredAccess: 0xc0000000,
+      shareMode: 0x00000003,
+      security: 0,
+      disposition: 3,
+      flags: 0x02200000,
+      template: 0,
+    },
+    {
+      decoded: path.win32.toNamespacedPath(sourceParentPath),
+      desiredAccess: 0xc0000000,
+      shareMode: 0x00000003,
+      security: 0,
+      disposition: 3,
+      flags: 0x02200000,
+      template: 0,
+    },
+    {
+      decoded: path.win32.toNamespacedPath(sourcePath),
+      desiredAccess: 0x80010080,
+      shareMode: 0x00000001,
+      security: 0,
+      disposition: 3,
+      flags: 0x00200000,
+      template: 0,
+    },
+  ]);
+  assert.deepEqual(calls.relocate, {
+    handle: 202n,
+    informationClass: 3,
+    byteLength: 20 + Buffer.byteLength(path.win32.toNamespacedPath(targetPath), 'utf16le') + 2,
+    replaceIfExists: 0,
+    rootDirectory: 0n,
+    target: path.win32.toNamespacedPath(targetPath),
+  });
+  assert.deepEqual(calls.closes, [202n, 204n, 203n]);
+  assert.deepEqual(calls.events, [
+    'relocate:202',
+    'flush:204',
+    'flush:203',
+    'close:202',
+    'close:204',
+    'close:203',
+  ]);
+});
+
+test('manuscript verified relocate marks every pinned flush or close fault as relocated', () => {
+  const sourcePath = 'C:\\articles\\faulted.md';
+  const targetPath = 'C:\\recovery\\faulted.bin';
+  const sourceParent = path.win32.dirname(sourcePath);
+  const targetParent = path.win32.dirname(targetPath);
+  const identity = { dev: '271', ino: '277' };
+  const sourceParentIdentity = { dev: '271', ino: '281' };
+  const targetParentIdentity = { dev: '271', ino: '283' };
+  const bytes = Buffer.from('relocated before postcheck fault');
+  for (const fault of ['flush', 'close']) {
+    let lastError = 0;
+    let readOffset = 0;
+    const backend = createWin32Backend(durabilityErrors, {
+      kernel32: {
+        CreateFileW(target) {
+          const decoded = decodeWideString(target);
+          if (decoded === path.win32.toNamespacedPath(targetParent)) return 233n;
+          if (decoded === path.win32.toNamespacedPath(sourceParent)) return 234n;
+          return 235n;
+        },
+        GetFileInformationByHandle(handle, information) {
+          if (handle === 233n) {
+            writeWin32FileInformation(information, {
+              ...targetParentIdentity,
+              attributes: 0x00000010,
+            });
+          } else if (handle === 234n) {
+            writeWin32FileInformation(information, {
+              ...sourceParentIdentity,
+              attributes: 0x00000010,
+            });
+          } else {
+            writeWin32FileInformation(information, { ...identity, byteSize: bytes.length });
+          }
+          return 1;
+        },
+        ReadFile(handle, output, requested, bytesRead) {
+          const count = Math.min(requested, bytes.length - readOffset);
+          bytes.copy(output, 0, readOffset, readOffset + count);
+          bytesRead.writeUInt32LE(count, 0);
+          readOffset += count;
+          return 1;
+        },
+        SetFileInformationByHandle: () => 1,
+        FlushFileBuffers() {
+          if (fault !== 'flush') return 1;
+          lastError = 5;
+          return 0;
+        },
+        CloseHandle(handle) {
+          if (fault !== 'close' || handle !== 235n) return 1;
+          lastError = 6;
+          return 0;
+        },
+        GetLastError: () => lastError,
+      },
+      ptr: (value) => value,
+      realpathSync: (value) => value,
+    });
+
+    assert.throws(
+      () => backend.relocateVerifiedToAbsent(sourcePath, targetPath, {
+        byteSize: bytes.length,
+        identity,
+        sha256: sha256(bytes),
+        sourceParentIdentity,
+        targetParentIdentity,
+      }),
+      (error) => error.relocated === true,
+    );
+  }
+});
+
+test('manuscript verified relocate rejects a cross-volume destination before rename', () => {
+  const sourceIdentity = { dev: '301', ino: '307' };
+  const sourceParentIdentity = { dev: '301', ino: '311' };
+  const targetParentIdentity = { dev: '401', ino: '409' };
+  const bytes = Buffer.from('same-volume gate');
+  let readOffset = 0;
+  let relocateCalls = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(target) {
+        const decoded = decodeWideString(target);
+        if (decoded.endsWith('recovery')) return 205n;
+        if (decoded.endsWith('articles')) return 206n;
+        return 204n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        if (handle === 205n) {
+          writeWin32FileInformation(information, {
+            ...targetParentIdentity,
+            attributes: 0x00000010,
+          });
+        } else if (handle === 206n) {
+          writeWin32FileInformation(information, {
+            ...sourceParentIdentity,
+            attributes: 0x00000010,
+          });
+        } else {
+          writeWin32FileInformation(information, {
+            ...sourceIdentity,
+            byteSize: bytes.length,
+          });
+        }
+        return 1;
+      },
+      ReadFile(handle, output, requested, bytesRead) {
+        const count = Math.min(requested, bytes.length - readOffset);
+        bytes.copy(output, 0, readOffset, readOffset + count);
+        bytesRead.writeUInt32LE(count, 0);
+        readOffset += count;
+        return 1;
+      },
+      SetFileInformationByHandle() {
+        relocateCalls += 1;
+        return 1;
+      },
+      CloseHandle: () => 1,
+      GetLastError: () => 0,
+    },
+    ptr: (value) => value,
+  });
+
+  assert.throws(
+    () => backend.relocateVerifiedToAbsent(
+      'C:\\articles\\chapter.md',
+      'C:\\recovery\\displaced-before.bin',
+      {
+        byteSize: bytes.length,
+        identity: sourceIdentity,
+        sha256: sha256(bytes),
+        sourceParentIdentity,
+        targetParentIdentity,
+      },
+    ),
+    { code: 'VERIFIED_SOURCE_TOPOLOGY_CHANGED' },
+  );
+  assert.equal(relocateCalls, 0);
+});
+
+test('manuscript verified relocate maps a Windows sharing violation to TARGET_LOCKED', () => {
+  const sourcePath = 'C:\\articles\\locked.md';
+  const targetPath = 'C:\\recovery\\displaced-before.bin';
+  const sourceParent = path.win32.dirname(sourcePath);
+  const targetParent = path.win32.dirname(targetPath);
+  const sourceParentIdentity = { dev: '431', ino: '433' };
+  const targetParentIdentity = { dev: '431', ino: '439' };
+  const closes = [];
+  let lastError = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(target) {
+        const decoded = decodeWideString(target);
+        if (decoded === path.win32.toNamespacedPath(targetParent)) return 221n;
+        if (decoded === path.win32.toNamespacedPath(sourceParent)) return 222n;
+        lastError = 32;
+        return 0xffffffffffffffffn;
+      },
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, {
+          ...(handle === 221n ? targetParentIdentity : sourceParentIdentity),
+          attributes: 0x00000010,
+        });
+        return 1;
+      },
+      ReadFile: () => assert.fail('a locked source must not be read'),
+      SetFileInformationByHandle: () => assert.fail('a locked source must not be relocated'),
+      CloseHandle(handle) {
+        closes.push(handle);
+        return 1;
+      },
+      GetLastError: () => lastError,
+    },
+    ptr: (value) => value,
+    realpathSync: (value) => value,
+  });
+
+  assert.throws(
+    () => backend.relocateVerifiedToAbsent(sourcePath, targetPath, {
+      byteSize: 12,
+      identity: { dev: '431', ino: '443' },
+      sha256: 'b'.repeat(64),
+      sourceParentIdentity,
+      targetParentIdentity,
+    }),
+    { code: 'TARGET_LOCKED' },
+  );
+  assert.deepEqual(closes, [222n, 221n]);
+});
+
+test('manuscript verified relocate never maps Windows access denied to a retryable lock', () => {
+  const sourcePath = 'C:\\articles\\denied.md';
+  const targetPath = 'C:\\recovery\\displaced-before.bin';
+  const sourceParent = path.win32.dirname(sourcePath);
+  const targetParent = path.win32.dirname(targetPath);
+  const sourceParentIdentity = { dev: '451', ino: '457' };
+  const targetParentIdentity = { dev: '451', ino: '461' };
+  let sourceOpenCalls = 0;
+  let lastError = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(target) {
+        const decoded = decodeWideString(target);
+        if (decoded === path.win32.toNamespacedPath(targetParent)) return 223n;
+        if (decoded === path.win32.toNamespacedPath(sourceParent)) return 224n;
+        sourceOpenCalls += 1;
+        lastError = 5;
+        return 0xffffffffffffffffn;
+      },
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, {
+          ...(handle === 223n ? targetParentIdentity : sourceParentIdentity),
+          attributes: 0x00000010,
+        });
+        return 1;
+      },
+      CloseHandle: () => 1,
+      GetLastError: () => lastError,
+    },
+    ptr: (value) => value,
+  });
+
+  assert.throws(
+    () => backend.relocateVerifiedToAbsent(sourcePath, targetPath, {
+      byteSize: 12,
+      identity: { dev: '451', ino: '463' },
+      sha256: 'd'.repeat(64),
+      sourceParentIdentity,
+      targetParentIdentity,
+    }),
+    (error) => (
+      error.code === 'VERIFIED_SOURCE_MISMATCH'
+      && error.cause?.win32Code === 5
+    ),
+  );
+  assert.equal(sourceOpenCalls, 1);
+});
+
+test('manuscript verified delete pins the parent and deletes only the verified handle', () => {
+  const sourcePath = 'C:\\recovery\\owned-asset.bin';
+  const parentPath = path.win32.dirname(sourcePath);
+  const expectedIdentity = { dev: '503', ino: '509' };
+  const expectedParentIdentity = { dev: '503', ino: '521' };
+  const bytes = Buffer.from('owned recovery asset');
+  const calls = { closes: [], events: [], opens: [] };
+  let readOffset = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(target, desiredAccess, shareMode, security, disposition, flags, template) {
+        const decoded = decodeWideString(target);
+        calls.opens.push({ decoded, desiredAccess, shareMode, security, disposition, flags, template });
+        return decoded === path.win32.toNamespacedPath(parentPath) ? 207n : 206n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, handle === 207n
+          ? { ...expectedParentIdentity, attributes: 0x00000010 }
+          : { ...expectedIdentity, byteSize: bytes.length });
+        return 1;
+      },
+      ReadFile(handle, output, requested, bytesRead) {
+        assert.equal(handle, 206n);
+        const count = Math.min(requested, bytes.length - readOffset);
+        bytes.copy(output, 0, readOffset, readOffset + count);
+        bytesRead.writeUInt32LE(count, 0);
+        readOffset += count;
+        return 1;
+      },
+      SetFileInformationByHandle(handle, informationClass, information, byteLength) {
+        calls.events.push(`delete:${handle}`);
+        calls.disposition = {
+          deleteFile: information.readUInt8(0),
+          handle,
+          informationClass,
+          byteLength,
+        };
+        return 1;
+      },
+      FlushFileBuffers(handle) {
+        calls.events.push(`flush:${handle}`);
+        return 1;
+      },
+      CloseHandle(handle) {
+        calls.closes.push(handle);
+        calls.events.push(`close:${handle}`);
+        return 1;
+      },
+      GetLastError: () => 0,
+    },
+    ptr: (value) => value,
+    realpathSync: (value) => value,
+  });
+
+  assert.deepEqual(
+    backend.deleteVerified(sourcePath, {
+      byteSize: bytes.length,
+      identity: expectedIdentity,
+      parentIdentity: expectedParentIdentity,
+      sha256: sha256(bytes),
+    }),
+    {
+      alreadyAbsent: false,
+      deleted: true,
+      identity: expectedIdentity,
+      parentFsync: true,
+    },
+  );
+  assert.deepEqual(calls.opens, [
+    {
+      decoded: path.win32.toNamespacedPath(parentPath),
+      desiredAccess: 0xc0000000,
+      shareMode: 0x00000003,
+      security: 0,
+      disposition: 3,
+      flags: 0x02200000,
+      template: 0,
+    },
+    {
+      decoded: path.win32.toNamespacedPath(sourcePath),
+      desiredAccess: 0x80010080,
+      shareMode: 0x00000001,
+      security: 0,
+      disposition: 3,
+      flags: 0x00200000,
+      template: 0,
+    },
+  ]);
+  assert.deepEqual(calls.disposition, {
+    deleteFile: 1,
+    handle: 206n,
+    informationClass: 4,
+    byteLength: 1,
+  });
+  assert.deepEqual(calls.closes, [206n, 207n]);
+  assert.deepEqual(calls.events, [
+    'delete:206',
+    'close:206',
+    'flush:207',
+    'close:207',
+  ]);
+});
+
+test('manuscript verified delete marks every pinned flush or close fault as deleted', () => {
+  const sourcePath = 'C:\\recovery\\delete-fault.bin';
+  const parentPath = path.win32.dirname(sourcePath);
+  const identity = { dev: '541', ino: '547' };
+  const parentIdentity = { dev: '541', ino: '557' };
+  const bytes = Buffer.from('deleted before postcheck fault');
+  for (const fault of ['flush', 'close']) {
+    let lastError = 0;
+    let readOffset = 0;
+    const backend = createWin32Backend(durabilityErrors, {
+      kernel32: {
+        CreateFileW(target) {
+          return decodeWideString(target) === path.win32.toNamespacedPath(parentPath) ? 236n : 237n;
+        },
+        GetFileInformationByHandle(handle, information) {
+          writeWin32FileInformation(information, handle === 236n
+            ? { ...parentIdentity, attributes: 0x00000010 }
+            : { ...identity, byteSize: bytes.length });
+          return 1;
+        },
+        ReadFile(handle, output, requested, bytesRead) {
+          const count = Math.min(requested, bytes.length - readOffset);
+          bytes.copy(output, 0, readOffset, readOffset + count);
+          bytesRead.writeUInt32LE(count, 0);
+          readOffset += count;
+          return 1;
+        },
+        SetFileInformationByHandle: () => 1,
+        FlushFileBuffers() {
+          if (fault !== 'flush') return 1;
+          lastError = 5;
+          return 0;
+        },
+        CloseHandle(handle) {
+          if (fault !== 'close' || handle !== 237n) return 1;
+          lastError = 6;
+          return 0;
+        },
+        GetLastError: () => lastError,
+      },
+      ptr: (value) => value,
+      realpathSync: (value) => value,
+    });
+
+    assert.throws(
+      () => backend.deleteVerified(sourcePath, {
+        byteSize: bytes.length,
+        identity,
+        parentIdentity,
+        sha256: sha256(bytes),
+      }),
+      (error) => error.deleted === true,
+    );
+  }
+});
+
+test('manuscript verified delete treats absence as idempotent only under the verified parent', () => {
+  const sourcePath = 'C:\\recovery\\already-collected.bin';
+  const parentPath = path.win32.dirname(sourcePath);
+  const expectedParentIdentity = { dev: '601', ino: '607' };
+  const closes = [];
+  let lastError = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(target) {
+        if (decodeWideString(target) === path.win32.toNamespacedPath(parentPath)) return 209n;
+        lastError = 2;
+        return 0xffffffffffffffffn;
+      },
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, {
+          ...expectedParentIdentity,
+          attributes: 0x00000010,
+        });
+        return 1;
+      },
+      ReadFile: () => assert.fail('an absent file must not be read'),
+      SetFileInformationByHandle: () => assert.fail('an absent file must not be deleted'),
+      CloseHandle(handle) {
+        closes.push(handle);
+        return 1;
+      },
+      GetLastError: () => lastError,
+    },
+    ptr: (value) => value,
+    realpathSync: (value) => value,
+  });
+
+  assert.deepEqual(
+    backend.deleteVerified(sourcePath, {
+      byteSize: 0,
+      identity: { dev: '601', ino: '613' },
+      parentIdentity: expectedParentIdentity,
+      sha256: 'a'.repeat(64),
+    }),
+    { alreadyAbsent: true, deleted: false },
+  );
+  assert.deepEqual(closes, [209n]);
+});
+
+test('manuscript verified create wrapper never reopens its parent after pinned flush', () => {
+  const parentIdentity = { dev: '801', ino: '809' };
+  const identity = { dev: '801', ino: '811' };
+  const bytes = Buffer.from('wrapper create');
+  let pathFsyncCalls = 0;
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    createAssetVerified() {
+      return {
+        byteSize: bytes.length,
+        fileFsync: true,
+        identity,
+        parentFsync: true,
+        sha256: sha256(bytes),
+      };
+    },
+    fsyncDirectory() {
+      pathFsyncCalls += 1;
+    },
+    readVerified() {
+      return { byteSize: bytes.length, bytes, identity, sha256: sha256(bytes) };
+    },
+  }), (isolatedDurability) => {
+    assert.deepEqual(isolatedDurability.createAssetVerified('C:\\recovery\\asset.bin', {
+      byteSize: bytes.length,
+      bytes,
+      parentIdentity,
+      sha256: sha256(bytes),
+    }), {
+      byteSize: bytes.length,
+      fileFsync: true,
+      identity,
+      parentFsync: true,
+      parentIdentity,
+      sha256: sha256(bytes),
+    });
+  });
+  assert.equal(pathFsyncCalls, 0);
+});
+
+test('manuscript verified relocate wrapper never reopens either parent after pinned flush', () => {
+  const identity = { dev: '821', ino: '823' };
+  const sourceParentIdentity = { dev: '821', ino: '827' };
+  const targetParentIdentity = { dev: '821', ino: '829' };
+  const bytes = Buffer.from('wrapper relocate');
+  let pathFsyncCalls = 0;
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    fsyncDirectory() {
+      pathFsyncCalls += 1;
+    },
+    inspectPath(targetPath) {
+      return {
+        identity: targetPath.endsWith('articles')
+          ? sourceParentIdentity
+          : targetParentIdentity,
+      };
+    },
+    readVerified() {
+      return { byteSize: bytes.length, bytes, identity, sha256: sha256(bytes) };
+    },
+    relocateVerifiedToAbsent() {
+      return {
+        byteSize: bytes.length,
+        identity,
+        relocated: true,
+        sha256: sha256(bytes),
+        sourceParentFsync: true,
+        targetParentFsync: true,
+      };
+    },
+  }), (isolatedDurability) => {
+    assert.equal(isolatedDurability.relocateVerifiedToAbsent(
+      'C:\\articles\\chapter.md',
+      'C:\\recovery\\displaced.bin',
+      {
+        byteSize: bytes.length,
+        identity,
+        sha256: sha256(bytes),
+        sourceParentIdentity,
+        targetParentIdentity,
+      },
+    ).relocated, true);
+  });
+  assert.equal(pathFsyncCalls, 0);
+});
+
+test('manuscript verified delete wrapper never reopens its parent after pinned flush', () => {
+  const identity = { dev: '831', ino: '839' };
+  const parentIdentity = { dev: '831', ino: '841' };
+  let pathFsyncCalls = 0;
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    deleteVerified() {
+      return {
+        alreadyAbsent: false,
+        deleted: true,
+        identity,
+        parentFsync: true,
+      };
+    },
+    fsyncDirectory() {
+      pathFsyncCalls += 1;
+    },
+  }), (isolatedDurability) => {
+    assert.equal(isolatedDurability.deleteVerified('C:\\recovery\\asset.bin', {
+      byteSize: 4,
+      identity,
+      parentIdentity,
+      sha256: 'c'.repeat(64),
+    }).deleted, true);
+  });
+  assert.equal(pathFsyncCalls, 0);
+});
+
+test('manuscript verified create postcheck or reopen failure always carries created disposition', () => {
+  const parentIdentity = { dev: '851', ino: '853' };
+  const bytes = Buffer.from('created before malformed result');
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    createAssetVerified() {
+      return {
+        byteSize: bytes.length,
+        fileFsync: true,
+        identity: null,
+        parentFsync: true,
+        sha256: sha256(bytes),
+      };
+    },
+  }), (isolatedDurability) => {
+    assert.throws(
+      () => isolatedDurability.createAssetVerified('C:\\recovery\\asset.bin', {
+        byteSize: bytes.length,
+        bytes,
+        parentIdentity,
+        sha256: sha256(bytes),
+      }),
+      (error) => error.created === true,
+    );
+  });
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    createAssetVerified() {
+      return {
+        byteSize: bytes.length,
+        fileFsync: true,
+        identity: { dev: '851', ino: '857' },
+        parentFsync: true,
+        sha256: sha256(bytes),
+      };
+    },
+    readVerified() {
+      return {
+        byteSize: bytes.length,
+        bytes,
+        identity: { dev: '999', ino: '999' },
+        sha256: sha256(bytes),
+      };
+    },
+  }), (isolatedDurability) => {
+    assert.throws(
+      () => isolatedDurability.createAssetVerified('C:\\recovery\\reopen.bin', {
+        byteSize: bytes.length,
+        bytes,
+        parentIdentity,
+        sha256: sha256(bytes),
+      }),
+      (error) => error.created === true,
+    );
+  });
+});
+
+test('manuscript verified relocate postcheck or reopen failure carries relocated without retry', () => {
+  const identity = { dev: '857', ino: '859' };
+  const sourceParentIdentity = { dev: '857', ino: '863' };
+  const targetParentIdentity = { dev: '857', ino: '877' };
+  let calls = 0;
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    inspectPath(targetPath) {
+      return {
+        identity: targetPath.endsWith('articles')
+          ? sourceParentIdentity
+          : targetParentIdentity,
+      };
+    },
+    relocateVerifiedToAbsent() {
+      calls += 1;
+      return {
+        byteSize: 5,
+        identity: null,
+        relocated: true,
+        sha256: 'e'.repeat(64),
+        sourceParentFsync: true,
+        targetParentFsync: true,
+      };
+    },
+  }), (isolatedDurability) => {
+    assert.throws(
+      () => isolatedDurability.relocateVerifiedToAbsent(
+        'C:\\articles\\chapter.md',
+        'C:\\recovery\\asset.bin',
+        {
+          byteSize: 5,
+          identity,
+          sha256: 'e'.repeat(64),
+          sourceParentIdentity,
+          targetParentIdentity,
+        },
+      ),
+      (error) => error.relocated === true,
+    );
+  });
+  assert.equal(calls, 1);
+  let reopenCalls = 0;
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    inspectPath(targetPath) {
+      return {
+        identity: targetPath.endsWith('articles')
+          ? sourceParentIdentity
+          : targetParentIdentity,
+      };
+    },
+    readVerified() {
+      return {
+        byteSize: 5,
+        bytes: Buffer.alloc(5),
+        identity: { dev: '999', ino: '999' },
+        sha256: 'e'.repeat(64),
+      };
+    },
+    relocateVerifiedToAbsent() {
+      reopenCalls += 1;
+      return {
+        byteSize: 5,
+        identity,
+        relocated: true,
+        sha256: 'e'.repeat(64),
+        sourceParentFsync: true,
+        targetParentFsync: true,
+      };
+    },
+  }), (isolatedDurability) => {
+    assert.throws(
+      () => isolatedDurability.relocateVerifiedToAbsent(
+        'C:\\articles\\chapter.md',
+        'C:\\recovery\\reopen.bin',
+        {
+          byteSize: 5,
+          identity,
+          sha256: 'e'.repeat(64),
+          sourceParentIdentity,
+          targetParentIdentity,
+        },
+      ),
+      (error) => error.relocated === true,
+    );
+  });
+  assert.equal(reopenCalls, 1);
+});
+
+test('manuscript verified delete postcheck failure always carries deleted disposition', () => {
+  const identity = { dev: '881', ino: '883' };
+  const parentIdentity = { dev: '881', ino: '887' };
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    deleteVerified() {
+      return {
+        alreadyAbsent: false,
+        deleted: true,
+        identity: null,
+        parentFsync: true,
+      };
+    },
+  }), (isolatedDurability) => {
+    assert.throws(
+      () => isolatedDurability.deleteVerified('C:\\recovery\\asset.bin', {
+        byteSize: 5,
+        identity,
+        parentIdentity,
+        sha256: 'f'.repeat(64),
+      }),
+      (error) => error.deleted === true,
+    );
+  });
+});
+
+test('manuscript verified read wrapper returns exact real Windows facts', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const dir = createTempDir(t, 'mythpen-manuscript-read-');
+  const filePath = path.join(dir, 'chapter.md');
+  const bytes = Buffer.from('real handle-bound bytes');
+  fs.writeFileSync(filePath, bytes);
+
+  const result = readVerified(filePath, {
+    byteSize: bytes.length,
+    disposition: 'present',
+    identity: fileIdentity(filePath),
+    parentIdentity: fileIdentity(dir),
+    sha256: sha256(bytes),
+  });
+
+  assert.deepEqual(result, {
+    byteSize: bytes.length,
+    bytes,
+    disposition: 'PRESENT',
+    identity: fileIdentity(filePath),
+    parentIdentity: fileIdentity(dir),
+    sha256: sha256(bytes),
+  });
+  assert.equal(Object.isFrozen(result), true);
+});
+
+test('manuscript verified read wrapper proves absence under one pinned Windows parent', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const dir = createTempDir(t, 'mythpen-manuscript-absent-');
+  const filePath = path.join(dir, 'missing.bin');
+  const expected = {
+    disposition: 'absent',
+    parentIdentity: fileIdentity(dir),
+  };
+
+  const result = readVerified(filePath, expected);
+  assert.deepEqual(result, { disposition: 'ABSENT' });
+  assert.equal(Object.isFrozen(result), true);
+
+  fs.writeFileSync(filePath, 'third-party');
+  assert.throws(() => readVerified(filePath, expected), { code: 'VERIFIED_SOURCE_MISMATCH' });
+  assert.equal(fs.readFileSync(filePath, 'utf8'), 'third-party');
+});
+
+test('manuscript verified read rejects a case-only alias of the expected real name', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const dir = createTempDir(t, 'mythpen-manuscript-real-name-');
+  const actualPath = path.join(dir, 'ActualCase.md');
+  const aliasPath = path.join(dir, 'actualcase.md');
+  const bytes = Buffer.from('same entity through wrong name');
+  fs.writeFileSync(actualPath, bytes);
+
+  assert.throws(
+    () => readVerified(aliasPath, {
+      byteSize: bytes.length,
+      disposition: 'present',
+      identity: fileIdentity(actualPath),
+      parentIdentity: fileIdentity(dir),
+      sha256: sha256(bytes),
+    }),
+    { code: 'VERIFIED_SOURCE_MISMATCH' },
+  );
+});
+
+test('manuscript verified relocate retries a locked source with the shared durability policy', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const durabilityPath = require.resolve('../platform/durability');
+  const win32Path = require.resolve('../platform/durability-win32');
+  const cachedDurability = require.cache[durabilityPath];
+  const win32Module = require(win32Path);
+  const originalFactory = win32Module.createWin32Backend;
+  const sourcePath = 'C:\\article\\chapter.md';
+  const targetPath = 'C:\\recovery\\displaced-before.bin';
+  const sourceParentIdentity = { dev: '701', ino: '709' };
+  const targetParentIdentity = { dev: '701', ino: '719' };
+  const identity = { dev: '701', ino: '727' };
+  const bytes = Buffer.from('retry verified relocation');
+  const expected = {
+    byteSize: bytes.length,
+    identity,
+    sha256: sha256(bytes),
+    sourceParentIdentity,
+    targetParentIdentity,
+  };
+  let attempts = 0;
+
+  win32Module.createWin32Backend = (backendErrors) => ({
+    backend: 'win32',
+    fsyncDirectory() {},
+    inspectPath(target) {
+      return {
+        identity: target === path.dirname(sourcePath)
+          ? sourceParentIdentity
+          : targetParentIdentity,
+      };
+    },
+    readVerified() {
+      return { byteSize: bytes.length, bytes, identity, sha256: expected.sha256 };
+    },
+    relocateVerifiedToAbsent() {
+      attempts += 1;
+      if (attempts < 3) throw new backendErrors.TargetLockedError('injected lock');
+      return {
+        byteSize: bytes.length,
+        identity,
+        relocated: true,
+        sha256: expected.sha256,
+        sourceParentFsync: true,
+        targetParentFsync: true,
+      };
+    },
+  });
+  delete require.cache[durabilityPath];
+  try {
+    const isolatedDurability = require(durabilityPath);
+    assert.equal(
+      isolatedDurability.relocateVerifiedToAbsent(sourcePath, targetPath, expected).relocated,
+      true,
+    );
+    assert.equal(attempts, 3);
+  } finally {
+    delete require.cache[durabilityPath];
+    win32Module.createWin32Backend = originalFactory;
+    if (cachedDurability !== undefined) require.cache[durabilityPath] = cachedDurability;
+  }
 });
 
 test('verified absent install rejects every non-canonical expected SHA-256 before opening a path', () => {

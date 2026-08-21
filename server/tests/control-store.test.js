@@ -2814,6 +2814,104 @@ test('read rejects malformed or partial official JSON but ignores an exact produ
   ));
 });
 
+test('ControlStore reserves manuscript file-assets directory for legacy reads without parsing its contents', (t) => {
+  const controlDir = createControlDir(t);
+  const store = openControlStore(controlDir);
+  store.append({ type: 'file-assets.legacy.seed', payload: { version: 1 } });
+  const before = store.read();
+  const assetsDirectory = path.join(controlDir, 'file-assets');
+  fs.mkdirSync(assetsDirectory);
+  fs.writeFileSync(
+    path.join(assetsDirectory, `1-${'0'.repeat(64)}.json`),
+    '{not-an-event',
+  );
+  fs.mkdirSync(path.join(assetsDirectory, 'nested'));
+  fs.writeFileSync(path.join(assetsDirectory, 'nested', '.controlstore-tail.json'), '{');
+
+  assert.deepEqual(store.read(), before);
+  assert.deepEqual(openControlStore(controlDir).read(), before);
+});
+
+test('ControlStore reserves manuscript file-assets directory for bounded reads without parsing its contents', (t) => {
+  const controlDir = createControlDir(t);
+  const store = openControlStore(controlDir, { bounded: true });
+  store.append({ type: 'file-assets.bounded.seed', payload: { version: 1 } });
+  const before = store.read();
+  const assetsDirectory = path.join(controlDir, 'file-assets');
+  fs.mkdirSync(assetsDirectory);
+  fs.writeFileSync(
+    path.join(assetsDirectory, `1-${'0'.repeat(64)}.json`),
+    '{not-an-event',
+  );
+  fs.mkdirSync(path.join(assetsDirectory, 'nested'));
+  fs.writeFileSync(path.join(assetsDirectory, 'nested', '.controlstore-tail.json'), '{');
+
+  assert.deepEqual(store.read(), before);
+  assert.deepEqual(store.readEvidence().events, before);
+  assert.deepEqual(
+    openControlStore(controlDir, { bounded: true }).readEvidence().events,
+    before,
+  );
+});
+
+test('ControlStore reserves manuscript file-assets directory only as a plain non-symlink directory', (t) => {
+  for (const bounded of [false, true]) {
+    const controlDir = createControlDir(t);
+    const store = openControlStore(controlDir, { bounded });
+    const assetsPath = path.join(controlDir, 'file-assets');
+    fs.writeFileSync(assetsPath, 'not-a-directory');
+
+    assert.throws(
+      () => store.read(),
+      (error) => (
+        error.code === 'CONTROL_STORE_CORRUPT'
+        && /file-assets/i.test(error.message)
+        && /plain directory/i.test(error.message)
+      ),
+      `bounded=${bounded} file`,
+    );
+    fs.rmSync(assetsPath);
+
+    const linkTarget = path.join(path.dirname(controlDir), `file-assets-target-${bounded}`);
+    fs.mkdirSync(linkTarget);
+    fs.symlinkSync(
+      linkTarget,
+      assetsPath,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    assert.throws(
+      () => store.read(),
+      (error) => (
+        error.code === 'CONTROL_STORE_CORRUPT'
+        && /file-assets/i.test(error.message)
+        && /plain directory/i.test(error.message)
+      ),
+      `bounded=${bounded} symlink`,
+    );
+    fs.unlinkSync(assetsPath);
+  }
+});
+
+test('ControlStore reserves manuscript file-assets directory with an exact case-sensitive name', (t) => {
+  for (const bounded of [false, true]) {
+    const controlDir = createControlDir(t);
+    const store = openControlStore(controlDir, { bounded });
+    for (const name of ['file-assets-old', 'file_asset', 'File-Assets']) {
+      const candidate = path.join(controlDir, name);
+      fs.mkdirSync(candidate);
+      assert.throws(
+        () => store.read(),
+        (error) => (
+          error.code === 'CONTROL_STORE_CORRUPT'
+          && /unknown control store entry/i.test(error.message)
+        ),
+        `bounded=${bounded} ${name}`,
+      );
+      fs.rmdirSync(candidate);
+    }
+  }
+});
+
 test('read fails closed on every entry outside the exact lock and production-temp whitelist', (t) => {
   const controlDir = createControlDir(t);
   const store = openControlStore(controlDir);

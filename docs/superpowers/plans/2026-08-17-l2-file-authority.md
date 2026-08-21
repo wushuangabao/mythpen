@@ -10,8 +10,8 @@
 
 ## Global Constraints
 
-- 实施依据是 `docs/superpowers/specs/2026-08-15-l2-file-authority-spec.md` 第 2.10 版；若计划与规范冲突，以规范为准并先修订计划。
-- 第 2.10 版只调整门禁调度：允许 L2 correctness implementation 在 native p95 production evidence 前先行，但 `files` 始终保持实验性、非默认且不得称为 `DEFAULT_READY`；native p95 与全部 source-bound evidence 仍必须在 Task 17B 最终验收中通过。
+- 实施依据是 `docs/superpowers/specs/2026-08-15-l2-file-authority-spec.md` 第 2.12 版；若计划与规范冲突，以规范为准并先修订计划。
+- 第 2.12 版保留第 2.10 版门禁调度，并只补齐 FilePublicationJournal 可执行合同：允许 L2 correctness implementation 在 native p95 production evidence 前先行，但 `files` 始终保持实验性、非默认且不得称为 `DEFAULT_READY`；native p95 与全部 source-bound evidence 仍必须在 Task 17B 最终验收中通过。
 - L2 开工只依赖 Task 1A 的 schema 11 安全准入、本地 contract 与 regression 基线；尚未闭环的 L1 production p95 和 source-bound Windows evidence 不阻塞 Task 2，统一延后到最终 L2 source 冻结后验收。
 - 不创建 Git 仓库，不实现 L3/L4，不双写 SQLite 和文件，不搬迁数据根，不物理删除 `files` 项目。
 - 每个产品任务都先写失败测试，再写最小实现，再跑聚焦测试；每个任务只提交列出的作用域，提交前运行 `git diff --check`。
@@ -282,7 +282,7 @@ class ManuscriptStore {
 - [ ] 容量 accumulator 流式计数，超过任何维度立即返回包含 `dimension/observed/allowed` 的 `MANUSCRIPT_CONTENT_TOO_LARGE`；ignored 文件仍验证身份、大小并计量。提供只读 observer/counter seam，分别记录目录枚举数、身份 probe 数、内容打开数与累计字节；每个边界测试都断言第一次 `observed > allowed` 后不再枚举下一项、不再打开任何内容，单文件大小可由身份/metadata 证明时不得先打开超限文件。
 - [ ] `validateFull()` 验证索引闭包、唯一归属、章节资源对完整、卷/章节生命周期 UID 合并计数、journal candidate 所有权；外部新 UID/孤儿返回 `EXTERNAL_RESOURCE_CREATION_UNSUPPORTED`。
 - [ ] 为 80% 身份阈值产生持久诊断 warning，不因 tombstone 删除、ignored 文件删除或 revoke 释放容量。
-- [ ] Task 3 只实现 fail-closed 的 Store/边界合同与内存 fixture：`fileBoundary`、`journalAuthority` 在构造时固定为 opaque branded capability；缺失时拒绝，绝不回退到按路径 `node:fs` 打开。候选只有在 authority 同时绑定 project、journal ID、target ref 与实际候选名时才升格，其他同形文件降为 residue 且不读、不哈希。真实 Windows no-delete-share、open-reparse、handle-bound read/identity boundary 与 FilePublisher 共用实现，明确后移到 Task 6；Task 14B 只负责产品接线。
+- [ ] Task 3 只实现 fail-closed 的 Store/边界合同与内存 fixture：构造参数 `fileBoundary` 精确为 opaque **read capability**，与 `journalAuthority` 都在构造时固定；缺失、writer cap、plain clone、foreign/swap brand 均拒绝，绝不回退到按路径 `node:fs` 打开，也永不获得 create/write/relocate/delete。为保持 Task 3 可独立按 DAG 提交，本任务可在 `store.js` 暂留仅被内存 fixture 使用的 generic mint，任何 production composition 都不得引用；Task 6 必须在首次 production factory 出现的同一提交中把它迁到内部 registry + `server/testing/` test-only mint，并删除旧 export，此后 production/test brand 不再混用。候选只有在 authority 同时绑定 project、journal ID、target ref 与实际候选名时才升格，其他同形文件降为 residue 且不读、不哈希。真实 Windows no-delete-share、open-reparse、handle-bound read/identity boundary 后移 Task 6；Task 14B 只接线，不能注入 backend/callback/fake。
 - [ ] `buildProjectionCandidate()` 只返回同一 validated snapshot 的文件事实、顺序、positions、raw hashes、Markdown availability、ignored member observations、capacity/warnings；不分配本机整数 ID，不决定 tombstone/proposal/route/generation。命令相关的确定性 before/after closure 由 Task 7 扩展同一个 `ManuscriptStore`，本任务不提前猜领域命令。
 - [ ] 运行并提交：
 
@@ -400,30 +400,69 @@ git commit -m "feat: publish atomic manuscript projections"
 
 - Create: `server/manuscript/file-publication-journal.js`
 - Create: `server/manuscript/file-publisher.js`
+- Create: `server/manuscript/capability-registry.js`
+- Modify: `server/manuscript/store.js`
 - Create: `server/platform/manuscript-file-boundary.js`
 - Modify: `server/platform/durability.js`
 - Modify: `server/platform/durability-win32.js`
+- Modify: `server/control-store.js`
 - Modify: `server/testing/fault-injection.js`
+- Create: `server/testing/manuscript-capability-mint.js`
 - Create: `server/tests/file-publication-journal.test.js`
 - Create: `server/tests/file-publication-crash.test.js`
 - Create: `server/tests/manuscript-file-boundary.test.js`
+- Modify: `server/tests/manuscript-store.test.js`
 - Modify: `server/tests/durability-primitives.test.js`
+- Modify: `server/tests/control-store.test.js`
 - Create: `server/tests/fixtures/file-publication-crash.js`
+- Modify: `server/tests/fixtures/manuscript-tree.js`
 
 **State model:**
 
 ```text
+common: assets_reserved → target_reserved → prepared
+
 full（ordinary 或 parent=draft_conflict）：
+  assets_reserved | target_reserved + no article side effect + exact ownership → rolled_back
   prepared → files_published → projection_committed → completed
+  before files_published + projection impossible + exact complete BEFORE → rolled_back
 
 file_only（parent=migration | creation）：
   prepared → files_published
+  before full pin: assets_reserved | target_reserved
+    + durable parent child reservation/partial manifest/pin-absence/branded before → rolled_back
+  after full pin（含 target_reserved）:
+    + branded parentRecoveryIntent(before) → rolled_back
+
+completed | rolled_back | parent-authorized files_published
+  + terminal/pin/no-reference predicates → assets_collected
 ```
 
 ```js
 // Task 6 用 fake；Task 12 提供唯一真实实现。
 const projectionDisposition = {
   inspectTarget({ target, journalEvidence }) {}, // base | target | other
+};
+
+// 无参数、无 callback/backend/cap override；模块内一次 shared backend 铸一对 caps。
+function createProductionManuscriptFileBoundary() {} // { readCapability, writerCapability }
+
+class FilePublisher {
+  constructor({ writerCapability }) {} // 只接受 canonical branded writer cap；不得接 plain methods/backend
+  async createAsset(input) {}
+  async readAsset(input) {}
+  async inspect(input) {} // BEFORE | GAP | AFTER | OTHER
+  async publish(input) {}
+  async rollback(input) {}
+  async collect(input) {}
+}
+
+// Task 6 用 fake；Task 12/13 分别提供 migration/creation 的真实实现。
+const parentAuthority = {
+  assertReservation({ authority, parent, childReservation }) {},
+  assertPin({ authority, parent, manifest }) {},
+  readRecoveryIntent({ authority, parent, assetManifest }) {}, // opaque before | after；partial 只可 before
+  assertGc({ authority, parent, assetManifest, childState }) {},
 };
 
 class FilePublicationJournal {
@@ -433,35 +472,54 @@ class FilePublicationJournal {
     projectionStore,
     projectStore,
     projectionDisposition,
+    parentAuthority,
     projectBinding,
     assertWriteAuthority,
   }) {}
-  async prepare({ logicalRequestId, baseGeneration, targetGeneration, closure, projectionTarget, parent }) {}
+  async stageAssets({
+    journalId,
+    logicalRequestId,
+    baseGeneration,
+    targetGeneration,
+    basisDigest,
+    closure,
+    identityReservation,
+    parent,
+    parentReservationAuthority,
+  }) {} // { stagedAssets: opaque, stagedAfterFacts: frozen, reservationManifest: frozen }
+  async bindTarget({ stagedAssets, projectionTarget }) {} // { preparedAssets: opaque, manifest: frozen }
+  async prepare({ preparedAssets, parentPinAuthority }) {}
   async publishFiles(journalId) {}
   async commitProjection(journalId) {}
   async complete(journalId) {}
-  async recover(journalId) {}
-  journalAuthority() {} // 返回 Task 3 的 opaque resolveCandidate capability
+  async recover(journalId, { parentRecoveryIntent } = {}) {}
+  async collectAssets(journalId, { parentGcAuthority } = {}) {}
+  journalAuthority() {} // L2 v1 返回 Task 3 opaque deny-all resolveCandidate capability
 }
 ```
 
-- [ ] Task 6 只验证冻结 closure 的 exact 成员合同、branded controlled ref、before/after bytes/hash/identity、after-absent 谓词、无重复成员与规范发布顺序；绝不从 `projectionTarget.controlledFiles` 反推或扩大 closure。`controlledFiles` 是同 generation 的**全树文件事实**，本次 closure 是领域命令产生的**最小变化集**。正文更新=1 md、sidecar 更新=1 json、移动=源/目标索引、创建/删除=索引+资源对等 command→closure 矩阵以及 `ManuscriptStore.buildClosure()` 全部由 Task 7 实现和测试。
-- [ ] `prepared` 在首个文章文件副作用前调用 Task 5 唯一 `validateTarget()`，冻结 logical request、full/file-only mode、parent ID、project UID/instance、ControlStore incarnation/identity、base/target generation、closure predicates 和 exact target recovery-asset predicate。完整 target 只在固定恢复资产根中保存一份 exact bytes；ControlStore 只记录其规范 identity、length、SHA-256 和 fsync 后存在性，不内嵌或复制完整 target/正文。closure 的 durable before/after 资产只覆盖本次最小成员；basis/tombstone/retain refs 继续禁止旧正文或未覆盖本机列。恢复 rehydrate target 后先递归冻结并再次调用同一 validator；journal 不序列化 opaque authority，不重取时钟、不重算 identity plan/invalidation，也不由 caller 补字段。
-- [ ] FilePublisher 只按冻结 closure 的固定顺序执行「正文 → sidecar → 卷/未分卷索引 → manuscript.json」。每个候选与目标校验普通文件身份、逐字节实名、父目录身份、非 reparse 和 link count=1；文件 flush、verified replace/absent install、目录 flush 的 disposition 必须可证明，外部 CAS 改变返回 `EXTERNAL_CHANGE_CONFLICT`，持续占用返回 `MANUSCRIPT_TARGET_LOCKED`，不得解释领域命令或创建第二套恢复状态机。
-- [ ] 在本任务实现 Task 3 Store 与 FilePublisher 共用的 production-grade Windows boundary，但不做产品接线：复用 L1 `durability.js` 的 file/directory fsync、bounded retry/error mapping 和 verified-absent install，并在既有 `durability-win32.js` 内只补两者共同缺少的窄 verified-handle read/replace 原语；不得在 `manuscript-file-boundary.js` 复制第二套 Win32 FFI、重试、fsync、lease 或 durability profile。Windows 以不共享 delete 的 `OPEN_EXISTING | FILE_FLAG_OPEN_REPARSE_POINT` 句柄读取实名、volume/file ID、attributes、link count、size 与 bytes，实际 hash/read/publish 在已验证 capability 内完成并在关闭前后复核；不得返回验证后的裸路径再由调用方重新打开。只跑本机 Bun 1.3.14 Windows x64 focused integration，覆盖替换、改名、reparse、hard-link、parent identity 与 handle revision 竞态；本任务不置 production capability true、不接 composition root、不运行 VM/13/19，fixture boundary 不能进入 production factory。
-- [ ] `full` mode 只允许 `parent = null | draft_conflict`，可提交本 journal 的 projection 并到 `completed`；`file_only` 只允许 `parent = migration | creation`，projection/projectStore/route 调用次数为 0，parent 自己负责后续 projection、route 与终态。`files_published` 只是 file-only child 的协议终点，**绝不是 recovery asset GC 资格**：parent 必须在 child 首个文章候选/发布副作用前持久绑定并 pin exact target 与 closure recovery assets 的规范 identity、length、SHA-256 及 child/parent/journal binding，Task 6 只消费该 branded parent-pin authority；parent recovery 必须能不依赖 child 进程内对象而独立 reopen、rehydrate、递归冻结并调用 Task 5 `validateTarget()`。只有 parent 已到 migration `activated`、creation 成功终态，或已证明 safe abort，且 parent reference predicate 同时成立，才可授权 GC；`files_published`、parent 未终结或任一 pin/reference 无法证明时资产必须保留。child 永远不得写 parent 状态、提交 parent projection/route 或自行解除 pin。
-- [ ] Task 6 是 Task 3 `journalAuthority.resolveCandidate()` 的唯一 owner：从同一 ControlStore 冻结事件链验证 project UID、journal ID、target ref、实际候选名和 open/terminal state，再铸造 Task 3 opaque capability；caller self-proof、plain clone、错误 parent 或错误项目一律返回无 authority。已终结候选只有凭终态证据才可清理；不存在 journal 的同形文件继续作为 residue 保留不动。
-- [ ] FilePublicationJournal 只向已经由普通项目现场、MigrationJournal 或 ProjectCreationJournal 建立并验证的 `mythpen/`、`volumes/`、`chapters/` 目录发布文件；它不得创建、删除或接管这些目录，也不得把目录建立藏进 `prepared`。
-- [ ] `projectionDisposition.inspectTarget()` 是必填只读 port，Task 6 用 exact observable fake 固定 `base | target | other` 三态；`base` 与 `target` 都是 exact full predicate，不是 generation 别名。`base` 必须逐项证明 project UID/instance、journal binding、base generation、canonical compact basis digest、basis rows、两表 sequence、`ignoredBeforeDigest` 与 pending proposals 全部等于冻结 before；`target` 必须逐项证明同一 project/instance/journal binding 与完整 target after。任一字段、row、digest、authority 或读取完整性无法证明均返回 `other`。若 publish 返回 commit disposition unknown，恢复必须先 inspect：`target` 只补写 `projection_committed`，`base` 才允许在重新验证 writer/project/journal authority 后重试一次，`other` 进入 `RECOVERY_REQUIRED`；禁止盲重试、仅凭 generation 猜 committed 或由 caller 声明结果。Task 12 提供唯一真实实现。
-- [ ] 聚焦强杀只覆盖协议线性化点：状态追加前后、单成员 candidate write/flush/replace/parent-flush、双成员闭包形成 before/after 混合、projection commit 前后、full terminal cleanup，以及 parent-authorized file-only asset GC 前后；同一状态机不按每种领域命令重复展开。恢复只能收敛完整 before、完整 after 或 `RECOVERY_REQUIRED`；完成时返回明确的 recovery disposition 与 `requiresFullValidation=true`，实际 connection epoch、feed full-dirty 和 session fencing 后移 Task 9/12，完整跨任务 crash join 后移 Task 16。
-- [ ] 对外部 CAS 变化不得覆盖现场；full journal 只有 `completed` 终态证据成立后才可清理其 assets，file-only journal 只有上一条 parent-pin/reference/终态或 safe-abort GC 谓词成立后才可清理 recovery assets；owned candidate cleanup 仍要求可证明 before/after，无法归属的同形状候选保留为残留。本任务不修改 API/CLI/产品 factory、route、build-info 或 capability，也不运行全量 suite、production build、VM 或候选验收。
+- [ ] Task 6 只验证 frozen closure 的 exact 成员合同：branded controlled ref、父身份、before bytes/length/raw SHA-256/file identity、after bytes/length/raw SHA-256/存在性、无重复成员与固定顺序「正文 → sidecar → 卷/未分卷索引 → manuscript.json」。changed/new 的 after physical identity 只由后续 staged-after 实体提供。`controlledFiles` 是同 generation 的**全树事实**，closure 是最小变化集；command→closure、`ManuscriptStore.buildClosure()` 与产品命令一律留给 Task 7，Task 6 不从 target 反推或扩大 closure。
+- [ ] `projectBinding.recoveryRootIdentity` 精确绑定已存在的项目级 `<data>/control/manuscripts/<project_uid>/<project_instance_id>/file-assets/` 恢复资产容器；Journal 构造器还必须把真实 `controlStore.directory` 逐字节绑定到对应 `<project_instance_id>/` 根，并把 `controlStore.incarnationId` 绑定到 `projectBinding.controlIncarnationId`，错目录/错 incarnation 在任何读取或副作用前拒绝。Task 6 只 `OPEN_EXISTING`，不创建 recovery 或文章目录。ControlStore 根只为 exact `file-assets` 普通非 reparse 目录保留一个命名空间项，绝不解析其内部资产；近似名、同名文件、symlink/junction 和其他未知根项仍 fail-closed。全部 before/staged/target/displaced asset 直接使用该容器下扁平确定性 `<journal_id>.<asset_name>`，禁止 `<journal_id>/` 子目录；parser 必须从 binding、journal ID、ref 与 member index 重新派生并逐字节比较每个 final/recovery path，不能信任事件自报路径。受控 final path 统一复用 Task 3 `paths.js` authority，不复制第二套文件名拼接。Task 12/13 在任何 child reserve 前唯一创建并验证 ControlStore 根及这一长期容器；Task 7 只消费 activated 容器。GC 只删 manifest-owned 叶文件，永不删除 `file-assets` 或项目 ControlStore 根。
+- [ ] caller 必须先给规范 UUIDv4 `journalId`、logical request binding 和创建命令的完整 serializable `identityReservation`（非创建为 null）。file_only 还须给由父 durable child-reservation event 铸造且绑定 exact closure/journal/request/generation 的 `parentReservationAuthority`，`stageAssets()` 在任何 child asset/event 前调用 `assertReservation()`。随后 compare-and-append `manuscript.file_publication.assets_reserved`，冻结 input digest、完整 identity assignment/reservation/source-basis、确定性 recovery paths、expected length/hash；之后只 create-new/fsync before copy 与 staged-after。displaced-before 绝不预建：只冻结 absent destination path、destination-parent identity、absence predicate 与 relocate 后应等于 frozen before 的 expected identity/hash；实际 first relocate 后才产生 displaced physical identity/两边 directory-fsync fact。recovery/article roots 必须同 physical volume。崩溃在 reserve/stage 间只允许同 request/assignment 按 exact expected 补齐；无法证明者只记 residual。输入 bytes 在首个 await 前独立复制。
+- [ ] `stageAssets()` 返回 opaque capability、frozen `stagedAfterFacts` 和可从 child event chain 重建的 serializable partial `reservationManifest`；partial manifest 只列 expected facts 与事件已精确绑定的 owned identities，不能把未证明同名实体升级为 owned。每次 `createAssetVerified()` 成功后、交付 capability 前，journal 在当前 `assets_reserved | target_reserved` 状态 append/fsync 单调 ready fact，精确绑定 reservation digest、asset kind/path、actual identity、length/hash 与 file/parent flush；exact replay 幂等、冲突 enrichment 拒绝，create 与 ready fact 间强杀只留下 residual。changed/new 的 target controlled `fileIdentity` 必须来自将被 relocate 的同一 staged-after 实体，unchanged 沿用 Task 3 verified identity，delete 从 target facts 移除。`bindTarget()` 先调用 Task 5 唯一 `validateTarget()`，再 append `manuscript.file_publication.target_reserved` 冻结 target asset expected path/length/hash、ready before/staged identities 与 target binding，随后用同一 writer cap create-new/fsync 一份 exact target asset；其 ready fact 落盘后才返回 opaque `preparedAssets` 和完整 serializable manifest。before copy、staged-after、target asset 统一走 `createAssetVerified()`：内部 `node:fs` `O_CREAT | O_EXCL | O_RDWR`/`wx+` 同一 fd 写完、fsync、fstat、从同 fd 回读 length/hash/identity，fsync parent 后关闭，再由 `readVerified` 重开精确复核；未完整通过不交付 capability。恢复 rehydrate target 后递归冻结并重跑 validator，不重取时钟或补字段。
+- [ ] `prepare()` 只消费同一进程 opaque `preparedAssets`；full 直接 prepare，file_only 还必须由 `parentAuthority.assertPin()` 验证 parent 已持久保存完整 manifest+canonical digest 及 exact child/parent/project/generation/closure/target/assets binding。只有 assets exact ready 后才 append `manuscript.file_publication.prepared`；它仍早于首个文章树副作用。规范事件统一使用 `manuscript.file_publication.` 前缀，suffix 仅为 `assets_reserved | target_reserved | prepared | files_published | projection_committed | completed | rolled_back | assets_collected`；前两个 suffix 各有恰好一个 `record_kind = reservation` 状态事件及零个或多个单调 `record_kind = asset_ready` identity/fsync fact，parser 拒绝跳态、重复冲突 payload、错 mode/parent/incarnation/binding、越序 ready fact 与未知状态。
+- [ ] FilePublisher 构造器只接受 canonical branded `writerCapability`，由内部 registry gated resolver 在构造和每次读取/副作用前复核 mode/backend binding 后调用 exact 四个 writer methods；禁止传入、缓存或重新包装 plain operation object、backend、裸 handle、Store read cap 或 clone。它对 Journal 只暴露上面六个高层方法；`readAsset()` 与无副作用 `inspect()` 只能组合 writer cap 的窄 `readVerified`，不得猜现场或回退到 `node:fs`。该原语只接受 exact expected union：`absent + parentIdentity` 返回 `ABSENT`，或 `present + byteSize/identity/parentIdentity/sha256` 返回 `PRESENT` 与防御复制 bytes；OTHER 只能由 manifest 的全部已知 expected facts 均验证失败得出，不能读取或回显第三方 metadata。Journal 聚焦测试可以整体替换六方法 fake publisher，但 production FilePublisher 绝不把这种 fake 当 writer capability。正常路径不创建受控树 `.tmp`，也不用 overwrite/ReplaceFileW。before-present/after-present 只做两次 verified no-replace cross-directory relocate：重验 displaced destination absent 后 exact final before → destination，此时才得到 displaced=before identity并 fsync 两边父目录；同一 staged-after → absent final，再 fsync 两边父目录。create 只有第二步，delete 只有第一步。恢复只接受 `BEFORE(final=before, displaced absent, staged=after)`、`GAP(final absent, displaced=before, staged=after)`、`AFTER(final=after, displaced=before, staged absent)`；第三方抢占保留且拒绝覆盖，rollback 逆序 relocate 原实体。
+- [ ] `manuscript-file-boundary.js` 的 production factory 必须零注入：不接收 backend、callback、cap override 或 fake，只建立一次 module-private shared backend，并以不同 brand/operation table 铸 Task 3 read cap（实现 Store 现有 exact 六方法，底层统一走 handle-bound `readVerified`）和 writer cap（exact `readVerified | createAssetVerified | relocateVerifiedToAbsent | deleteVerified`；首项只供 recovery asset/final 的 manifest-bound 冷读取）。Store 永不获得 writer 操作，FilePublicationJournal/FilePublisher 不能拿 Store read cap 冒充 writer。Task 3 旧的公开通用 file/journal capability mint 必须从 `store.js` 导出中删除：三种 canonical brand/records 只放在内部 `capability-registry.js`，production factory 与 Task 6 journal 只消费内部 mint，测试 fake 只从 `server/testing/manuscript-capability-mint.js` 的 test-only seam 创建。plain clone、foreign-backend cap pair、read/writer swap、旧 public mint 与 production test-mint injection 全部在副作用前拒绝；production pair validator 只验证 original frozen pair、production mode 和共同 backend token，不泄露 operation table。复用 `durability.js` 的 fsync/retry/error mapping，并在 `durability-win32.js` 只补共同缺少的 handle/rename/delete，不复制第二套 FFI/profile；每次使用前仍验证 cap/backend binding 与 exact ref/identity。
+- [ ] full 只允许 `parent = null | draft_conflict`。`files_published` 之前默认前滚；只有 projection 不可能提交、前滚不可安全完成且逆序可证明完整 BEFORE 时才 append `rolled_back`，包括 prepared 后部分文件副作用。`files_published` 后绝不回滚，只用必填 `projectionDisposition.inspectTarget()` exact `base | target | other`：target 只补 `projection_committed`；base 重验 writer/project/journal authority 后最多 publish 一次并复查；other 或再次 unknown 为 `RECOVERY_REQUIRED`。generation、publish return 或 caller disposition 都不能自证。
+- [ ] full 从 `prepared` 冷恢复时必须在任何 file relocate 前 rehydrate/validate target 并检查 projection；只有 exact `base` 可继续，`target | other | unknown` 均以零文章副作用进入 `RECOVERY_REQUIRED`。任何 `files_published` 分支在提交 projection 或推进 file-only parent 前都要重验 manifest 全成员完整 `AFTER`。任一底层错误携 `created | relocated | deleted = true` 时，高层必须保留该未决 disposition；缺少同一 pinned parent 的 flush receipt 时，重试不得仅凭路径外观升级为成功或写 terminal/GC 事件。
+- [ ] file_only 只允许 `parent = migration | creation`，projection/projectStore/route 调用次数恒为 0。完整 pin 前，只有 durable parent child reservation、exact partial manifest、pin-absence 与父 safe-abort intent 可由 `readRecoveryIntent()` 铸 opaque `before`；正常父状态按同一 reservation 幂等继续 stage。完整 pin 一旦耐久，即使 child 仍是 `target_reserved`，恢复也只能消费绑定 exact parent/full manifest/pin/terminal 的 opaque `before | after`：before 才可逆序收敛并 `rolled_back`，after 才可前滚至 `files_published`。plain goal/clone/错 parent/绕过 pin 的 common rollback 全拒绝；child 不写 parent 状态，不提交 parent projection/route，不解除 reservation/pin。
+- [ ] `collectAssets()` 必须避免最高 1 GiB assets 无界泄漏：full 只接受 `completed | rolled_back`；file_only 在完整 pin 前接受父 durable child reservation、safe abort、partial manifest、pin-absence 与 no-reference predicate，在完整 pin 后接受 parent 成功终态或 safe abort、匹配 child state、exact pin 与 no-reference predicate，统一由 `parentAuthority.assertGc()` 验证 authority。`deleteVerified` handle-bound 核对 partial/full manifest exact identity/link-count/size/hash，delete 后 fsync parent；只有已有与 exact path/identity 及同一 verified parent handle 绑定的 `deleted = true, parentFsync = true` 回执时，随后观察到 ABSENT 才可幂等。冷启动 ABSENT 无该回执必须保持 unresolved/`RECOVERY_REQUIRED`，第三状态同样保留且不写 `assets_collected`。全部 owned 叶文件清掉后才 append `...assets_collected`；`file-assets` 是长期项目容器，GC 不删除或替换它，`files_published` 单独不构成 GC 资格。
+- [ ] Task 6 仍是 Task 3 `journalAuthority.resolveCandidate()` 的唯一 owner，但本轮没有任何 production producer 会在受控树创建 legacy `.tmp`，不得为不存在的正例预造事件 schema或靠手改事件自证。L2 v1 authority 因而固定 deny-all：所有 candidate shape 都保守降为 residue且不读、不哈希、不删。只有未来真实 importer/producer 与 exact manifest 事实一起进入明确任务时，才可实现正向 capability，并重新接受 D6 的完整 path/real-name/identity/open/terminal 评审。
+- [ ] 8 组 focused RED 固定为：① intent-first reserve、serializable identity assignment 冻结、before/staged/target 的 O_EXCL 同 fd write/fsync/readback、caller buffer 隔离，且 stage 后 displaced path 仍 absent；② staged identity → controlled facts、target reserve/bind；③ file-only 父 reservation 缺失拒绝、staged 后 pin 前的 partial-manifest before/GC、pin 后 prepared 前与 prepared 后只能服从 branded before/after 三 crash window；④ update/create/delete 的 BEFORE/GAP/AFTER、displaced identity 只在 relocate 后出现、no-replace 抢占、locked/reparse/hard-link/cross-volume；⑤ full events 与 projection base/target/other/unknown；⑥ full rollback 和 file-only pre-pin/post-pin authority 分界；⑦ event parser、ControlStore directory/incarnation binding 与 deny-all candidate authority；⑧ zero-injection shared-backend factory 的 read/writer cap clone/foreign/swap/production-fake 负控，以及 terminal/ref/reservation/pin GC、handle-delete crash/idempotence/第三状态保留。强杀不按每个领域命令重复展开；epoch/feed/session join 留 Task 9/12/16。
+- [ ] FilePublicationJournal 只向已建立并验证身份的 `mythpen/`、`volumes/`、`chapters/` 发布，不创建、删除或接管文章目录。Task 6 不实现 command→closure、真实 SQL/schema、parent journal、API/CLI/route/composition root/build-info；不运行全量 suite、production build、VM/13/19 或 candidate 验收。
 - [ ] 运行并提交：
 
 ```powershell
-bun test --test-name-pattern "manuscript verified handle" server/tests/durability-primitives.test.js
-bun test server/tests/manuscript-file-boundary.test.js server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js
+bun test --test-name-pattern "manuscript verified (read|create|relocate|delete)" server/tests/durability-primitives.test.js
+bun test --test-name-pattern "ControlStore reserves manuscript file-assets directory" server/tests/control-store.test.js
+bun test server/tests/manuscript-store.test.js server/tests/manuscript-file-boundary.test.js server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js
 git diff --check
-git add server/manuscript/file-publication-journal.js server/manuscript/file-publisher.js server/platform/manuscript-file-boundary.js server/platform/durability.js server/platform/durability-win32.js server/testing/fault-injection.js server/tests/manuscript-file-boundary.test.js server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js server/tests/durability-primitives.test.js server/tests/fixtures/file-publication-crash.js
+git add server/manuscript/file-publication-journal.js server/manuscript/file-publisher.js server/manuscript/capability-registry.js server/manuscript/store.js server/platform/manuscript-file-boundary.js server/platform/durability.js server/platform/durability-win32.js server/control-store.js server/testing/fault-injection.js server/testing/manuscript-capability-mint.js server/tests/manuscript-file-boundary.test.js server/tests/manuscript-store.test.js server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js server/tests/durability-primitives.test.js server/tests/control-store.test.js server/tests/fixtures/file-publication-crash.js server/tests/fixtures/manuscript-tree.js
 git commit -m "feat: add recoverable file publication journal"
 ```
 
@@ -495,9 +553,9 @@ function createL2ManuscriptService({ manuscriptStore, fileJournal, projectionSto
 ```
 
 - [ ] `command` 使用明确 discriminated kind 覆盖正文、sidecar、章节/卷创建、改名、移动、重排、删除；`turnContext` 同时接收已经验证、只供产品读语义的 active projection，以及 Task 5 exact canonical `currentProjection = { projectUid, projectInstanceId, basis }`、与 `basis.baseGeneration` 相等的 base generation、ignored ledger、logical request ID 和草稿冲突决定，不负责 session admission 或 freshness。reserved-new 分配与完整 target 编译只能消费 `currentProjection`，不得从过滤 tombstone/sequence/pending 的 active projection 猜测 basis。
-- [ ] 在本任务建立全系统唯一的 `ManuscriptUidReservation`；章节/卷创建必须在 FilePublicationJournal `prepared` 之前，用 CSPRNG seam 产生规范 UUIDv4，并联合检查 canonical `currentProjection` 的完整 compact dependency basis（含 tombstone、两表 sequence、pending 与 `ignoredBeforeDigest`）、规范路径和注入的未终结 migration/creation reservation sources。任一来源不能完整枚举即 fail-closed；同一 logical request 冻结并复用原 UID，碰撞不进入任何文件副作用。普通新建由这个共享服务唯一铸造可序列化 `reserved_new` assignment，精确绑定 kind、logical request、规范 UID、新稳定整数 ID、章节 `num`（卷不得携带）、`reservationId` 与 source basis digest；Task 7 不得铸 `bind_legacy`，也不得把 plain assignment 当作 authority。
-- [ ] 每个领域命令只生成精确 closure、before/after CAS、经共享 reservation 服务取得的 `reserved_new` 或已由 basis 验证的 `reuse_uid` identity plan 与完整 projection target，再调用 FilePublicationJournal；不得直接取得 lifecycle/writer lease，也不得直接调用 REST、Zustand 或平台 feed。
-- [ ] 在本任务按领域命令扩展 Task 3 的同一个 `ManuscriptStore.buildClosure()`；只接受 branded controlled refs 与经过验证的 active projection/ignored ledger，返回不含路径的冻结 before/after bytes/hash/identity 成员及 publication order。这里完整固定 command→closure 表：正文更新=1 md，sidecar 更新=1 json，同时编辑=资源对，移动章节=源/目标索引，章节创建/删除=必要索引+资源对，单纯重排只含变化索引，卷结构操作只触及精确结构文件。Task 6 journal 只消费并验证该冻结 closure，不反向猜测命令语义，也不从 target 的全树 `controlledFiles` 扩大闭包。
+- [ ] 在本任务建立全系统唯一的 `ManuscriptUidReservation`；章节/卷创建必须在 `buildClosure()`/`stageAssets()` 前，用 CSPRNG seam 产生规范 UUIDv4，并联合检查 canonical `currentProjection` 的完整 compact dependency basis（含 tombstone、两表 sequence、pending 与 `ignoredBeforeDigest`）、规范路径和注入的未终结 migration/creation reservation sources。任一来源不能完整枚举即 fail-closed；同一 logical request 冻结并复用原 UID，碰撞不进入任何 recovery asset 或文章副作用。普通新建由这个共享服务唯一铸造可序列化 `reserved_new` assignment，精确绑定 kind、logical request、规范 UID、新稳定整数 ID、章节 `num`（卷不得携带）、`reservationId` 与 source basis digest；Task 7 不得铸 `bind_legacy`，也不得把 plain assignment 当作 authority。
+- [ ] 每个领域命令先生成 caller-owned canonical `journalId`，创建命令先取得完整 serializable `identityReservation`（非创建为 null），然后固定执行 `buildClosure（恰好一次）→ parent freeze child reservation(file_only only) → stageAssets(identityReservation) → merge stagedAfterFacts → buildTarget → bindTarget → parent pin(file_only only) → prepare → publishFiles`；ordinary full 随后 `commitProjection → complete`，不伪造 parent reservation/pin。merge 只把 changed/new 的 staged-after identity 覆盖到完整 candidate `controlledFiles`，unchanged 沿用 Task 3 verified facts，delete 移除，再调用 Task 5 `buildTarget()`；因此不修改 Task 5，也不把缺失 identity 留给 Task 12 补字段。Task 7 不直接取得 lifecycle/writer lease，也不调用 REST、Zustand 或平台 feed；Task 12/13 的 file_only caller 必须复用相同顺序且不得二次 build closure。
+- [ ] 在本任务按领域命令扩展 Task 3 的同一个 `ManuscriptStore.buildClosure()`；只接受 branded controlled refs 与经过验证的 active projection/ignored ledger，返回不含路径的 frozen before bytes/hash/physical identity、after bytes/hash/存在性与 publication order，after physical identity 明确由 `stageAssets()` 补入。这里完整固定 command→closure 表：正文更新=1 md，sidecar 更新=1 json，同时编辑=资源对，移动章节=源/目标索引，章节创建/删除=必要索引+资源对，单纯重排只含变化索引，卷结构操作只触及精确结构文件。Task 6 journal 只消费并验证该冻结 closure，不反向猜测命令语义，也不从 target 的全树 `controlledFiles` 扩大闭包。
 - [ ] 删除章节/卷只通过权威结构移除 + SQLite tombstone；卷仍承载 indexed ignored 章节时在任何文件副作用前返回 `IGNORED_REFERENCE_BLOCKS_CONTAINER_DELETE`。
 - [ ] 用 fake store/journal/projection/reservation source 写纯领域测试，证明各命令的闭包、UID 幂等/碰撞/不完整枚举与 tombstone/position/opaque ignored 语义；生产路由接线明确推迟到 Task 9B。
 - [ ] 运行并提交：
@@ -718,6 +776,8 @@ git commit -m "feat: preserve ignored manuscript identities"
 - Create: `server/tests/draft-conflict-journal.test.js`
 - Create: `server/tests/draft-conflict-crash.test.js`
 - Create: `server/tests/fixtures/draft-conflict-crash.js`
+- Modify: `server/control-store.js`
+- Modify: `server/tests/control-store.test.js`
 - Create: `src/lib/dirtyResourceRegistry.ts`
 - Create: `src/lib/manuscriptConflicts.ts`
 - Modify: `src/stores/useEditorStore.ts`
@@ -757,6 +817,7 @@ interface DirtyResourceRegistry {
 
 - [ ] dirty registry 覆盖所有文章域：已加载正文、自动保存防抖、已卸载正文保存队列；标题/大纲/状态/摘要/五个叙事字段 sidecar；卷标题/卷摘要 metadata；移动/重排 structure queue；以及多窗口尚未提交字段。正文、sidecar、卷 metadata 与 structure 分域；同一资源域相撞才冻结该资源，其他资源仍可刷新。
 - [ ] server conflict journal 在独立资产根持久保存不可变 draft bytes/hash、field mask、external bytes/hash、base generation、资源域、`supersedes`、decision epoch 与状态；`backup_durable` 必须在向 UI 报告草稿已保留前完成 file fsync 与 parent fsync。诊断包不含正文，只含 conflict/supersedes/epoch/child、hash、大小、field mask 和状态。
+- [ ] 在首个 conflict 副作用前，把 exact `draft-conflict` 安装为 ControlStore 的第二个保留 plain non-reparse 目录名；只忽略该容器内部，仍拒绝同名文件、symlink/junction、大小写/拼写近似名和其他未知根项。`<conflict_id>/` 由 DraftConflictJournal 自己验证和拥有，绝不写进 Task 6 的 `file-assets`。
 - [ ] 恢复 `conflict_detected` 且 backup 不完整时只删除该 conflict 记录并在完全校验重建；`backup_durable` 验证 backup 后只能追加首个 `decision_ready(0)`；只有 `decision_ready(epoch)` 可接收用户选择，恢复流程绝不自动选边。
 - [ ] 两个 intent 必须在任何副作用前落盘。`resolve_apply_intent` 冻结 epoch、唯一 child FilePublicationJournal ID、外部 raw-hash CAS、projection before/target generation；`resolve_accept_intent` 冻结 epoch、接受 hash、资源 UID 与 projection before/target generation。旧 epoch 请求、迟到重试和旧 child 永久 stale。
 - [ ] `apply_saved_draft` 经 writer lease、freshness、外部 raw hash CAS 和 child FilePublicationJournal 发布；child 必须先到 `completed`，父才可写 `resolved_apply_draft`，child 未终结时父不得 `archived`，child 不得写父状态。child 收敛完整 before 时父依次追加 `resolve_apply_aborted` 和 `decision_ready(epoch + 1)`；完整 after 时写 `resolved_apply_draft`；无法证明进入 `RECOVERY_REQUIRED`。
@@ -769,10 +830,11 @@ interface DirtyResourceRegistry {
 
 ```powershell
 bun test server/tests/draft-conflict-journal.test.js server/tests/draft-conflict-crash.test.js
+bun test --test-name-pattern "ControlStore reserves manuscript draft-conflict directory" server/tests/control-store.test.js
 node --test --test-concurrency=1 tests/dirtyResourceRegistry.test.ts tests/manuscriptConflicts.test.ts tests/editorSaveQueue.test.ts
 pnpm typecheck
 git diff --check
-git add server/manuscript/draft-conflict-journal.js server/manuscript/draft-conflict-service.js server/tests/draft-conflict-journal.test.js server/tests/draft-conflict-crash.test.js server/tests/fixtures/draft-conflict-crash.js src/lib/dirtyResourceRegistry.ts src/lib/manuscriptConflicts.ts src/stores/useEditorStore.ts src/stores/useChapterStore.ts tests/dirtyResourceRegistry.test.ts tests/manuscriptConflicts.test.ts tests/editorSaveQueue.test.ts
+git add server/manuscript/draft-conflict-journal.js server/manuscript/draft-conflict-service.js server/tests/draft-conflict-journal.test.js server/tests/draft-conflict-crash.test.js server/tests/fixtures/draft-conflict-crash.js server/control-store.js server/tests/control-store.test.js src/lib/dirtyResourceRegistry.ts src/lib/manuscriptConflicts.ts src/stores/useEditorStore.ts src/stores/useChapterStore.ts tests/dirtyResourceRegistry.test.ts tests/manuscriptConflicts.test.ts tests/editorSaveQueue.test.ts
 git commit -m "feat: recover external manuscript draft conflicts"
 ```
 
@@ -827,6 +889,14 @@ class NativeManuscriptProjectStore {
 class NativeProjectionDisposition {
   inspectTarget({ target, journalEvidence }) {} // base | target | other
 }
+
+// Task 6 parentAuthority 的 migration 真实实现；只消费耐久 MigrationJournal。
+class MigrationFilePublicationParentAuthority {
+  assertReservation({ authority, parent, childReservation }) {}
+  assertPin({ authority, parent, manifest }) {}
+  readRecoveryIntent({ authority, parent, assetManifest }) {} // opaque before | after；partial 只可 before
+  assertGc({ authority, parent, assetManifest, childState }) {}
+}
 ```
 
 **State model:**
@@ -836,8 +906,9 @@ migration_reserved → route_fenced → source_snapshot_ready
 → files_candidate_ready → file_publication_started → files_published
 → database_candidate_ready → activation_intent → activated
 
-before activation_intent, with child at complete files before:
-  migration_abort_intent → migration_aborted
+before activation_intent: migration_abort_intent
+migration_abort_intent + child complete files before + cleanup complete:
+  migration_aborted
 unprovable state: RECOVERY_REQUIRED
 ```
 
@@ -862,14 +933,15 @@ unprovable state: RECOVERY_REQUIRED
 - [ ] transition proof 精确绑定 kind=`migration | new_creation`、before/after schema 与 trigger digest、project instance、before/final commit seq、candidate identity、parent journal ID/digest 和 target generation。Task 12 实现并消费 `migration` kind；同时把 verifier/builder 作为 Task 13 的唯一 `new_creation` 接口，不新增平行 ControlStore 事件链。
 - [ ] `native-sql-authorization.js` 与 sql.js guard 共同消费 Task 2 的四个 `RESERVED_PROJECT_META_KEYS`：普通业务 SQL 在 schema11 route fence 前后及 schema12 都不能插入、更新、删除或借 CTE/subquery/复杂 predicate 间接修改这些键；只有绑定同一 transition/journal 的内部语句可写。schema12 的章节/卷物理 DELETE 由 authorization 与 v2 barrier 双重拒绝，schema11 的 legacy sqlite 删除语义在 Task 14B 接线前保持不变。
 - [ ] 把 Stage B fixture/store 改为显式 versioned fixture：既有 schema11 genesis、payload exact keys、18/54/digest 与全部测试值不变；schema12 fixture 必须由真实 v2 candidate + 持久 transition proof 建立，不能靠测试参数或 live schema 自证。用该 fixture 聚焦验证冷启动、cached open、事务 preflight、commit 后、recovery 与 transition 漂移拒绝。
-- [ ] route fence 后由 MigrationJournal parent 创建或验证规范 lifecycle lock，并记录 before/after 身份及 file/parent flush 谓词；Task 8 adapter 只可 `OPEN_EXISTING`。随后建立一致源快照与迁移前备份，完成 integrity、foreign-key、旧章节编号、伏笔预期位置、schema 依赖、容量和目标缺席检查。只有这些谓词、源/备份身份与 SHA-256 全部冻结后才写 `source_snapshot_ready`；任何不明确分别返回对应 legacy/schema 错误，不能进入文件候选阶段。
+- [ ] route fence 后由 MigrationJournal parent 创建或验证规范 lifecycle lock，并记录 before/after 身份及 file/parent flush 谓词；Task 8 adapter 只可 `OPEN_EXISTING`。随后建立一致源快照与迁移前备份，完成 integrity、foreign-key、旧章节编号、伏笔预期位置、schema 依赖、容量和目标缺席检查。只有这些谓词、源/备份身份与 SHA-256 全部冻结后才写 `source_snapshot_ready`；任何不明确分别返回对应 legacy/schema 错误，不能进入 child `assets_reserved`/`stageAssets()`。
 - [ ] `route_fenced` 冻结 `<data>/manuscripts/<project_uid>/`、`mythpen/`、`volumes/`、`chapters/` 四级目录逐级 before/after canonical real identity、父身份、absent/owned 谓词和本 migration ID 所有权，且必须早于第一个 `mkdir`。parent 在进入既有 `source_snapshot_ready/files_candidate_ready` 阶段的动作中逐级创建并重新 canonicalize，fsync 每个新目录及其父目录；身份不符进入 `RECOVERY_REQUIRED`。不新增 `directories_ready` 等规范外状态。
-- [ ] `files_candidate_ready` 冻结唯一 child journal ID、候选 tree after digest、唯一数据库 after candidate digest、共同 target generation、目标身份和完整 files before/after 谓词；parent 不得创建第二个 child 或第二份数据库 candidate。
-- [ ] parent 必须在 child 的第一次候选/发布副作用前持久化 `file_publication_started`；child FilePublicationJournal 只负责 `prepared → files_published` 并收敛完整 files before/after，不得写 projection、activation 或 parent 状态。child 完整 after 后 parent 才写 `files_published`，调用本任务唯一 builder 构造/验证 populated schema 12 candidate，并写入上述持久 transition proof。最终一次 NativeProjectStore publish 同时提交完整投影和 route `files`，重启 admission 只能消费该规范 proof，不接受 live schema 自证。
-- [ ] child 只能把文件发布到 parent 已建立且身份匹配的三个受控目录，永不创建目录。`activation_intent` 前只有 child 可证明完整 files before，且 parent 可逐级证明目录是本 migration 创建、没有外部/非 owned 内容、没有未知句柄并满足安全删除谓词时，才可由 parent 自内向外删除 owned 目录并 fsync 父目录、删除本 migration 从 absent 创建的 lifecycle lock、CAS 回 sqlite；before 已存在目录/锁只验证并保留。任一目录所有权或内容不明确都不得删除，进入 `RECOVERY_REQUIRED`；之后只能前滚。源 DB 和迁移前备份永久保留。
-- [ ] 恢复顺序固定为：先恢复 L1 journal；联合加载 route 与唯一 MigrationJournal；处理合法 `sqlite + migration_reserved` reservation；验证 `migrating` 绑定并补齐 `route_fenced`；把唯一 child 收敛到完整 files before/after；据 child 终态构造或丢弃唯一数据库 candidate；验证共同 after；最后写 `activation_intent` 并原子发布为 `activated`。父子 ID/digest/generation 不一致、多个 child 或数据库 candidate 不唯一都进入 `RECOVERY_REQUIRED`。
-- [ ] 对 `migration_reserved`、`route_fenced`、`source_snapshot_ready`、`files_candidate_ready`、`file_publication_started`、`files_published`、`database_candidate_ready`、`activation_intent`、`activated` 以及 `migration_abort_intent → migration_aborted` 的每个阶段前后强杀，并覆盖四级目录每次 mkdir/re-canonicalize/fsync/parent-fsync 前后；恢复逐项复核 frozen identity/ownership，幂等复用同一 migration ID/UID/目录/child，不创建第二目录或第二 child。测试明确拒绝 `lifecycle_ready`、`directories_ready`、`completed` 或其他替代状态，并只向 Task 14B 暴露这一套 service。
-- [ ] 只有 `activated` 或 `migration_aborted` 才是 MigrationJournal 终态；分别满足规范的 route/target/children/cleanup/reference 谓词后才能进入 L1 bounded GC。aborted reservation 回收后只保留 CSPRNG 概率保证，不宣称全局永久不复用。这里只实现 service/journal；CLI 与 REST/API 的同一 service 接线在 Task 14B，不能在本任务建立第二套状态机。
+- [ ] source snapshot ready 后先调用 Task 7 `buildClosure()` **恰好一次**（纯读），随后 `files_candidate_ready` 在 child `stageAssets()` 前冻结该 exact closure/digest、唯一 caller-provided child journal ID、logical request、projection basis digest、共同 target generation、目标身份、files before/after 谓词和 child asset reservation；parent 不得创建第二个 child。重新读取该事件后由真实 authority 铸 `parentReservationAuthority`，再严格执行 `stageAssets → merge stagedAfterFacts → buildTarget → bindTarget`，不二次 build closure，也不让 Task 5 或后续 Task 12 adapter 补 physical identity。
+- [ ] target 项目 ControlStore 目录下必须有唯一 canonical 项目级 recovery root `<data>/control/manuscripts/<project_uid>/<project_instance_id>/file-assets/`。MigrationService 在任何 child `assets_reserved` 前以本任务目录所有权 create-new/fsync/handle-verify ControlStore 根和 exact `file-assets` 容器，并把容器 identity 写入 target project binding；恢复只 `OPEN_EXISTING` 复核，绝不创建 per-journal 子目录。activated 后普通 Task 7 复用同一容器，退役前不得删除；asset GC 只删扁平 journal-owned 叶文件。
+- [ ] `bindTarget()` 返回后，parent 把完整 serializable manifest、canonical digest 与 exact parent/child/project/generation/closure/target/assets binding 写入 `file_publication_started` 作为耐久 pin；重新读取并由本任务真实 `MigrationFilePublicationParentAuthority.assertPin()` 铸 authority 后，child 才能 `prepare → publishFiles`。child 完整 after 后 parent 才写 `files_published`，再调用唯一 builder 构造/验证 populated schema 12 physical candidate 和 transition proof。最终 NativeProjectStore publish 同时提交投影和 route；child 不写 projection/activation/parent 状态。
+- [ ] child 只能向 parent 已建立且身份匹配的三个受控目录发布，永不创建目录。`migration_abort_intent` 可在 `activation_intent` 前任一 parent 阶段先耐久写入，不以 child 已到 before 为前置；随后完整 pin 前由真实 parent authority 以 `files_candidate_ready` reservation、exact partial manifest 和 pin-absence铸 opaque `before`，完整 pin 后则以 exact manifest/pin 铸 `before`。只有 child 逆序收敛到完整 files before/`rolled_back`，且 parent 可证明 owned 目录无外部内容/未知句柄时，才可自内向外删除、fsync、删除本 migration 从 absent 创建的 lifecycle lock、CAS 回 sqlite并写 `migration_aborted`。正常父状态在完整 pin 后只铸 `after`；任一身份/所有权不明确为 `RECOVERY_REQUIRED`。源 DB 和迁移前备份永久保留。
+- [ ] 恢复顺序固定为：先恢复 L1 journal；联合加载 route 与唯一 MigrationJournal；处理合法 reservation；验证 `migrating`/`route_fenced`；完整 pin 前验证 child ID、parent reservation 与 partial manifest，正常状态幂等续 stage、abort intent 只铸 before；完整 pin 后验证 full manifest/pin 并从父耐久状态取得 branded before/after intent收敛 child；据 child 终态构造或丢弃唯一 physical database candidate；验证共同 after；最后写 `activation_intent` 并原子发布为 `activated`。plain goal、父子 ID/digest/generation 不一致、多个 child 或 candidate 不唯一都进入 `RECOVERY_REQUIRED`。
+- [ ] 对全部 parent 阶段前后强杀，并额外覆盖 child `assets_reserved` 后 asset staged/pin 前的 abort+partial-manifest GC、pin 后 prepared 前、prepared 后以及 no-replace GAP；恢复复核 frozen identity/ownership，幂等复用同一 migration ID/UID/目录/child/partial-or-full manifest，不创建第二目录、child 或 asset set。测试明确拒绝 `lifecycle_ready`、`directories_ready`、`completed` 等替代 parent 状态，并只向 Task 14B 暴露这一 service。
+- [ ] 只有 `activated` 或 `migration_aborted` 是 parent 终态。分别证明 child 为匹配的 `files_published` 或 `rolled_back`、route/target/cleanup 完整、对应 reservation/pin 未漂移且没有恢复流程、活动请求、database candidate 或其他 parent 引用 partial/full manifest 后，真实 `assertGc()` 才铸 authority 调 child `collectAssets()`；child 写 `assets_collected` 后 parent 才解除 reservation/pin并进入 L1 bounded GC。aborted reservation 回收后只保留 CSPRNG 概率保证。CLI/REST 接线留 Task 14B。
 - [ ] 运行并提交：
 
 ```powershell
@@ -902,23 +974,24 @@ git commit -m "feat: migrate projects to file authority"
 **State model:**
 
 ```text
-creation_reserved → project_control_ready → files_published
+creation_reserved → project_control_ready → file_publication_started → files_published
 → database_candidate_ready → activation_intent → activated → listed → completed
 
-before activation_intent: creation_abort_intent → creation_aborted
+before activation_intent: creation_abort_intent → child_assets_released → creation_aborted
 unprovable state: RECOVERY_REQUIRED
 ```
 
 - [ ] parent journal 固定在 `<data>/control/project-creation/<creation_id>/`，位于目标 DB、ControlStore、lifecycle lock 和文章根之外。
 - [ ] `ProjectCreationService` 必须注入并调用 Task 7 建立、Task 12 扩展的同一个 `ManuscriptUidReservation`；在 registry/config lease 下，由共享服务扫描 registry、全部现存 roots、全部未 GC ProjectCreationJournal project reservations 与全部注册项目 ControlStore 中未 GC MigrationJournal project reservations。任一来源枚举不完整即在 journal/目录副作用前 fail-closed。
 - [ ] 共享 reservation 服务冻结 project UID、四个目标路径/身份及 absent 谓词；同一 creation ID 重试复用 UID，落盘前碰撞可重抽，落盘后碰撞只返回 `UID_RESERVATION_COLLISION`。不得在 ProjectCreationService 内实现第二套随机、扫描或碰撞逻辑。
-- [ ] `creation_reserved` 在任何 `mkdir` 前逐级冻结目标 ControlStore、数据库、sibling lifecycle lock、文章根及 `<project_uid>/mythpen/{volumes,chapters}` 的 canonical before/after identity、父身份、absent/owned 谓词和本 creation ID 所有权。parent 在既有 `project_control_ready` 动作中创建项目 ControlStore、不可变身份、sibling lifecycle lock 和四级文章目录，逐项重新 canonicalize，fsync 文件、每个新目录与父目录；不新增规范外状态，Task 8 adapter 仍只用 `OPEN_EXISTING`。
-- [ ] 创建初始 `manuscript.json`/`unassigned.json` 空数组，由带 `parent_creation_id` 的 child file journal 发布到 parent 已建立且身份匹配的目录；child 不得创建或接管目录。
+- [ ] `creation_reserved` 在任何 `mkdir` 前逐级冻结目标 ControlStore、数据库、sibling lifecycle lock、文章根及 `<project_uid>/mythpen/{volumes,chapters}` 的 canonical before/after identity、父身份、absent/owned 谓词和本 creation ID 所有权。parent 先创建项目 ControlStore、不可变身份、sibling lifecycle lock 和四级文章目录并逐项重新 canonicalize/fsync；取得项目 writer 后，对初始空文件调用 Task 7 `buildClosure()` 恰好一次（纯读），再追加 `project_control_ready` 冻结 exact closure/digest、唯一 child journal ID、logical request、projection basis digest、共同 target generation 与 child asset reservation。Task 8 adapter 仍只用 `OPEN_EXISTING`。
+- [ ] 上述目标 ControlStore 目录下的 exact `file-assets/` 是 canonical 项目级 recovery root `<data>/control/manuscripts/<project_uid>/<project_instance_id>/file-assets/`；ProjectCreationService 必须在 child `assets_reserved` 前完成 ControlStore 根与该容器的 create-new/fsync/handle identity 证明并绑定进 project/child reservation。child 只在该既有容器创建扁平 `<journal_id>.<asset_name>`，不得建立 per-journal 目录；创建中止仍按 ControlStore-last 顺序删除整个项目 ControlStore，成功项目则长期保留该容器供普通 Task 7 使用。
+- [ ] 重新读取 `project_control_ready` 并由 creation 真实 parentAuthority 铸 `parentReservationAuthority` 后，初始 `manuscript.json`/`unassigned.json` 空数组才按 `stageAssets → merge stagedAfterFacts → buildTarget → bindTarget` 建立，不得二次 build closure。ProjectCreationService 把完整 manifest+canonical digest 和 exact bindings 写入 `file_publication_started` 耐久 pin，重新读取并 `assertPin()` 后 child 才可 `prepare → publishFiles`。child 不创建/接管目录、不写 parent 状态；完整 after 后 parent 才写 `files_published`。
 - [ ] 以 `sourceKind = empty` 调用 Task 12 的同一个 schema 12 candidate builder，构造唯一空投影 candidate，route 出生即 `files`，全程不出现 `migrating`；不得复制 DDL、trigger、digest、inspector 或另建 empty-candidate generator。`database_candidate_ready → activation_intent → activated` 使用同一 verifier 的 `new_creation` kind，绑定 empty-before/after-v2 digest、project instance、commit seq、candidate identity 与 creation ID；activation intent 后原子发布，重启 admission 不接受 live schema 自证。
 - [ ] 激活后才写 config route cache/recent list；崩溃在 activated/listed 之间由应用级 journal 补列，不能创建第二个项目。
 - [ ] 启动时在开放项目列表/创建入口前恢复所有非终结 creation journals。
-- [ ] activation intent 前只有逐项证明本 creation ID 所有权、child 完整 before、每个 owned 目录没有外部/未知内容且无未知句柄时，parent 才能自内向外删除目标文件与 owned 目录并逐级 fsync；before 已存在项不删，任一身份/所有权/内容不可证明时 `RECOVERY_REQUIRED`。父 journal 本身不得删除；之后只能前滚或 recovery required。
-- [ ] 九个步骤前后强杀，并覆盖四级目录每次 mkdir/re-canonicalize/fsync/parent-fsync 前后；恢复逐项复核 frozen identity/ownership，幂等复用同一 creation ID/UID/目录/child，不创建第二目录或接管外部目录。断言普通 files session/direct feed 只在 completed after 成立后建立。共享 reservation tests 注入普通项目创建、migration 与另一 ProjectCreationJournal 的三方碰撞，并覆盖任一注册 ControlStore/creation journal 枚举失败时零副作用拒绝。
+- [ ] activation intent 前必须先持久化 `creation_abort_intent`。完整 pin 前真实 parent authority 以 `project_control_ready` child reservation、exact partial manifest 与 pin-absence铸 opaque `before`，完整 pin 后以 exact manifest/pin 铸 `before`；child 尚未开始则证明 exact absence。child 到完整 before/`rolled_back` 后，必须在目标 ControlStore 仍存在时 `assertGc → collectAssets → assets_collected`，再由外部 ProjectCreationJournal 写入/fsync `child_assets_released`（child terminal/never-started、partial/full manifest、collection receipt、reservation/pin release）。只有该 receipt 已耐久才按文章根→DB/candidate→lifecycle lock→ControlStore-last verified-delete/fsync并写 `creation_aborted`；正常父状态在完整 pin 后只铸 `after`，任一不可证明为 `RECOVERY_REQUIRED`，父 journal本身不得删除；activation intent 后只前滚或 recovery required。
+- [ ] 九个步骤前后强杀，并额外覆盖 child asset staged/pin 前、pin 后 prepared 前、prepared 后、no-replace GAP、collect 前后、external release receipt 前后及 ControlStore 删除后/creation_aborted 前；恢复幂等复用同一 creation ID/UID/目录/child/partial-or-full manifest，不接管外部目录。成功路径在 `completed` 后证明匹配 child terminal/full pin/no-reference 才 `collectAssets()`；abort 路径必须在目标删除与 terminal 前完成 collection/外存 receipt，`creation_aborted` 后不再读取已删除 child journal。随后 parent 才进入 30 天保留/GC。断言普通 session/feed 只在 completed after 建立，并保留三方 reservation/枚举失败零副作用测试。
 - [ ] 运行并提交：
 
 ```powershell
@@ -998,6 +1071,7 @@ git commit -m "feat: retire file-authority projects safely"
 - [ ] 为正文、标题、大纲、状态、摘要、五个叙事字段、卷创建/改名/移动/重排/删除分别写 route/tool 失败测试，断言 `files` route 不执行文章真值 SQL 直写；REST、自动保存、AI 工具、续写和提案接受统一调用 Task 9B 写 turn。
 - [ ] 最终写 turn 固定为 Task 8 session admission → writer lease → Task 9 `ensureProjectionCurrent()` → Task 11 基于完整 dirty registry 的真实 conflict gate → Task 7 `execute()`；任何前置失败不得创建 FilePublicationJournal candidate。`sqlite` 继续走 L1，`migrating` 返回 `PROJECT_MIGRATION_BUSY`，`retired` 拒绝普通入口。
 - [ ] 产品 composition root 构造 Task 12 的真实 `ManuscriptRouteStore({ journalAuthority })`，并把同一实例作为 Task 8 必填 `routeAdmissionVerifier` 注入；生产不得注入 Task 8 fake、caller callback 或 live-schema verifier。`manuscript-product-routing.test.js` 注入 route-admission 拒绝，断言读取、写入、导出和 AI context 都不进入后续 query/operation，且原始 admission error code/cause 原样向调用方传播。
+- [ ] 同一 composition root 必须调用 Task 6 零注入 `createProductionManuscriptFileBoundary()`，先用 production pair validator 重验原始 frozen pair、production mode 与共同 backend token，再只把 read cap 交给 ManuscriptStore、只把 writer cap 交给 FilePublisher；不得接受 caller pair/cap、plain clone、test mint、foreign backend 拼接或 read/writer swap。`manuscript-product-routing.test.js` 必须证明以上替换在任何目录枚举、asset 创建或 journal 事件前拒绝。
 - [ ] 列表、详情、导出、统计、角色关联、AI 上下文和只读工具统一走 Task 9B readable wrapper + ActiveManuscriptProjection；消除产品路径 tombstone、旧 generation 和 `MAX(num)` 读取。
 - [ ] `server/prompts/context.js` 不再直接打开项目数据库或用 broad catch 把 admission/freshness/route 错误降级成 `项目: <name>`；它通过同一 readable wrapper + ActiveManuscriptProjection 取得 active metadata context，admission 错误必须原样抛出并中止本次 AI 调用。该覆盖写入既有 `server/tests/manuscript-product-routing.test.js`，不新增无对应实现边界的 prompt 测试文件。
 - [ ] `recent-projects.js` 只消费 Task 12 的 route cache；缓存缺失、损坏、缺项或陈旧时调用同一 `rebuildConfigCache()` 从项目数据库真值重建，不能从 config/caller 值反写项目 route。产品 progress/overdue 只使用活跃行的 `manuscript_position`，并以 `currentMax(manuscript_position) >= expected_resolve_manuscript_position` 判定 overdue；不得读取 `MAX(num)` 或旧 `expected_resolve_chapter`。

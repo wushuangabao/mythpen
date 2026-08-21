@@ -14,6 +14,10 @@ const {
   parseCanonicalJson,
 } = require('./format');
 const {
+  requireFileBoundaryCapability,
+  requireJournalAuthorityCapability,
+} = require('./capability-registry');
+const {
   assertControlledFileRef,
   classifyTreeEntry,
   createDirectoryNameIndex,
@@ -22,15 +26,6 @@ const {
   verifyManuscriptPathIdentity,
 } = require('./paths');
 
-const FILE_BOUNDARY_METHODS = Object.freeze([
-  'enumerateDirectory',
-  'inspectDirectory',
-  'inspectPath',
-  'listActualNames',
-  'probeControlledFile',
-  'readControlledFile',
-]);
-const JOURNAL_AUTHORITY_METHODS = Object.freeze(['resolveCandidate']);
 const DIRECTORY_ROLES = Object.freeze(['mythpen', 'volumes', 'chapters']);
 const ROLE_ORDER = Object.freeze({
   chapter_body: 0,
@@ -40,8 +35,6 @@ const ROLE_ORDER = Object.freeze({
   manuscript: 4,
 });
 
-const fileBoundaryRecords = new WeakMap();
-const journalAuthorityRecords = new WeakMap();
 const storeRecords = new WeakMap();
 const treeIdentityRecords = new WeakMap();
 const validatedSnapshotRecords = new WeakMap();
@@ -110,36 +103,6 @@ function deepFreeze(value, seen = new WeakSet()) {
   for (const key of Reflect.ownKeys(value)) deepFreeze(value[key], seen);
   seen.delete(value);
   return Object.freeze(value);
-}
-
-function snapshotMethods(implementation, methodNames, label) {
-  const descriptors = dataDescriptors(implementation, label);
-  assertExactKeys(descriptors, methodNames, label);
-  const methods = {};
-  for (const methodName of methodNames) {
-    const method = descriptorValue(descriptors, methodName);
-    if (typeof method !== 'function') throw new TypeError(`${label}.${methodName} is required`);
-    methods[methodName] = method;
-  }
-  return Object.freeze(methods);
-}
-
-function createFileBoundaryCapability(implementation) {
-  const capability = Object.freeze({ capability: 'manuscript_file_boundary' });
-  fileBoundaryRecords.set(
-    capability,
-    snapshotMethods(implementation, FILE_BOUNDARY_METHODS, 'fileBoundary implementation'),
-  );
-  return capability;
-}
-
-function createJournalAuthorityCapability(implementation) {
-  const capability = Object.freeze({ capability: 'manuscript_journal_authority' });
-  journalAuthorityRecords.set(
-    capability,
-    snapshotMethods(implementation, JOURNAL_AUTHORITY_METHODS, 'journalAuthority implementation'),
-  );
-  return capability;
 }
 
 function assertCanonicalDataRoot(value) {
@@ -483,6 +446,7 @@ async function enumerateDirectory(record, context, directoryRole) {
   try {
     iterable = record.fileBoundary.enumerateDirectory({
       directoryRole,
+      expectedIdentity: context.directories[directoryRole].identity,
       identity: context.binding,
       paths: context.paths,
       scanEpoch: context.scanEpoch,
@@ -715,14 +679,8 @@ class ManuscriptStore {
     capacityObserver,
   } = {}) {
     const safeDataRoot = assertCanonicalDataRoot(dataRoot);
-    const boundary = fileBoundaryRecords.get(fileBoundary);
-    const authority = journalAuthorityRecords.get(journalAuthority);
-    if (boundary === undefined) {
-      throw new TypeError('fileBoundary must be an opaque manuscript capability');
-    }
-    if (authority === undefined) {
-      throw new TypeError('journalAuthority must be an opaque manuscript capability');
-    }
+    const boundary = requireFileBoundaryCapability(fileBoundary).methods;
+    const authority = requireJournalAuthorityCapability(journalAuthority).methods;
     if (capacityObserver !== undefined && typeof capacityObserver !== 'function') {
       throw new TypeError('capacityObserver must be a function');
     }
@@ -1102,6 +1060,4 @@ class ManuscriptStore {
 
 module.exports = {
   ManuscriptStore,
-  createFileBoundaryCapability,
-  createJournalAuthorityCapability,
 };

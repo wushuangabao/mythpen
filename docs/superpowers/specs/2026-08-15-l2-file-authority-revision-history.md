@@ -1,8 +1,8 @@
 # L2 文件权威层规格修订历史
 
-对应主规格：[L2 文件权威层规格（第 2.10 版）](./2026-08-15-l2-file-authority-spec.md)
+对应主规格：[L2 文件权威层规格（第 2.12 版）](./2026-08-15-l2-file-authority-spec.md)
 
-本文保留主规格原 §19 编号，记录第 2 版至第 2.10 版的修订、评审与证据演进。本文仅用于审计和设计溯源；实施约束、验收标准与完成定义以主规格 §1–§18 为准。
+本文保留主规格原 §19 编号，记录第 2 版至第 2.12 版的修订、评审与证据演进。本文仅用于审计和设计溯源；实施约束、验收标准与完成定义以主规格 §1–§18 为准。
 
 ## 19. 第 2 版修订清单
 
@@ -128,7 +128,7 @@
 | 4 | P1 | feed 启动无条件要求历史创建/迁移父 journal 成功终态，但成功 journal 可以合法 GC | 9.1、15.6 | 改为“父 journal 存在则必须成功终态，任何非终结父 journal 阻断”；合法 GC 后以 route、持久身份、物理绑定、generation 与首次完全校验为准 |
 | 5 | P1 | active ignored 文件在完全校验后发生外部扩容或成员变化时可被增量路径直接跳过 | 5.1.2、7.1、9.3、15.1、15.4、16.2、18 | ignored 账本保存成员与容量 before；每次 dirty 重验全部规范成员、身份、单文件和总量并更新同 generation 容量快照，无法增量证明则全脏，外部超限现场保留并持续阻断 |
 | 6 | P1 | project UID 碰撞扫描漏掉 MigrationJournal reservation，且其 GC 边界未定义 | 12.6、15.5、18 | 扫描所有当前注册 ControlStore 中仍存在的 migration reservation，扫描不完整 fail-closed；固定 aborted/activated journal 进入 L1 bounded GC 的谓词，并诚实声明 aborted GC 后只剩 CSPRNG 概率保证 |
-| 7 | P1 | 普通新建章节/卷没有 prepared 前碰撞检查、UID 冻结和同请求重试复用 | 10.2、12.6、15.5、18 | 在 writer lease 与 freshness gate 后生成并检查 UUIDv4，FilePublicationJournal prepared 绑定 UID、整数 ID/编号、路径与 logical request，prepared 后不得重抽；晚到碰撞只按 journal 收敛或报定义错误 |
+| 7 | P1 | 普通新建章节/卷没有首个 asset intent 前的碰撞检查、UID 冻结和同请求重试复用 | 10.2、12.6、15.5、18 | 在 writer lease 与 freshness gate 后生成并检查 UUIDv4，完整 serializable assignment 作为 `stageAssets()` 输入并由 `assets_reserved` 绑定 UID、整数 ID/编号、路径与 logical request，此后不得重抽；晚到碰撞只按 journal 收敛或报定义错误 |
 | 8 | P2 | accept projection 已提交、父终态未写时再次外部变化，会把已生效接受误记为 superseded | 11.1、15.4、18 | accept intent 绑定 before/target generation 与 raw hash；恢复先检查 projection，目标已提交必须先写 `resolved_accept_external`，只有 projection 仍为 before 且文件已变时才可 superseded |
 
 ### 19.9 第 2.9 版独立复验修订
@@ -152,3 +152,23 @@
 - L1 native/save p95 仍是 `DEFAULT_READY` 硬门禁，只是与 L2 三项 p95 一起延后到最终 production source 验收，不再要求为此新增八段 production timing control protocol。
 - 历史 Windows 13/13 与 19/19 作为开发基线；所有 L2 production source 和默认路由决定提交、冻结后，只对最终 SHA 做一次完整 VM 重绑定与 candidate/E2E/benchmark/desktop smoke。
 - 删除通用 evidence publisher、build/execution receipt 与 attestation 平台的实施要求；最终证据沿用既有 reviewed-manifest trust boundary，并由独立 reviewer 核对原始日志、真实退出码和 SHA-256 后写入仓库账本。
+
+### 19.12 第 2.11 版文件发布可执行性修订
+
+本版不降低第 2.10 版的耐久、原子性或最终验收门禁，只把 Task 5 target physical identity、child parent pin 与 crash recovery 之间原本无法按顺序实现的合同收口为一条可执行路径：
+
+- 可序列化 identity assignment 与唯一 closure 先冻结；随后严格按 `assets_reserved → create-new/fsync before copy 与 staged-after → merge identity/build target → target_reserved → create-new/fsync target asset` 执行。三类 asset 都位于与文章根同一 physical volume 的 recovery root；displaced-before 只预留 absent path/parent/predicate，绝不预建实体；Task 5 target 使用同一 staged-after identity，`prepared` 仍早于首个文章树副作用；
+- 发布改为 verified no-replace 两步 relocate（before final → absent displaced destination，staged-after → absent final），displaced physical identity 只在第一步后产生并必须等于 before；协议显式承认并恢复 journal 控制的 GAP，第三方抢占永不覆盖；正常路径不在受控树创建 `.tmp`，D6 只保留历史或 manifest 明确记录的候选规则；
+- `full` 在 `files_published` 后只按 exact projection disposition 前滚；`file_only` 在完整 pin 前只接受 parent durable child reservation、partial manifest、pin-absence 和 safe-abort intent，在完整 pin 落盘后（即使尚未 `prepared`）只接受绑定该 pin 的 opaque before/after intent；
+- 新增 `rolled_back`、`assets_collected` 与 handle-bound verified delete；成功或 safe abort 按 exact partial/full manifest、child 终态、reservation/pin 和 no-reference 谓词回收。ProjectCreationJournal 中止还必须在目标 ControlStore 存在时收集 child assets、把 receipt/pin release 外存后才以 ControlStore-last 顺序删除目标并写 `creation_aborted`，避免最高 1 GiB recovery assets 无界泄漏或删除自己的唯一证据；
+- Task 6 仍只实现窄 journal/publisher/platform boundary 与 focused crash tests；command→closure、真实 SQL/schema、父 journal 实现和产品接线继续分别留在 Task 7、Task 12/13 与 Task 14B。
+- production 边界由零注入 factory 在单一 shared backend 上分别铸 read/writer capability；Store 永不获得 create/write/relocate/delete，clone/foreign/swap/production fake injection 全部 fail-closed，测试 fake 只走 test-only mint。
+
+### 19.13 第 2.12 版冷恢复与恢复根修订
+
+独立代码复审发现，第 2.11 版仍把每个 journal 的恢复子目录当作已存在事实，却没有 mkdir authority；同时未把副作用已发生但 parent fsync 未证明的 disposition，以及 `files_published` 后的文件再验证写成逐步硬门。第 2.12 版最小修正如下：
+
+- 恢复资产只放在既有项目 ControlStore 根内唯一的长期 `<data>/control/manuscripts/<project_uid>/<project_instance_id>/file-assets/` 容器，使用扁平 `<journal_id>.<asset_name>`；Task 6 只为 exact plain non-reparse `file-assets` 保留根命名空间项，第 11.1 节的 `draft-conflict` 由 Task 11 另行安装为第二个精确保留容器，其他未知项仍 fail-closed。Task 12/13 在 child reserve 前唯一创建并绑定 ControlStore 根与 `file-assets`，Task 6/7 只 `OPEN_EXISTING`，不引入第五个 mkdir port或 per-journal 目录状态机；GC 只删已证明归属的叶文件，永不删容器或 ControlStore 根；
+- full `prepared` 冷恢复只有 projection exact `base` 才能在零文章副作用后继续；`target | other | unknown` fail-closed。`files_published` 后提交 projection 或推进 parent 前必须重新证明 manifest 全成员完整 `AFTER`；
+- `created | relocated | deleted = true` 后任何 postcheck、pinned-parent fsync、close 或 receipt 失败都保留为未决 durability disposition，重试不得仅凭路径外观升级为成功或终态；尤其 cold ABSENT 只有在已有绑定 exact identity 与同一 verified parent handle 的 `deleted = true, parentFsync = true` 回执时才可幂等，否则保持 `RECOVERY_REQUIRED`。parser 重新派生所有 final/recovery 路径与 input digest，不信任事件自报路径。
+- Journal 构造器逐字节绑定实际 ControlStore directory/incarnation 与 project binding，final path 复用 Task 3 path authority；当前没有真实 legacy candidate producer，因此删除假想 candidate 事件 schema并让 L2 v1 `journalAuthority` deny-all，正向候选认领后移到 producer 与 exact manifest 同时出现的任务。
