@@ -63,6 +63,10 @@ function json(data: unknown, status = 200) {
   })
 }
 
+function isSqliteWitnessRequest(input: unknown, init?: RequestInit) {
+  return (init?.method || 'GET') === 'GET' && String(input).endsWith('/manuscript/witness')
+}
+
 function activateProject(project: string, instanceId: string) {
   useProjectStore.setState({
     currentProject: project,
@@ -115,6 +119,7 @@ async function deleteCurrentChapter(target: ReturnType<typeof chapter>) {
     const url = String(input)
     const method = init?.method || 'GET'
     requests.push({ url, method, instanceId: new Headers(init?.headers).get(PROJECT_INSTANCE_HEADER) })
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if (method === 'DELETE') return json({ success: true, chapter_id: target.id, volume_id: 1, deleted_num: target.num })
     if (url.endsWith(`/${project}/volumes`)) {
       return json([
@@ -153,6 +158,11 @@ test('deleting the current chapter targets its stable identity and selects the n
 
   assert.deepEqual(requests, [
     {
+      method: 'GET',
+      url: '/api/chapter-delete-22/manuscript/witness',
+      instanceId: 'captured-instance-22',
+    },
+    {
       method: 'DELETE',
       url: '/api/chapter-delete-22/chapters/2?chapter_id=22&volume_id=1',
       instanceId: 'captured-instance-22',
@@ -190,6 +200,7 @@ test('deleting a non-current chapter returns its latest adjacent chapter id', as
     saveStatus: 'saved',
   })
   globalThis.fetch = (async (input, init) => {
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if ((init?.method || 'GET') === 'DELETE') return json({ success: true })
     if (String(input).endsWith(`/${project}/volumes`)) return json({ error: { message: 'refresh failed' } }, 503)
     throw new Error(`unexpected request: ${String(input)}`)
@@ -305,6 +316,7 @@ test('a successful delete survives a failed chapter-list refresh', async () => {
   enqueueEditorSave(project, target.id, target.num, 'draft content', target.dataVersion)
   stageTitleSave(project, target.id, target.num, 'draft title')
   globalThis.fetch = (async (input, init) => {
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if ((init?.method || 'GET') === 'DELETE') return json({ success: true })
     if (String(input).endsWith('/' + project + '/volumes')) return json({ error: { message: 'refresh failed' } }, 503)
     throw new Error('unexpected request: ' + String(input))
@@ -356,6 +368,7 @@ test('a delete uses the latest chapter structure when its DELETE settles', async
     saveStatus: 'saved',
   })
   globalThis.fetch = (async (input, init) => {
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if ((init?.method || 'GET') === 'DELETE') {
       markDeleteStarted()
       return deleteResponse
@@ -420,6 +433,7 @@ test('a delete returns no fallback or selection update when the latest structure
     saveStatus: 'saved',
   })
   globalThis.fetch = (async (input, init) => {
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if ((init?.method || 'GET') === 'DELETE') {
       markDeleteStarted()
       return deleteResponse
@@ -480,7 +494,8 @@ test('a delete that succeeds after navigation clears old drafts without touching
   })
   enqueueEditorSave(deletedProject, target.id, target.num, 'old project draft', target.dataVersion)
   stageTitleSave(deletedProject, target.id, target.num, 'old project title draft')
-  globalThis.fetch = (async (_input, init) => {
+  globalThis.fetch = (async (input, init) => {
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if ((init?.method || 'GET') === 'DELETE') return deleteResponse
     throw new Error('unexpected request')
   }) as typeof fetch
@@ -575,7 +590,10 @@ test('a failed chapter deletion keeps the current chapter and unsaved drafts rec
   })
   enqueueEditorSave(project, target.id, target.num, '仍应保留的正文草稿', target.dataVersion)
   stageTitleSave(project, target.id, target.num, '仍应保留的标题草稿')
-  globalThis.fetch = (async () => json({ error: { message: '删除服务暂时不可用' } }, 503)) as typeof fetch
+  globalThis.fetch = (async (input, init) => {
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
+    return json({ error: { message: '删除服务暂时不可用' } }, 503)
+  }) as typeof fetch
   console.error = () => {}
 
   try {

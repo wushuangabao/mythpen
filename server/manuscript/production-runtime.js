@@ -4,6 +4,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { getBuildInfo } = require('../build-info');
 const db = require('../db');
 const {
   createManuscriptService,
@@ -1513,7 +1514,9 @@ function createFilesBackend({ databasePort, dataRoot, fileBoundary, uidCatalog }
         },
       }),
       feedAdapter: createWindowsManuscriptChangeFeedAdapter(),
-      notificationCapability: Object.freeze({ read() { return false; } }),
+      notificationCapability: Object.freeze({
+        read() { return getBuildInfo().manuscriptChangeNotification; },
+      }),
       writerTurns: lifecycleWriterTurns,
       recovery: Object.freeze({
         async recoverBeforeRefresh(freshnessAdmission, writerTurn) {

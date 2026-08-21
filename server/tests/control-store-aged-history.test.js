@@ -25,6 +25,7 @@ const NATIVE_FACADE_KEYS = [
   'executeTransaction',
   'recover',
   'checkpoint',
+  'publishProjectionTarget',
   'close',
   'fence',
 ];

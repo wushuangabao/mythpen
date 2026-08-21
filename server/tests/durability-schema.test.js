@@ -568,5 +568,9 @@ test('production db separates schema 11 admission from the schema 10 sql.js migr
   assert.match(source, /schema migration step .* is missing/i);
   assert.match(source, /schemaVersion !== NATIVE_ACTIVATION_SOURCE_SCHEMA_VERSION/);
   assert.doesNotMatch(source, /projectMigrations\[10\]\s*=/);
-  assert.doesNotMatch(source, /installSchema11Contract/);
+  const sqlJsMigrations = source.slice(
+    source.indexOf('const projectMigrations = ['),
+    source.indexOf("const getProjectVersion = makeVersionGetter('project_meta');"),
+  );
+  assert.doesNotMatch(sqlJsMigrations, /installSchema11Contract/);
 });

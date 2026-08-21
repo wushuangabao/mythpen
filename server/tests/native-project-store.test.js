@@ -3087,6 +3087,7 @@ test('Task 4 Batch 1 RED: source-only suffix constructs an exact cold facade wit
     'executeTransaction',
     'recover',
     'checkpoint',
+    'publishProjectionTarget',
     'close',
     'fence',
   ]);

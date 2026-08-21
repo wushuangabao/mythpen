@@ -14,6 +14,8 @@ const {
   validateMigrationPaths,
 } = require('../storage-migration');
 
+const WINDOWS_MULTI_MOVE_TIMEOUT_MS = 15_000;
+
 function tempDir(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `mythpen-${name}-`));
 }
@@ -441,7 +443,9 @@ test('cleans staging and preserves an existing empty final target when manifest 
   assert.equal(retry.fileCount, 1);
 });
 
-test('successful no-clobber publication replaces an empty placeholder only after verification', async () => {
+test('successful no-clobber publication replaces an empty placeholder only after verification', {
+  timeout: WINDOWS_MULTI_MOVE_TIMEOUT_MS,
+}, async () => {
   const source = tempDir('placeholder-success-source');
   const parent = tempDir('placeholder-success-target-parent');
   const target = path.join(parent, 'data');
@@ -458,7 +462,9 @@ test('successful no-clobber publication replaces an empty placeholder only after
   assert.deepEqual(internalMigrationEntries(parent, 'data'), []);
 });
 
-test('preserves real external file and directory siblings with the backup prefix', async () => {
+test('preserves real external file and directory siblings with the backup prefix', {
+  timeout: WINDOWS_MULTI_MOVE_TIMEOUT_MS,
+}, async () => {
   const source = tempDir('backup-sibling-source');
   const parent = tempDir('backup-sibling-target-parent');
   const target = path.join(parent, 'data');

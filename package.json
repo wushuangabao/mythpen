@@ -24,7 +24,7 @@
     "tsc": "tsc",
     "typecheck": "tsc --project tsconfig.app.json --noEmit",
     "test:client": "node --test --test-concurrency=1 tests/*.test.ts",
-    "test:server": "bun test ./server/tests/",
+    "test:server": "bun test --isolate ./server/tests/",
     "test:contracts": "node --test scripts/tests/*.test.mjs && node scripts/manuscript-write-scan.mjs",
     "tauri": "tauri",
     "lint": "biome check --write src/",

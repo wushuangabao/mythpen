@@ -81,7 +81,6 @@ app.use((req, res, next) => {
 
 // ─── API Routes ───
 app.use('/api/ai', bindAiManuscriptProjectInstance);
-app.use('/api', apiRoutes);
 
 // ═══════════════════════════════════════════
 // AI CONFIG — read from config.db
@@ -764,6 +763,11 @@ app.get('/api/health', (req, res) => {
     mode: 'development',
   });
 });
+
+// Mount project-scoped routes after the fixed /api/ai namespace. The project
+// router intentionally owns /:project/chat, so mounting it first would treat
+// "ai" as a project and reject valid AI requests before their handlers run.
+app.use('/api', apiRoutes);
 
 app.use(jsonNotFoundMiddleware);
 app.use(jsonErrorMiddleware);

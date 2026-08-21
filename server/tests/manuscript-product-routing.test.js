@@ -723,6 +723,15 @@ test('production runtime source has one brokered gate path and validates the pro
   assert.match(source, /ManuscriptSessionController/u);
   assert.match(source, /createManuscriptFreshnessLifecycle/u);
   assert.match(source, /createWindowsManuscriptLifecycleLeaseAdapter/u);
+  assert.match(
+    source,
+    /notificationCapability:\s*Object\.freeze\(\{\s*read\(\)\s*\{\s*return getBuildInfo\(\)\.manuscriptChangeNotification;\s*\},?\s*\}\)/u,
+    'production freshness must consume the same compile-time change-notification capability advertised by build-info',
+  );
+  assert.doesNotMatch(
+    source,
+    /notificationCapability:\s*Object\.freeze\(\{\s*read\(\)\s*\{\s*return false;\s*\}\s*\}\)/u,
+  );
   assert.doesNotMatch(source, /\.createFresh\(/u);
   assert.match(source, /bindL2Command/u);
   assert.match(source, /productWriteIntents\.execute/u);

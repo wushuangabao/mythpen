@@ -80,6 +80,10 @@ function json(data: unknown, status = 200) {
   })
 }
 
+function isSqliteWitnessRequest(input: unknown, init?: RequestInit) {
+  return (init?.method || 'GET') === 'GET' && String(input).endsWith('/manuscript/witness')
+}
+
 test('stale revision history is never exposed as an actionable client mutation', async () => {
   const originalFetch = globalThis.fetch
   const project = 'revision-stale-history'
@@ -239,6 +243,7 @@ test('accept-all ACK loss reconciles the committed chapter before clearing revie
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input)
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if (init?.method === 'POST' && url.includes('/accept-all')) {
       throw new Error('response ended before completion')
     }
@@ -292,6 +297,7 @@ test('accept-all response received on another chapter remains pending until retu
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input)
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if (init?.method === 'POST' && url.includes('/accept-all')) {
       acceptStarted()
       return acceptResponse
@@ -372,6 +378,7 @@ test('returning before an ACK-loss callback stays locked until the in-flight mar
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input)
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if (init?.method === 'POST' && url.includes('/accept-all')) {
       acceptStarted()
       return acceptResponse
@@ -435,6 +442,7 @@ test('a response from a retired project instance cannot write into its same-name
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input)
+    if (isSqliteWitnessRequest(input, init)) return json({ base_witness: null })
     if (init?.method === 'POST' && url.includes('/accept-all')) {
       acceptStarted()
       return acceptResponse
