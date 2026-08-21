@@ -24,12 +24,21 @@ const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_FILE_EXISTS = 80;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_SHARING_VIOLATION = 32;
+const ERROR_LOCK_VIOLATION = 33;
 const ERROR_HANDLE_EOF = 38;
 const INVALID_HANDLE = 0xffffffffffffffffn;
 const BY_HANDLE_FILE_INFORMATION_SIZE = 52;
 const FILE_RENAME_INFO_HEADER_SIZE = 20;
+const OVERLAPPED_SIZE = 32;
+const LOCKFILE_FAIL_IMMEDIATELY = 0x00000001;
+const LOCKFILE_EXCLUSIVE_LOCK = 0x00000002;
 const READ_CHUNK_SIZE = 64 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const existingFileRangeLeaseRecords = new WeakMap();
+const UNLOCKED_AND_CLOSED = Object.freeze({ disposition: 'UNLOCKED_AND_CLOSED' });
+const CLOSED_AFTER_UNLOCK_FAILURE = Object.freeze({
+  disposition: 'CLOSED_AFTER_UNLOCK_FAILURE',
+});
 const VERIFIED_INSTALL_ERROR_CODES = new Set([
   'INSTALL_TARGET_EXISTS',
   'TARGET_LOCKED',
@@ -94,6 +103,83 @@ function createWin32Backend({
   }
   pointerOf ||= (value) => value;
   const realpathSync = dependencies.realpathSync || fs.realpathSync.native;
+  const lstatSync = dependencies.lstatSync || fs.lstatSync;
+  let rangeLockApi;
+  let rangeLockLoadError;
+
+  function getRangeLockApi() {
+    if (rangeLockApi !== undefined) return rangeLockApi;
+    if (rangeLockLoadError !== undefined) {
+      throw new DurabilityUnsupportedError(
+        'Windows existing-file range locking is unavailable',
+        { cause: rangeLockLoadError },
+      );
+    }
+    try {
+      let loaded;
+      if (typeof dependencies.loadRangeLockApi === 'function') {
+        loaded = dependencies.loadRangeLockApi();
+      } else {
+        const { dlopen, FFIType, ptr } = require('bun:ffi');
+        const rangeLockLibrary = dlopen('kernel32.dll', {
+          LockFileEx: {
+            args: [
+              FFIType.u64,
+              FFIType.u32,
+              FFIType.u32,
+              FFIType.u32,
+              FFIType.u32,
+              FFIType.ptr,
+            ],
+            returns: FFIType.i32,
+          },
+          UnlockFileEx: {
+            args: [
+              FFIType.u64,
+              FFIType.u32,
+              FFIType.u32,
+              FFIType.u32,
+              FFIType.ptr,
+            ],
+            returns: FFIType.i32,
+          },
+        });
+        loaded = {
+          library: rangeLockLibrary,
+          ptr,
+          symbols: rangeLockLibrary.symbols,
+        };
+      }
+      const symbols = loaded?.symbols;
+      const rangePointerOf = loaded?.ptr || pointerOf;
+      if (
+        symbols === null
+        || typeof symbols !== 'object'
+        || typeof symbols.LockFileEx !== 'function'
+        || typeof symbols.UnlockFileEx !== 'function'
+        || typeof rangePointerOf !== 'function'
+      ) {
+        throw new TypeError('LockFileEx and UnlockFileEx symbols are required');
+      }
+      const pointerProbe = alignedBytes(OVERLAPPED_SIZE);
+      const pointer = rangePointerOf(pointerProbe.bytes);
+      if (pointer === undefined || pointer === null) {
+        throw new TypeError('Unable to create an aligned OVERLAPPED pointer');
+      }
+      rangeLockApi = {
+        library: loaded.library,
+        pointerOf: rangePointerOf,
+        symbols,
+      };
+      return rangeLockApi;
+    } catch (cause) {
+      rangeLockLoadError = cause;
+      throw new DurabilityUnsupportedError(
+        'Windows existing-file range locking is unavailable',
+        { cause },
+      );
+    }
+  }
 
   function targetLockedError(operation, targetPath, win32Code) {
     if (win32Code !== ERROR_SHARING_VIOLATION) return undefined;
@@ -198,6 +284,50 @@ function createWin32Backend({
     } catch (error) {
       return error;
     }
+  }
+
+  function closeRangeLeaseHandle(handle) {
+    if (handle === undefined || isInvalid(handle)) {
+      return new TypeError('Existing-file range lease handle is invalid');
+    }
+    try {
+      const result = k32.CloseHandle(handle);
+      if (typeof result !== 'number' || !Number.isInteger(result)) {
+        return new TypeError('CloseHandle returned an invalid result');
+      }
+      if (result !== 0) return undefined;
+      return nativeCause('CloseHandle', k32.GetLastError());
+    } catch (error) {
+      return error;
+    }
+  }
+
+  function rangeLeaseDispositionUnknown(message, cleanupError, secondaryName, secondaryError) {
+    const error = new LeaseLostError(message, { cause: cleanupError });
+    const properties = {
+      releaseDispositionUnknown: {
+        configurable: false,
+        enumerable: true,
+        value: true,
+        writable: false,
+      },
+    };
+    if (secondaryError !== undefined) {
+      properties[secondaryName] = {
+        configurable: false,
+        enumerable: true,
+        value: secondaryError,
+        writable: false,
+      };
+      properties.secondaryErrors = {
+        configurable: false,
+        enumerable: true,
+        value: Object.freeze([secondaryError]),
+        writable: false,
+      };
+    }
+    Object.defineProperties(error, properties);
+    return error;
   }
 
   function flushPinnedParent(handle, parentPath) {
@@ -418,13 +548,24 @@ function createWin32Backend({
     const parentCleanup = openedParent === undefined || isInvalid(openedParent.handle)
       ? undefined
       : closeHandle(openedParent.handle);
+    const inspectionCleanup = targetCleanup === undefined
+      ? parentCleanup
+      : attachCleanupError(targetCleanup, parentCleanup);
     if (primaryError) {
-      throw attachCleanupError(attachCleanupError(primaryError, targetCleanup), parentCleanup);
+      if (inspectionCleanup !== undefined) {
+        throw rangeLeaseDispositionUnknown(
+          `Pinned inspection handle cleanup disposition is unknown: ${absoluteTarget}`,
+          inspectionCleanup,
+          'admissionError',
+          primaryError,
+        );
+      }
+      throw primaryError;
     }
-    if (targetCleanup || parentCleanup) {
-      throw new VerifiedSourceTopologyError(
-        `Pinned inspection handles could not be closed: ${absoluteTarget}`,
-        { cause: targetCleanup || parentCleanup },
+    if (inspectionCleanup !== undefined) {
+      throw rangeLeaseDispositionUnknown(
+        `Pinned inspection handle cleanup disposition is unknown: ${absoluteTarget}`,
+        inspectionCleanup,
       );
     }
     return result;
@@ -1419,6 +1560,224 @@ function createWin32Backend({
     };
   }
 
+  function assertExistingFileRangeLeaseOptions(options) {
+    if (
+      options === null
+      || typeof options !== 'object'
+      || Array.isArray(options)
+      || Object.keys(options).sort().join(',') !== 'exclusive,expectedIdentity'
+      || typeof options.exclusive !== 'boolean'
+      || options.expectedIdentity === null
+      || typeof options.expectedIdentity !== 'object'
+      || Array.isArray(options.expectedIdentity)
+      || Object.keys(options.expectedIdentity).sort().join(',') !== 'dev,ino'
+      || typeof options.expectedIdentity.dev !== 'string'
+      || !/^(0|[1-9]\d*)$/.test(options.expectedIdentity.dev)
+      || typeof options.expectedIdentity.ino !== 'string'
+      || !/^(0|[1-9]\d*)$/.test(options.expectedIdentity.ino)
+    ) {
+      throw new VerifiedSourceMismatchError(
+        'Existing-file range lease options contain invalid identity facts',
+      );
+    }
+  }
+
+  function verifyExistingLockLstat(lockPath, expectedIdentity) {
+    let stats;
+    try {
+      stats = lstatSync(lockPath, { bigint: true });
+    } catch (cause) {
+      throw new VerifiedSourceMismatchError(
+        `Unable to inspect the existing range-lock file: ${lockPath}`,
+        { cause },
+      );
+    }
+    if (
+      typeof stats?.isFile !== 'function'
+      || stats.isFile() !== true
+      || typeof stats.isSymbolicLink !== 'function'
+      || stats.isSymbolicLink() !== false
+      || stats.size !== 0n
+      || stats.nlink !== 1n
+      || String(stats.dev) !== expectedIdentity.dev
+      || String(stats.ino) !== expectedIdentity.ino
+    ) {
+      throw new VerifiedSourceMismatchError(
+        `Existing range-lock path is not the expected plain empty single-link file: ${lockPath}`,
+      );
+    }
+  }
+
+  function verifyExistingLockHandle(handle, expectedIdentity, lockPath) {
+    const actual = handleIdentity(handle);
+    if (
+      actual.dev !== expectedIdentity.dev
+      || actual.ino !== expectedIdentity.ino
+      || actual.byteSize !== 0n
+      || actual.links !== 1
+      || (actual.attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) !== 0
+    ) {
+      throw new VerifiedSourceMismatchError(
+        `Existing range-lock handle is not the expected plain empty single-link file: ${lockPath}`,
+      );
+    }
+  }
+
+  function mintExistingFileRangeLease(handle, overlapped, api) {
+    const lease = {};
+    const record = {
+      api,
+      handle,
+      overlapped,
+      state: 'HELD',
+    };
+    Object.defineProperties(lease, {
+      state: {
+        enumerable: true,
+        get() {
+          const active = existingFileRangeLeaseRecords.get(this);
+          if (active === undefined) {
+            throw new LeaseLostError('Existing-file range lease authority is invalid');
+          }
+          return active.state;
+        },
+      },
+      release: {
+        enumerable: true,
+        value() {
+          const active = existingFileRangeLeaseRecords.get(this);
+          if (active === undefined || active.state !== 'HELD') {
+            throw new LeaseLostError('Existing-file range lease is no longer held');
+          }
+          let unlockError;
+          try {
+            const result = active.api.symbols.UnlockFileEx(
+              active.handle,
+              0,
+              1,
+              0,
+              active.api.pointerOf(active.overlapped.bytes),
+            );
+            if (typeof result !== 'number' || !Number.isInteger(result)) {
+              unlockError = new TypeError('UnlockFileEx returned an invalid result');
+            } else if (result === 0) {
+              unlockError = nativeCause('UnlockFileEx', k32.GetLastError());
+            }
+          } catch (cause) {
+            unlockError = cause;
+          }
+
+          const closeError = closeRangeLeaseHandle(active.handle);
+          if (closeError !== undefined) {
+            active.state = 'RELEASE_DISPOSITION_UNKNOWN';
+            throw rangeLeaseDispositionUnknown(
+              'Existing-file range lease close disposition is unknown',
+              closeError,
+              'unlockError',
+              unlockError,
+            );
+          }
+          active.state = 'RELEASED';
+          return unlockError === undefined
+            ? UNLOCKED_AND_CLOSED
+            : CLOSED_AFTER_UNLOCK_FAILURE;
+        },
+      },
+    });
+    existingFileRangeLeaseRecords.set(lease, record);
+    return Object.freeze(lease);
+  }
+
+  function acquireExistingFileRangeLease(filePath, options) {
+    assertExistingFileRangeLeaseOptions(options);
+    const absoluteLockPath = absolutePath(filePath);
+    if (absoluteLockPath !== filePath) {
+      throw new VerifiedSourceMismatchError(
+        'Existing-file range lease path must be absolute and normalized',
+      );
+    }
+    const api = getRangeLockApi();
+    verifyExistingLockLstat(absoluteLockPath, options.expectedIdentity);
+    const opened = openHandle(
+      absoluteLockPath.length >= 248 ? path.toNamespacedPath(absoluteLockPath) : absoluteLockPath,
+      GENERIC_READ_WRITE,
+      FILE_SHARE_READ_WRITE,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+    );
+    if (isInvalid(opened.handle)) {
+      const cause = nativeCause('CreateFileW', opened.win32Code);
+      if (opened.win32Code === ERROR_SHARING_VIOLATION) {
+        throw new LeaseBusyError('Existing-file range lease is busy', { cause });
+      }
+      throw new DurabilityUnsupportedError(
+        'Unable to open the existing range-lock file',
+        { cause },
+      );
+    }
+
+    let admissionError;
+    try {
+      verifyExistingLockHandle(opened.handle, options.expectedIdentity, absoluteLockPath);
+      verifyExistingLockLstat(absoluteLockPath, options.expectedIdentity);
+    } catch (error) {
+      admissionError = error;
+    }
+    if (admissionError !== undefined) {
+      const cleanupError = closeRangeLeaseHandle(opened.handle);
+      if (cleanupError !== undefined) {
+        throw rangeLeaseDispositionUnknown(
+          'Existing-file range lease admission cleanup disposition is unknown',
+          cleanupError,
+          'admissionError',
+          admissionError,
+        );
+      }
+      throw admissionError;
+    }
+
+    const overlapped = alignedBytes(OVERLAPPED_SIZE);
+    let lockResult;
+    let lockCause;
+    try {
+      lockResult = api.symbols.LockFileEx(
+        opened.handle,
+        LOCKFILE_FAIL_IMMEDIATELY
+          | (options.exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0),
+        0,
+        1,
+        0,
+        api.pointerOf(overlapped.bytes),
+      );
+      if (typeof lockResult !== 'number' || !Number.isInteger(lockResult)) {
+        lockCause = new TypeError('LockFileEx returned an invalid result');
+      } else if (lockResult === 0) {
+        lockCause = nativeCause('LockFileEx', k32.GetLastError());
+      }
+    } catch (cause) {
+      lockCause = cause;
+    }
+    if (lockCause !== undefined) {
+      const cleanupError = closeRangeLeaseHandle(opened.handle);
+      const win32Code = lockCause.win32Code;
+      const error = win32Code === ERROR_SHARING_VIOLATION || win32Code === ERROR_LOCK_VIOLATION
+        ? new LeaseBusyError('Existing-file range lease is busy', { cause: lockCause })
+        : new DurabilityUnsupportedError('Unable to lock the existing range-lock file', {
+          cause: lockCause,
+        });
+      if (cleanupError !== undefined) {
+        throw rangeLeaseDispositionUnknown(
+          'Existing-file range lease acquisition cleanup disposition is unknown',
+          cleanupError,
+          'acquireError',
+          error,
+        );
+      }
+      throw error;
+    }
+    return mintExistingFileRangeLease(opened.handle, overlapped, api);
+  }
+
   function flushPath(filePath, flags) {
     const namespacedPath = path.toNamespacedPath(absolutePath(filePath));
     const opened = openHandle(
@@ -1451,6 +1810,7 @@ function createWin32Backend({
 
   return {
     backend: 'win32',
+    acquireExistingFileRangeLease,
     acquireExclusiveLease,
     createAssetVerified,
     fsyncFile(filePath) {

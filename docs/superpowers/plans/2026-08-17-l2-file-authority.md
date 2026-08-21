@@ -36,25 +36,36 @@ Stage 0: Task 1A 安全建立 schema 11/native 基线
                   └─ Task 7A: 最小文件闭包编译器与纯 UID reservation core
                       └─ Task 7B: ordinary/full 非创建写编排
           Task 6
-              └─ Task 8: lifecycle lease/session admission
-          Task 3 + Task 5 + Task 6 + Task 8
-              └─ Task 9: direct feed/freshness
-          Task 7B + Task 9
-              └─ Task 9B: admission/freshness wrapper
-                  ├─ Task 10A: ignored ledger、孤儿出口与增量刷新
-                  │   └─ Task 10B: 结构命令与 ordinary create reservation 恢复
-                  ├─ Task 11: DraftConflictJournal 与完整 dirty registry
-                  └─ Task 12: MigrationJournal
+              ├─ Task 8A: Windows existing-file lifecycle lease adapter
+              └─ Task 8B: session admission state machine
+          Task 6
+              ├─ Task 9A: Windows direct-feed platform adapter
+              └─ Task 9B: linearizable feed-state
+          Task 3 + Task 4 + Task 5 + Task 6 + Task 8A + Task 8B + Task 9A + Task 9B
+              └─ Task 9C: freshness/session lifecycle
+          Task 7B + Task 9C
+              └─ Task 9D: admission/freshness wrapper
+          Task 2 + Task 3 + Task 5
+              └─ Task 10A1: ignored ledger 规范化、Store observation 与 opaque serializer
+          Task 7B + Task 10A1
+              └─ Task 10B: 结构命令、opaque reference 动作与 ordinary create reservation 恢复
+          Task 9D
+              ├─ Task 11: DraftConflictJournal 与完整 dirty registry
+              └─ Task 12: MigrationJournal
                       └─ Task 13: ProjectCreationJournal
-          Task 9B + Task 10A + Task 10B + Task 11 + Task 12 + Task 13
+          Task 9D + Task 10A1 + Task 12
+              └─ Task 10A2: projection-only ignore/revoke（后移）
+          Task 9C + Task 10A1 + Task 11 + Task 12
+              └─ Task 10P: self-event/incremental 可选性能优化（只能在 Task 14B 开始前选择并完成 focused）
+          Task 9C + Task 9D + Task 10A1 + Task 10A2 + Task 10B + Task 11 + Task 12 + Task 13
               └─ Task 14: 退役/重激活/换根屏障
-          Task 9B + Task 10A + Task 10B + Task 11 + Task 12 + Task 13 + Task 14
+          Task 9C + Task 9D + Task 10A1 + Task 10A2 + Task 10B + Task 11 + Task 12 + Task 13 + Task 14 + Task 10P（若已在 Task 14B 开始前选择并通过 focused）
               └─ Task 14B: 最终产品 API/CLI/读写入口接线
                   └─ Task 15: UI/诊断/宿主文件入口
-          Task 2 + Task 3 + Task 4 + Task 5 + Task 6 + Task 7A + Task 7B + Task 8 + Task 9 + Task 9B + Task 10A + Task 10B + Task 11 + Task 12 + Task 13 + Task 14 + Task 14B + Task 15
+          Task 2 + Task 3 + Task 4 + Task 5 + Task 6 + Task 7A + Task 7B + Task 8A + Task 8B + Task 9A + Task 9B + Task 9C + Task 9D + Task 10A1 + Task 10A2 + Task 10B + Task 11 + Task 12 + Task 13 + Task 14 + Task 14B + Task 15 + Task 10P（仅限已由 Task 14B 接线）
               └─ Task 16: 本地正确性 join/harness freeze（不发布 production evidence）
                                       └─ Task 17A: 可选最小性能 preflight 与默认路由 go/no-go（非 acceptance）
-                                          └─ Task 17B: 落地默认决策、冻结最终 source，并完成唯一一次 production artifact 验收
+                                          └─ Task 17B: 无条件冻结 capability build-info，按 go/no-go 落地默认决策并完成唯一一次 production artifact 验收
 ```
 
 ---
@@ -373,7 +384,7 @@ module.exports = {
 ```
 
 - [ ] Task 5 只实现纯的完整 target 编译器、纯 `validateTarget(target)` 与注入的 `projectStore.publishProjectionTarget({ target, routeCas })` 原子发布 port；使用只记录 preflight/transaction/CAS/commit disposition 的内存 fake 写聚焦测试，绝不 import、打开或伪造真实 NativeProjectStore/schema 12。代码/meta/observed schema trigger digest 不一致、schema too new、generation CAS 失败、transaction preflight 失败和 commit disposition unknown 在本任务都只是由 fake port 注入并验证原样传播，不能称为 schema 12 live admission 或真实 DML 证据。
-- [ ] `projection-store.js` 唯一导出 `canonicalProjectionBasisDigest(basis)` 与 `canonicalIgnoredLedgerDigest(rows)`；Task 5 fake、Task 10A ledger 和 Task 12 真实 adapter 都必须 import/调用，禁止复制 canonicalizer、排序或摘要 material。basis 根对象 exact own keys 固定为 `domain, version, sourceKind, baseGeneration, volumes, chapters, sqliteSequence, ignoredBeforeDigest, pendingProposals, basisDigest`，其中 `domain = "mythpen.manuscript.projection-basis"`、`version = 1`、两个 digest 都只能是小写 64-hex SHA-256；basis 摘要 material 包含除 `basisDigest` 自身外的全部字段。卷/章按同表稳定整数 `id`、pending proposals 按稳定整数 `revisionId` 再按 `chapterId` 排序；ledger 行按 `resource_kind + resource_uid` 排序并覆盖其 exact schema 12 标量/JSON 字符串值。重复 key/ID、额外/缺失 key、错误 domain/version/sourceKind、非 plain data或非规范值全部拒绝；输入数组排列不影响摘要，任一 material 值变化必须改变对应摘要。
+- [ ] `projection-store.js` 唯一导出 `canonicalProjectionBasisDigest(basis)` 与 `canonicalIgnoredLedgerDigest(rows)`；Task 5 fake、Task 10A1 ledger 和 Task 12 真实 adapter 都必须 import/调用，禁止复制 canonicalizer、排序或摘要 material。basis 根对象 exact own keys 固定为 `domain, version, sourceKind, baseGeneration, volumes, chapters, sqliteSequence, ignoredBeforeDigest, pendingProposals, basisDigest`，其中 `domain = "mythpen.manuscript.projection-basis"`、`version = 1`、两个 digest 都只能是小写 64-hex SHA-256；basis 摘要 material 包含除 `basisDigest` 自身外的全部字段。卷/章按同表稳定整数 `id`、pending proposals 按稳定整数 `revisionId` 再按 `chapterId` 排序；ledger 行按 `resource_kind + resource_uid` 排序并覆盖其 exact schema 12 标量/JSON 字符串值。重复 key/ID、额外/缺失 key、错误 domain/version/sourceKind、非 plain data或非规范值全部拒绝；输入数组排列不影响摘要，任一 material 值变化必须改变对应摘要。
 - [ ] `currentProjection` 是 exact、plain、deep-frozen 的 `{ projectUid, projectInstanceId, basis }` 快照；前两者是已 admission 项目的规范 UUID 绑定但不进入 basis digest。basis 是**紧凑依赖快照**而非第二份数据库：`sourceKind` 只能为 `schema11 | schema12 | empty`；schema11 volume exact `{ id, sortOrder }`、chapter exact `{ id, volumeId, num, bodyRawSha256, status }`；schema12 volume exact `{ id, uid, sortOrder, isPresent, deletedAt }`、chapter exact `{ id, uid, volumeId, num, isPresent, deletedAt, chapterPosition, manuscriptPosition, bodyRawSha256, status }`。schema11 source reader 对 `content` UTF-8 bytes 只计算一次 SHA-256 后立即丢弃正文，basis/journal 不保存旧正文；未列出的 `created_at/updated_at/data_version` 等本机列由 Task 12 在真实事务内原位保留，Task 5 不复制也不验证。`sqliteSequence` 只含规范化后的 `volumes`/`chapters` 两个 non-negative safe integer 值；`ignoredBeforeDigest` 只保存完整 before ledger 的 canonical digest（schema11/empty 使用规范空 ledger digest）；`pendingProposals` 只含 exact `{ revisionId, chapterId }` pending rows；`baseGeneration` 在 schema12 取 live generation，schema11/empty 固定为 `0`。`buildTarget()` 重算并比较 `basisDigest`；plain basis/identity 只供确定性编译，不能授权发布。
 - [ ] target 只保存一份新正文：active rows 是来自 candidate 的完整文件派生投影字段与 ID/UID/num/最终 positions；当前 active→absent 及既有 tombstone→仍 absent 使用 compact tombstone/retain ref（卷：`id, uid, isPresent=0, deletedAt`；章再含 `num, chapterPosition=null, manuscriptPosition=null`），不复制旧 title/content/sidecar/local columns。Task 12 根据 ref 只更新 tombstone/presence/position 字段并原位保留其余旧列；复活/active 行则从同一 candidate 更新投影字段。target 仍冻结 exact `projectUid`/`projectInstanceId`、basis+digest、base/target generation、`projectedAt`、raw hashes、controlled-file facts、完整 ignored after ledger、同 generation 容量快照和派生 proposal invalidations。Task 5 focused 另断言总正文 UTF-8 bytes 只来自 active target 一次，basis/tombstone refs 中不存在 `content` 或其他旧大字段。
 - [ ] `candidate` 必须把 `chapters.content`、availability、hash、word count、全部 sidecar 字段、positions、controlled-file facts 与容量快照绑定到同一个 Task 3 validated snapshot；`buildTarget()` 不重新读文件，也不接受调用方分别覆盖这些派生字段。输出只含可序列化 plain data，递归快照并冻结；相同输入逐字节 canonical 等价，便于 Task 6 持久冻结与恢复重放。
@@ -512,7 +523,7 @@ class FilePublicationJournal {
 - [ ] file_only 只允许 `parent = migration | creation`，projection/projectStore/route 调用次数恒为 0。完整 pin 前，只有 durable parent child reservation、exact partial manifest、pin-absence 与父 safe-abort intent 可由 `readRecoveryIntent()` 铸 opaque `before`；正常父状态按同一 reservation 幂等继续 stage。完整 pin 一旦耐久，即使 child 仍是 `target_reserved`，恢复也只能消费绑定 exact parent/full manifest/pin/terminal 的 opaque `before | after`：before 才可逆序收敛并 `rolled_back`，after 才可前滚至 `files_published`。plain goal/clone/错 parent/绕过 pin 的 common rollback 全拒绝；child 不写 parent 状态，不提交 parent projection/route，不解除 reservation/pin。
 - [ ] `collectAssets()` 必须避免最高 1 GiB assets 无界泄漏：full 只接受 `completed | rolled_back`；file_only 在完整 pin 前接受父 durable child reservation、safe abort、partial manifest、pin-absence 与 no-reference predicate，在完整 pin 后接受 parent 成功终态或 safe abort、匹配 child state、exact pin 与 no-reference predicate，统一由 `parentAuthority.assertGc()` 验证 authority。`deleteVerified` handle-bound 核对 partial/full manifest exact identity/link-count/size/hash，delete 后 fsync parent；只有已有与 exact path/identity 及同一 verified parent handle 绑定的 `deleted = true, parentFsync = true` 回执时，随后观察到 ABSENT 才可幂等。冷启动 ABSENT 无该回执必须保持 unresolved/`RECOVERY_REQUIRED`，第三状态同样保留且不写 `assets_collected`。全部 owned 叶文件清掉后才 append `...assets_collected`；`file-assets` 是长期项目容器，GC 不删除或替换它，`files_published` 单独不构成 GC 资格。
 - [ ] Task 6 仍是 Task 3 `journalAuthority.resolveCandidate()` 的唯一 owner，但本轮没有任何 production producer 会在受控树创建 legacy `.tmp`，不得为不存在的正例预造事件 schema或靠手改事件自证。L2 v1 authority 因而固定 deny-all：所有 candidate shape 都保守降为 residue且不读、不哈希、不删。只有未来真实 importer/producer 与 exact manifest 事实一起进入明确任务时，才可实现正向 capability，并重新接受 D6 的完整 path/real-name/identity/open/terminal 评审。
-- [ ] 8 组 focused RED 固定为：① intent-first reserve、serializable identity assignment 冻结、before/staged/target 的 O_EXCL 同 fd write/fsync/readback、caller buffer 隔离，且 stage 后 displaced path 仍 absent；② staged identity → controlled facts、target reserve/bind；③ file-only 父 reservation 缺失拒绝、staged 后 pin 前的 partial-manifest before/GC、pin 后 prepared 前与 prepared 后只能服从 branded before/after 三 crash window；④ update/create/delete 的 BEFORE/GAP/AFTER、displaced identity 只在 relocate 后出现、no-replace 抢占、locked/reparse/hard-link/cross-volume；⑤ full events 与 projection base/target/other/unknown；⑥ full rollback 和 file-only pre-pin/post-pin authority 分界；⑦ event parser、ControlStore directory/incarnation binding 与 deny-all candidate authority；⑧ zero-injection shared-backend factory 的 read/writer cap clone/foreign/swap/production-fake 负控，以及 terminal/ref/reservation/pin GC、handle-delete crash/idempotence/第三状态保留。强杀不按每个领域命令重复展开；epoch/feed/session join 留 Task 9/12/16。
+- [ ] 8 组 focused RED 固定为：① intent-first reserve、serializable identity assignment 冻结、before/staged/target 的 O_EXCL 同 fd write/fsync/readback、caller buffer 隔离，且 stage 后 displaced path 仍 absent；② staged identity → controlled facts、target reserve/bind；③ file-only 父 reservation 缺失拒绝、staged 后 pin 前的 partial-manifest before/GC、pin 后 prepared 前与 prepared 后只能服从 branded before/after 三 crash window；④ update/create/delete 的 BEFORE/GAP/AFTER、displaced identity 只在 relocate 后出现、no-replace 抢占、locked/reparse/hard-link/cross-volume；⑤ full events 与 projection base/target/other/unknown；⑥ full rollback 和 file-only pre-pin/post-pin authority 分界；⑦ event parser、ControlStore directory/incarnation binding 与 deny-all candidate authority；⑧ zero-injection shared-backend factory 的 read/writer cap clone/foreign/swap/production-fake 负控，以及 terminal/ref/reservation/pin GC、handle-delete crash/idempotence/第三状态保留。强杀不按每个领域命令重复展开；epoch/feed/session join 留 Task 9A–9C/12/16。
 - [ ] FilePublicationJournal 只向已建立并验证身份的 `mythpen/`、`volumes/`、`chapters/` 发布，不创建、删除或接管文章目录。Task 6 不实现 command→closure、reservation read/resume、真实 SQL/schema、parent journal、API/CLI/route/composition root/build-info；最小 closure/finalize 留给 Task 7A，ordinary create reservation read/resume 留给 Task 10B；不运行全量 suite、production build、VM/13/19 或 candidate 验收。
 - [ ] 运行并提交：
 
@@ -552,7 +563,7 @@ class ManuscriptUidReservation {
 }
 ```
 
-- [ ] `buildClosure()` 只接受同一 `ManuscriptStore` 铸造、绑定同一项目的 branded validated snapshot；plain clone、foreign Store 或错 project 在任何 journal/recovery 副作用前拒绝。Task 7A 的 snapshot 尚无 generation/freshness authority，因此本任务不得伪称验证 generation；Task 9B 在 writer lease 与 `ensureProjectionCurrent()` 后把文件快照、compact basis 和 generation 绑定到同一 write turn。mutation 本任务只覆盖 `chapter.replace_body`、`chapter.patch_sidecar`、`chapter.replace_body_and_sidecar` 与只改卷 `title/summary` 的 `volume.patch_metadata`；不实现 create/move/reorder/delete、ignored 引用移动/解除、migration full-snapshot 或 empty bootstrap。Task 12/13 仅在各自出现真实 consumer 时再扩展同一个 compiler。
+- [ ] `buildClosure()` 只接受同一 `ManuscriptStore` 铸造、绑定同一项目的 branded validated snapshot；plain clone、foreign Store 或错 project 在任何 journal/recovery 副作用前拒绝。Task 7A 的 snapshot 尚无 generation/freshness authority，因此本任务不得伪称验证 generation；Task 9D 在 writer lease 与 Task 9C `ensureProjectionCurrent()` 后把文件快照、compact basis 和 generation 绑定到同一 write turn。mutation 本任务只覆盖 `chapter.replace_body`、`chapter.patch_sidecar`、`chapter.replace_body_and_sidecar` 与只改卷 `title/summary` 的 `volume.patch_metadata`；不实现 create/move/reorder/delete、ignored 引用移动/解除、migration full-snapshot 或 empty bootstrap。Task 12/13 仅在各自出现真实 consumer 时再扩展同一个 compiler。
 - [ ] Store 从私有 parsed tree 推导逻辑 after 与最小 refs，只对 closure 中 `before.exists = true` 的成员用既有 handle-bound reader 重读 exact bytes，并逐项重验 parent/file identity、length 与 raw SHA-256；同 identity 原地改写也必须在返回 closure 前以 `EXTERNAL_CHANGE_CONFLICT` 阻断。不得为方便把全树 raw bytes 长期塞入 validated snapshot。
 - [ ] branded `buildResult = { closure, candidateTemplate }` 递归冻结：unchanged 保留 Task 3 verified physical identity，changed/new 的 identity 显式为 null，deleted 从 candidate template 移除；before/after bytes、hash、size、parent/ref 与 publication order 均完整且不含 caller path。
 - [ ] `finalizeCandidate()` 只接受同一 Store 的 branded buildResult；`stagedAfterFacts` 的 ref 集合必须与 changed/new after-present 集合完全相等，missing/extra/duplicate 或 ref/hash/size/parent 任一不符都拒绝。成功时注入 staged physical identity、同步 body/sidecar identity，并返回可直接交给 Task 5 `buildTarget()` 的 exact recursive-frozen candidate；service 不得自行宽松 merge。
@@ -605,114 +616,293 @@ git commit -m "feat: orchestrate ordinary L2 manuscript writes"
 
 ---
 
-## Task 8: 实现 Windows lifecycle lease 与 session admission
+## Task 8A: 实现 Windows existing-file lifecycle lease adapter
 
 **Depends on:** Task 6。
 
 **Files:**
 
 - Create: `server/platform/windows-manuscript-lifecycle-lease.js`
-- Create: `server/manuscript/session-controller.js`
 - Create: `server/tests/windows-manuscript-lifecycle-lease.test.js`
-- Create: `server/tests/manuscript-session-controller.test.js`
 - Create: `server/tests/fixtures/manuscript-lifecycle-worker.js`
-- Modify: `server/native/production-native-activation-controller.js`
-- Modify: `server/build-info.js`
+- Modify: `server/platform/durability.js`
+- Modify: `server/platform/durability-win32.js`
+- Modify: `server/tests/durability-primitives.test.js`
 
 **Interfaces:**
 
 ```js
-function createWindowsManuscriptLifecycleLeaseAdapter(options) {
+// durability.js / durability-win32.js；只打开已存在的普通文件并锁定固定 `[0,1)`。
+function acquireExistingFileRangeLease(filePath, { expectedIdentity, exclusive }) {}
+
+const lifecyclePlatformIdentity = Object.freeze({
+  canonicalRealControlDirectory: '<absolute canonical real path>',
+  controlDirectoryIdentity: Object.freeze({ dev: '<decimal string>', ino: '<decimal string>' }),
+  controlParentDirectoryIdentity: Object.freeze({ dev: '<decimal string>', ino: '<decimal string>' }),
+  lifecycleLockIdentity: Object.freeze({ dev: '<decimal string>', ino: '<decimal string>' }),
+});
+
+function createWindowsManuscriptLifecycleLeaseAdapter() {
   return {
-    capability: false,
-    acquireShared(identity) {},
-    acquireExclusive(identity) {},
+    acquireShared(lifecyclePlatformIdentity) {},
+    acquireExclusive(lifecyclePlatformIdentity) {},
   };
 }
 
-class ManuscriptSessionController {
-  constructor({ routeAdmissionVerifier }) {}
-  async admit(projectIdentity, operation) {}
-  async beginRetiring(projectIdentity) {}
-  async drain(projectIdentity) {}
-  async close(projectIdentity) {}
-}
+// acquire* 只返回 module-branded frozen opaque lease，公开面精确为 state + release。
+lease.state; // 'HELD' | 'RELEASED' | 'RELEASE_DISPOSITION_UNKNOWN'
+lease.release(); // frozen { disposition: 'UNLOCKED_AND_CLOSED' | 'CLOSED_AFTER_UNLOCK_FAILURE' }
 ```
 
-- [ ] `bun:ffi` adapter 只对规范 sibling `.manuscript-<sha256(canonical-real-control-directory)>.lifecycle.lock` 使用 `CreateFileW` + `LockFileEx`；`dwCreationDisposition` 固定为 `OPEN_EXISTING`，adapter 永不创建或补建锁文件；只有 Task 12 MigrationJournal 与 Task 13 ProjectCreationJournal 父协议可创建它。打开时读写共享、不共享 delete、锁 `[0,1)`、fail immediately。
-- [ ] 两进程测试 shared/shared 成功，shared/exclusive、exclusive/shared、exclusive/exclusive 稳定映射 `PROJECT_WRITE_BUSY`；真实路径与允许别名汇聚同一物理锁。
-- [ ] 强杀 owner 后可重新取得；Unlock/Close/符号缺失/身份变化/disposition unknown 注入时，只有 close 已知成功才证明释放，其余 fenced 或 `MANUSCRIPT_LIFECYCLE_UNAVAILABLE`。
-- [ ] `ManuscriptSessionController` 必须注入精确的 `routeAdmissionVerifier.verifyAfterLease(projectIdentity)`，不得默认、可选或在 Task 8 导入未来的 RouteStore。session 进程内 ref-count shared handle；取得 shared lease 后、登记 admission/in-flight 或调用 operation 前，必须把 project identity 交给 verifier 重读并验证 route、project UID/instance、数据库/文章根身份、generation 和父 journal 终态，再开放普通请求。
-- [ ] Task 8 只用必填的可观察 fake verifier 测试顺序 `shared lease → verifyAfterLease → operation`：缺失/非法 verifier 在获取 lease 前拒绝；verifier 拒绝时 operation 调用数为 0、已取得 handle 按已知 disposition 释放，原始错误 code/cause 原样传播。测试不得构造、导入或声称验证 Task 12 RouteStore；Task 14B 才注入 Task 12 的真实实现。
-- [ ] 所有普通读取、写入、自动保存、导出、AI 上下文从 admission 到完成都计入 in-flight；禁止 shared→exclusive 原地升级。
-- [ ] capability 由精确 Bun 1.3.14 Windows x64 production adapter 实测后才设 true，启动自检任一失败均 false/fail-closed。
+- [ ] 在既有 `durability.js` / `durability-win32.js` 框架中只增加窄的 existing-file range-lock primitive：`GENERIC_READ | GENERIC_WRITE`、`FILE_SHARE_READ | FILE_SHARE_WRITE`、不共享 delete、`OPEN_EXISTING`、固定 `[0,1)` 且 `LOCKFILE_FAIL_IMMEDIATELY`；不向调用者开放 creation disposition、share flags、任意 range、create/rename/delete 或未经验证的路径能力。
+- [ ] `LockFileEx` / `UnlockFileEx` 及其 OVERLAPPED 支持必须在首次调用该新 primitive 时单独 lazy load；缺符号、加载失败或能力自检失败只使 manuscript lifecycle primitive fail-closed，不得让既有 L1 backend 构造、耐久能力检测、activation 或任一旧 primitive 失败。
+- [ ] `lifecyclePlatformIdentity` 是 deep-frozen exact-key object：只有 `canonicalRealControlDirectory | controlDirectoryIdentity | controlParentDirectoryIdentity | lifecycleLockIdentity`；三个物理身份又都只有 canonical decimal-string `dev | ino`，拒绝缺项、额外键、非绝对/非 canonical-real 路径、数字型身份或未 deep-freeze input。adapter 不接受 caller path，只从该 directory 派生规范 sibling `.manuscript-<sha256(canonical-real-control-directory)>.lifecycle.lock`；真实路径与允许别名必须以 `controlDirectoryIdentity` 汇聚到同一物理锁。
+- [ ] 锁路径打开前以 `lstat` 拒绝 reparse，`CreateFileW` 必须同时带 `OPEN_EXISTING | FILE_FLAG_OPEN_REPARSE_POINT` 以打开 reparse 本体而不跟随；打开后再以 handle-bound facts 确认锁是已存在的普通空文件（非 directory/device、非 reparse、`byteSize = 0`、`nlink = 1`），且 exact `lifecycleLockIdentity`、ControlStore directory 与父目录身份都未变。任一 pre/post 事实不一致都在 `LockFileEx` 前 fail-closed，不得锁定被跟随的 target。
+- [ ] existing-file primitive 只返回 module-branded frozen opaque lease，不泄漏 handle/path/OVERLAPPED/identity。初始 `state = HELD`；`release()` 严格执行 `UnlockFileEx → CloseHandle`，两者成功返回 frozen `UNLOCKED_AND_CLOSED`，unlock 失败但 close 已知成功返回 frozen `CLOSED_AFTER_UNLOCK_FAILURE`，两者才可转 `RELEASED`。close 失败/不明则转为粘性 `RELEASE_DISPOSITION_UNKNOWN`、抛错并要求 controller fence；只有 `HELD` 可首次调用 release，已释放/不明后的再调用都 fail-closed。
+- [ ] adapter 永不创建或补建锁文件；只有 Task 12 MigrationJournal 与 Task 13 ProjectCreationJournal 父协议可创建它。Task 8A 测试 fixture 可以在隔离临时根中显式预建 exact 空锁文件，但该搭架不是 production creation owner。
+- [ ] focused 两进程测试 shared/shared 成功，shared/exclusive、exclusive/shared、exclusive/exclusive 稳定映射 `PROJECT_WRITE_BUSY`；强杀 owner 后可重新取得。exact-key/freeze、空普通文件、reparse target/self、hard-link、身份变化、Unlock/Close/符号缺失与两种已知 release result/disposition unknown 均有 focused 负控；只有 close 已知成功才证明释放，其余 fenced 或 `MANUSCRIPT_LIFECYCLE_UNAVAILABLE`。
+- [ ] Task 8A 只交付 candidate adapter 与 local/focused 证据，不修改 build-info、L1 production activation controller 或 production build，不设置、广告或声称 `manuscriptLifecycleLease = true`。最终 compiled capability 声明与验收只能在 Task 17B 最终 source 冻结后执行。
 - [ ] 运行并提交：
 
 ```powershell
-bun test --timeout 30000 server/tests/windows-manuscript-lifecycle-lease.test.js server/tests/manuscript-session-controller.test.js
+bun test --test-name-pattern "existing-file range lease" server/tests/durability-primitives.test.js
+bun test --timeout 30000 server/tests/windows-manuscript-lifecycle-lease.test.js
 git diff --check
-git add server/platform/windows-manuscript-lifecycle-lease.js server/manuscript/session-controller.js server/tests/windows-manuscript-lifecycle-lease.test.js server/tests/manuscript-session-controller.test.js server/tests/fixtures/manuscript-lifecycle-worker.js server/native/production-native-activation-controller.js server/build-info.js
-git commit -m "feat: protect file-authority sessions with lifecycle leases"
+git add server/platform/windows-manuscript-lifecycle-lease.js server/platform/durability.js server/platform/durability-win32.js server/tests/windows-manuscript-lifecycle-lease.test.js server/tests/durability-primitives.test.js server/tests/fixtures/manuscript-lifecycle-worker.js
+git commit -m "feat: add Windows manuscript lifecycle leases"
 ```
 
 ---
 
-## Task 9: 实现 direct feed、线性化 feed-state 与 freshness gates
+## Task 8B: 实现 session admission 状态机
 
-**Depends on:** Task 3 + Task 5 + Task 6 + Task 8。
+**Depends on:** Task 6。
+
+**Files:**
+
+- Create: `server/manuscript/session-controller.js`
+- Create: `server/tests/manuscript-session-controller.test.js`
+
+**Interfaces:**
+
+```js
+class ManuscriptSessionController {
+  constructor({ lifecycleLeaseAdapter, registryAdmission, routeAdmissionVerifier }) {}
+  async openSession(projectSelector) {}
+  async admit(session, operation) {}
+  async close(session) {}
+}
+
+// Task 8B 只消费该必填 port；Task 14B 才注入真实 registry/config owner。
+registryAdmission.withProjectIdentity(projectSelector, async (exactFrozenIdentity) => {});
+```
+
+- [ ] 三个依赖都必填且在任何 lease/路由/操作前精确验证；Task 8B 只用可观察 fake ports，不导入未来的 RouteStore、config DB 或产品 composition。`projectSelector` 只允许已注册项目名与 expected project-instance ID，不接受 path、ControlStore directory、lock filename 或 caller-built identity。
+- [ ] `openSession(projectSelector)` 固定顺序为 `registry/config lease enter → withProjectIdentity 产生 exact frozen identity → shared acquire/reuse → verifyAfterLease(identity) → 登记 session/refcount → registry/config lease exit → 返回 opaque session`。`registryAdmission` 必须在 callback 全期持有 config lifecycle lease；verifier 重读 route、project UID/instance、数据库/文章根物理身份、generation 和“存在则成功终态”的父 journal。
+- [ ] session 是 module-branded opaque authority；plain/clone/foreign/closed/closing session 均在 operation 前拒绝。同进程同物理项目的底层 shared handle 按已打开 session 数 ref-count 复用，不按 caller 字符串、路径别名或单次 operation 重复建锁。
+- [ ] shared-entry 的唯一 key 精确为 `controlDirectoryIdentity.dev + ':' + controlDirectoryIdentity.ino`，不用 project selector、UID、path 或 canonical string。controller 在首个 `await` 前、同一单写者临界区先安装带 reserved waiter/ref 的 `pending` entry；同 key 的并发 first-open 只能 join 该 promise，因而底层 shared acquire/handle 恰好一个，每个 caller 仍分别执行 exact `verifyAfterLease()` 后才把 reservation 转为 session ref。acquire 失败必须以原始 code/cause 拒绝全部 joiner 并原子删除无 handle entry；单个 verifier 失败只回滚其 reserved ref，最后一个 reservation/session 都失败才释放新 handle 并删除 entry。回滚释放 disposition unknown 时保留粘性 fenced entry/controller，禁止删 entry 后重开第二个 handle。
+- [ ] `admit(session, operation)` 只对已验证的 open session 在 operation 前增加该 session 的 `inFlight`，并在成功、失败或取消后于 `finally` 减回；所有普通读取、写入、自动保存、导出和 AI 上下文最终都必须经过这一边界。
+- [ ] `close(session)` 先原子禁止该 session 的新 admission，只等待该 session 自身 `inFlight = 0`，再减少项目 session refcount；只有最后一个 session 关闭才按 `UnlockFileEx → CloseHandle` 释放底层 shared handle。verifier 拒绝时 operation 调用数为 0，本次新取得/增加的 ref 按已知 disposition 回滚，原始 code/cause 原样传播；release disposition unknown 必须 fence controller。
+- [ ] focused 顺序测试精确观察 `config enter → identity → shared → verify → config exit → opaque session → admit/operation → close`，并覆盖并发 open、共享 handle 复用、单 session close 不影响其他 session、close 等待自身 in-flight 以及全部失败路径。禁止 shared→exclusive 原地升级；`beginRetiring()`、项目级 `drain()` 和 opaque retirement epoch 整体留给 Task 14。
+- [ ] 运行并提交：
+
+```powershell
+bun test server/tests/manuscript-session-controller.test.js
+git diff --check
+git add server/manuscript/session-controller.js server/tests/manuscript-session-controller.test.js
+git commit -m "feat: gate manuscript sessions"
+```
+
+---
+
+## Task 9A: 实现 Windows direct-feed platform adapter
+
+**Depends on:** Task 6。与 Task 9B 可并行；本任务不导入 session、projection、journal 或产品路由。
 
 **Files:**
 
 - Create: `server/platform/windows-manuscript-change-feed.js`
-- Create: `server/manuscript/feed-state.js`
-- Create: `server/manuscript/freshness.js`
 - Create: `server/tests/windows-manuscript-change-feed.test.js`
-- Create: `server/tests/manuscript-feed-state.test.js`
-- Create: `server/tests/manuscript-freshness.test.js`
 - Create: `server/tests/fixtures/manuscript-feed-worker.js`
-- Modify: `server/manuscript/session-controller.js`
-- Modify: `server/build-info.js`
+
+**Interfaces:**
+
+```js
+const changeFeedPlatformIdentity = Object.freeze({
+  canonicalRealMythpenDirectory: '<absolute canonical real path>',
+  articleRootDirectoryIdentity: Object.freeze({ dev: '<decimal string>', ino: '<decimal string>' }),
+  mythpenDirectoryIdentity: Object.freeze({ dev: '<decimal string>', ino: '<decimal string>' }),
+  volumesDirectoryIdentity: Object.freeze({ dev: '<decimal string>', ino: '<decimal string>' }),
+  chaptersDirectoryIdentity: Object.freeze({ dev: '<decimal string>', ino: '<decimal string>' }),
+});
+
+function createWindowsManuscriptChangeFeedAdapter() {
+  return {
+    assertIdentity(changeFeedPlatformIdentity) {}, // pure; returns the same validated reference
+    tryOpen(changeFeedPlatformIdentity) {},
+    // module-branded frozen exact result:
+    // { outcome: 'OPENED', owner }
+    // | { outcome: 'NO_SLOT' }
+    // | { outcome: 'UNAVAILABLE', error, closeDisposition: 'KNOWN_CLOSED' | 'UNKNOWN' }
+  };
+}
+
+// OPENED owner 是 opaque module authority；公开面精确为：
+owner.state; // 'ARMED' | 'STOPPING' | 'CLOSED' | 'CLOSE_DISPOSITION_UNKNOWN'
+owner.feedInstance(feedId); // opaque handle-instance authority
+owner.probeEvents(); // frozen exact { mythpen: boolean, volumes: boolean, chapters: boolean }
+owner.takeCompletion(feedId); // null | branded frozen { feedId, handleInstance }
+owner.rearm(completion);
+owner.decode(completion); // frozen exact { outcome: 'RECORDS', records: [{ action, component }] }
+                          // | { outcome: 'COVERAGE_LOST', reason }
+owner.retireCompletion(completion);
+owner.beginStopping();
+owner.cancelPending(feedId); // null | terminal branded completion
+owner.close(); // frozen { disposition: 'CLOSED' }
+```
+
+- [ ] `changeFeedPlatformIdentity` 只接受上面五个 exact own data keys，顶层和四个 `{ dev, ino }` 都 deep-frozen；路径必须是绝对 canonical real `mythpen/`，身份只接受 canonical decimal strings。`assertIdentity()` 是无副作用的唯一 pure validator，成功只返回同一原引用；9C capability=false 时也必须先调用它，不能复制 shape validator。adapter 只从该路径内部派生 `volumes/chapters`，不得接受 caller path、文件名、share flags、buffer size、feed count 或目录映射。打开前后用现有 verified inspection 固定 path/parent；更重要的是，对三个实际 watched handles 分别调用 `GetFileInformationByHandle`，直接核对 DIRECTORY、非 reparse 与 expected `dev:ino`。任一 alias、reparse、父/目录 identity race 或 handle-bound mismatch 都返回 fail-closed `UNAVAILABLE`，不能以二次 path inspection 代替 handle 事实。
+- [ ] module 单独 lazy-load/cached 且冻结 Win32 x64 ABI：`CreateFileW(ptr,u32,u32,ptr,u32,u32,ptr)->u64`、`CreateEventW(ptr,i32,i32,ptr)->u64`、`ResetEvent(u64)->i32`、`ReadDirectoryChangesW(u64,ptr,u32,i32,u32,ptr,ptr,ptr)->i32`、`WaitForSingleObject(u64,u32)->u32`、`GetOverlappedResult(u64,ptr,ptr,i32)->i32`、`CancelIoEx(u64,ptr)->i32`、`GetFileInformationByHandle(u64,ptr)->i32`、`CloseHandle(u64)->i32`、`GetLastError()->u32`。每请求使用 zero-filled 32-byte x64 `OVERLAPPED`（event handle 在 offset 24）和独立 4-byte transferred count；不注册 FFI/native callback。缺符号、错误 return width、非法 handle/result 或调用抛错只使本 adapter `UNAVAILABLE`，不得进入 L1 eager loader、影响 L1 backend 或 Task 8A adapter。
+- [ ] 三个非递归目录各用 `FILE_LIST_DIRECTORY`、`OPEN_EXISTING`、`FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OVERLAPPED`，只共享 read/write、不共享 delete；每 feed 独立 manual-reset event 与两块 DWORD-aligned 1 MiB user buffer。Windows 在该 handle 的首次 `ReadDirectoryChangesW(..., nBufferLength=1 MiB, subtree=0, filter=0x5f, bytesReturned=0, callback=0)` 建立对应内部 allocation；JS 不再另分配所谓第三块“kernel buffer”。parser 只接受 `FILE_NOTIFY_INFORMATION` 的 `u32 next/action/nameByteLength + UTF-16LE name`，逐项验证非空、偶数字节、4-byte next alignment、边界、终止记录、无 NUL/分隔符/孤立 surrogate 的单组件；Task 3 才负责规范 shape/classification。零字节、`ERROR_NOTIFY_ENUM_DIR`、malformed/unknown action 都返回 coverage loss，绝不静默丢弃。
+- [ ] `feedInstance()` 只返回 owner-bound opaque handle-instance authority。`probeEvents()` 返回上面的 exact frozen 三 boolean；`takeCompletion()` 与 `cancelPending(feedId)` 只返回 `null` 或 exact branded `{ feedId, handleInstance }` completion；`decode()` 只返回 branded frozen `RECORDS`（每项 exact `{ action, component }`，action 仅 `ADDED | REMOVED | MODIFIED | RENAMED_OLD_NAME | RENAMED_NEW_NAME`）或 `COVERAGE_LOST`（固定 reason enum）。raw handle、OVERLAPPED、buffer、path 与 mutable bytes永不出模块；owner/completion/instance plain clone、foreign owner、错 feed、重复 rearm-decode-retire 全拒绝。全部探测 caller-driven；不建立 background pump、timer、callback 或 polling loop。
+- [ ] `MAX_ARMED_FILE_PROJECTS_PER_PROCESS = 1` 是 module-global 固定槽，key 为 `mythpenDirectoryIdentity.dev + ':' + ino`。`tryOpen()` 只有完整打开并 armed 三 feed 才返回 `OPENED`；只有另一个已知 live/正在 stopping owner 占槽才返回 `NO_SLOT`，不排队、不 LRU/抢占。partial-open cleanup 或既有 owner close unknown 必须返回 `UNAVAILABLE + closeDisposition:'UNKNOWN'`，其 error 带 own immutable `releaseDispositionUnknown = true`，并保留 sticky slot；9C 必须 fence，不能把它当 NO_SLOT 降级。只有 owner `close()` 已知成功才释放槽。
+- [ ] `beginStopping()` 后禁止 rearm。`cancelPending(feedId)` 逐 feed 发 `CancelIoEx`，并等待 `GetOverlappedResult` 进入 normal、`ERROR_OPERATION_ABORTED` 或已知失败终态；CancelIoEx true、`ERROR_NOT_FOUND` 或 event signaled 本身都不是终态。terminal completion 仍须上层 observe/account 后 `retireCompletion()`；此前 buffer 不可复用，`close()` 必须拒绝。全部 terminal completion 已由上层 account 并在 platform 侧 retired 后，close 顺序固定为每 feed directory handle → event handle → 清 user-buffer refs，再返回 frozen `CLOSED`；platform 只验证自己的 terminal/retired authority，不冒充 9B state。任一 `CloseHandle` 抛错/0/非法返回把 state 粘为 `CLOSE_DISPOSITION_UNKNOWN`，不重试、不报 closed、不释放 slot/shared。
+- [ ] focused RED→GREEN 覆盖 exact identity/API/ABI、三 feed 隔离、buffer parser、overflow/loss、completion brand、rearm gap、partial-open cleanup、module slot、cancel-before/after-complete、`ERROR_NOT_FOUND`、终态前拒绝 free/close、每个 handle close 故障与两进程真实事件；不跑 full/build/VM。Task 9A 只交付 candidate，不修改 build-info，也不设置或广告 production `manuscriptChangeNotification = true`。
+- [ ] 运行并提交：
+
+```powershell
+bun test --timeout 60000 server/tests/windows-manuscript-change-feed.test.js
+git diff --check
+git add server/platform/windows-manuscript-change-feed.js server/tests/windows-manuscript-change-feed.test.js server/tests/fixtures/manuscript-feed-worker.js
+git commit -m "feat: add Windows manuscript direct feed"
+```
+
+---
+
+## Task 9B: 实现线性化 feed-state
+
+**Depends on:** Task 6。与 Task 9A 可并行；本任务是纯内存状态机，不导入 Win32、Store、projection、session 或产品代码。
+
+**Files:**
+
+- Create: `server/manuscript/feed-state.js`
+- Create: `server/tests/manuscript-feed-state.test.js`
 
 **Interfaces:**
 
 ```js
 class ManuscriptFeedState {
-  snapshot() {}
-  observeCompletion(feedId, handleInstance) {}
   arm(feedId, handleInstance) {}
-  accountCompletion(feedId, dirtyPaths, coverageLost) {}
-  claimRefresh(baseGeneration) {}
-  settleRefresh(claimId, result) {}
+  enterDegraded(reason) {}
+  gateSnapshot(probeEvents) {}
+  observeCompletion(feedId, handleInstance) {} // opaque completion authority
+  recordRearm(completion, handleInstance) {} // 只在 platform rearm 已成功后调用
+  accountCompletion(completion, dirtyPaths, coverageLost) {}
+  claimRefresh(baseGeneration) {} // opaque refresh authority
+  claimSnapshot(claim) {} // exact frozen { baseGeneration, dirtyPaths }
+  settleRefresh(claim, result) {} // exact frozen plain refresh-result union
+  beginStopping() {}
+  closeFeed(feedId, handleInstance) {}
+  finishClosed() {}
 }
 
-async function ensureProjectionCurrent(session, options = {}) {}
-async function ensureReadableProjection(session, query) {}
+// dirtyPathKey 只能是下面三个 canonical relative prefix + 一个已验证单组件：
+// mythpen/<component> | mythpen/volumes/<component> | mythpen/chapters/<component>
+// result 是按 disposition 区分的 exact frozen plain union：
+// { disposition:'COMMITTED', baseGeneration, targetGeneration, refreshKind }
+// { disposition:'ALREADY_CURRENT', generation, refreshKind }
+// { disposition:'KNOWN_NOT_COMMITTED'|'UNKNOWN', generation, refreshKind, error }
+// generation 均为 non-negative safe integer；refreshKind: 'FULL' | 'INCREMENTAL'
 ```
 
-- [ ] 每项目直接打开 root/volumes/chapters 三个非递归目录句柄；每个独立 OVERLAPPED、manual-reset event、1 MiB kernel buffer、双 user buffer，不共享 delete access。
-- [ ] feed-state 在一把 mutex/单写者执行器下原子维护 handle instance、armed、observed/accounted、dirty、refresh claim、base generation、coverage-loss epoch；每 feed 至多一个未 accounted completion。
-- [ ] 确定性交错测试“后台已取 completion 未解析”“重新布防失败”“解析抛错”“新事件落在 refresh claim 后”，全部不能 false-clean。
-- [ ] 零字节、`ERROR_NOTIFY_ENUM_DIR`、记录边界/UTF-16 错误、句柄失效、实例重建、未全 armed、能力 false 均先锁存 `coverageLost`/全脏。
-- [ ] 每次 `ensureProjectionCurrent()` 在 writer lease 内同步排空三个 event 和 observed/accounted 差值；具体 dirty 做增量，coverage loss/启动/显式刷新/恢复/迁移做完全校验。
-- [ ] 启动顺序固定“shared lease → 三 feed armed → 全脏 claim → 完全校验 → 排空窗口事件 → 发布可信基线”；只有成功完整校验可清 coverageLost。
-- [ ] `ensureReadableProjection()` 查询前后各做三 event 零超时 probe + 单一线性化快照；检测变化时不得返回旧查询结果，最多有界重试后报 `MANUSCRIPT_TREE_CHANGED_DURING_READ`。
-- [ ] 自我事件只能按 journal after hash + generation 对消；commit unknown、取消或 refresh 失败把 claim 合回 dirty或保持 coverage lost。
-- [ ] 每进程最多一个 armed `files` 项目，预算约 9 MiB；无 slot 会话仍持 shared lifecycle lease并常置全脏，UI 标识降级。
-- [ ] 生产 capability 默认 false，完整原矩阵与资源预算通过后才将 `manuscriptChangeNotification` 置 true。
+- [ ] 所有 mutation、`probeEvents()` 调用与 snapshot 组装只经过同一 mutex/单写者执行器；`gateSnapshot(probeEvents)` 在同一不可 `await` 的临界区恰好调用一次同步 probe，并原子返回三个 event、每 feed handle instance/armed/observed/accounted、普通 dirty、refresh claim/base generation、coverage-loss epoch 与 lifecycle state。observed/accounted/coverage-loss epoch 全部是进程内不回绕的 non-negative `BigInt`，诊断边界只输出 canonical decimal string，禁止转 `Number`；probe 抛错先锁存 loss，禁止调用方拼接 clean。
+- [ ] `observeCompletion()` 必须先把同 instance feed 置 unarmed、递增 observed 并铸 module-branded opaque completion；同 feed 最多一个未 accounted authority。platform rearm 成功后才允许同 authority `recordRearm(completion, handleInstance)`；rearm 失败不得传 caller boolean，而是保持 unarmed 并直接以 coverage-loss evidence `accountCompletion()`。`dirtyPaths` 只接受 dense frozen unique canonical relative keys，不接受绝对路径、`.`/`..`、反斜杠、额外层级或 caller object；Task 3/可选 Task 10P 后续才解释组件 shape。最后一次 account 原子合并 dirty/loss并递增 accounted；跳步、倒序、重复、plain/clone/foreign/stale instance 均拒绝且不能修改计数。
+- [ ] handle instance 只能在旧实例 stopping/closed 且 coverage loss 已锁存后更换；旧 completion、probe 或 refresh claim 不能影响新实例，counter reset 不能消除旧差值。确定性 ABA、background-taken-before-parse、rearm failure、decode throw 与 account throw 测试都不能产生 false-clean。
+- [ ] fresh state 从 startup loss/full-dirty 开始；仅把三 feed `arm()` 成功不能产生 clean。只有同一稳定 handle/count/loss witness 下确定完成的 FULL refresh 才能清 startup loss；degraded state 则永不清除该 loss。
+- [ ] `claimRefresh()` 在一个提交中冻结 base generation、把当时 dirty 移入 immutable refreshing set 并铸 opaque claim；新事件只进普通 dirty。`settleRefresh()` 逐 variant 精确校验上面 frozen plain union 的外层 own data descriptors，禁止 truthy/额外键/accessor/错误 generation；failure variant 的原始 `error` 引用不 clone、不 freeze、不执行属性：`COMMITTED | ALREADY_CURRENT` 可按 generation 结清 claim，`KNOWN_NOT_COMMITTED` 合回 dirty并由上层原样传播 `error`，`UNKNOWN` 保留/合回并锁存 loss后传播同一 `error`。只有 `refreshKind='FULL'` 且结果已确定、三个 feed armed、observed=accounted、handle instances 与 coverage-loss epoch 未变时才可清 loss；INCREMENTAL 永不清 loss。9B 不解释 self-event 或 journal 语义，也不要求外部 port 铸造本模块私有 brand。
+- [ ] `enterDegraded(reason)` 只接受 `CAPABILITY_DISABLED | NO_SLOT | KNOWN_UNAVAILABLE`，并在零 handle 状态一次性把三 feed 标成 absent/closed、锁存 startup loss/full-dirty；该 owner 仍可 `claimRefresh()`/`settleRefresh(FULL)`，但任何 FULL 都不能清除 degraded loss，也永远不能被 event gate 判 clean。`claimSnapshot(claim)` 是 Task 9C full refresh 与可选 Task 10P 外部 port 唯一可消费的数据面，只返回 exact recursively frozen `{ baseGeneration, dirtyPaths }`；它不泄露/复制 claim authority，plain/clone/foreign/stale claim 都拒绝。`beginStopping()` 后 degraded owner 可在无 `closeFeed()` 调用时直接 `finishClosed()`。
+- [ ] `beginStopping()` 原子阻止新 state gate/claim/arm；已观察 completion 仍须按同一 authority 结清。9C 只在 platform terminal completion 已 account 且 retired 后调用 `closeFeed(feedId, handleInstance)`；9B 自身只验证同 instance 的 state 已 accounted/stopping，不伪造 platform terminal proof。`finishClosed()` 只证明三 feed state closed（或已显式进入 zero-handle degraded）且无 completion/claim，不声称验证 9C freshness admission/gate 计数。stop/close 永不把 dirty/loss 改写成 clean。
+- [ ] focused RED→GREEN 只覆盖上述纯状态交错、opaque authority、loss/ABA/stop/close；不跑 platform test、full/build/VM，不修改 capability/build-info。
 - [ ] 运行并提交：
 
 ```powershell
-bun test --timeout 60000 server/tests/windows-manuscript-change-feed.test.js server/tests/manuscript-feed-state.test.js server/tests/manuscript-freshness.test.js
+bun test server/tests/manuscript-feed-state.test.js
 git diff --check
-git add server/platform/windows-manuscript-change-feed.js server/manuscript/feed-state.js server/manuscript/freshness.js server/tests/windows-manuscript-change-feed.test.js server/tests/manuscript-feed-state.test.js server/tests/manuscript-freshness.test.js server/tests/fixtures/manuscript-feed-worker.js server/manuscript/session-controller.js server/build-info.js
+git add server/manuscript/feed-state.js server/tests/manuscript-feed-state.test.js
+git commit -m "feat: linearize manuscript feed state"
+```
+
+---
+
+## Task 9C: 实现 freshness 与 session-owned feed 生命周期
+
+**Depends on:** Task 3 + Task 4 + Task 5 + Task 6 + Task 8A + Task 8B + Task 9A + Task 9B。Task 9A/9B 都完成后才开始；本任务只用必填可观察 fake ports，不建立真实产品 composition。
+
+**Files:**
+
+- Create: `server/manuscript/freshness.js`
+- Create: `server/tests/manuscript-freshness.test.js`
+- Modify: `server/manuscript/session-controller.js`
+- Modify: `server/tests/manuscript-session-controller.test.js`
+
+**Interfaces:**
+
+```js
+function createManuscriptFreshnessLifecycle({
+  preStartVerifier,
+  feedAdapter,
+  notificationCapability,
+  writerTurns,
+  recovery,
+  fullRefresh,
+  projectionAccess,
+}) {
+  return {
+    createOwner(registryIdentity) {}, // sync inert branded owner; zero side effects
+    async start(owner, registryIdentity) {}, // exact once per entry, config exit 后调用
+    async assertSameBinding(owner, registryIdentity) {},
+    async admit(owner, operation) {}, // operation(opaque admission), exact once
+    async close(owner) {},             // frozen { disposition: 'CLOSED' }, exact once
+  };
+}
+
+class ManuscriptSessionController {
+  constructor({ lifecycleLeaseAdapter, registryAdmission, routeAdmissionVerifier, freshnessLifecycle }) {}
+  async openSession(projectSelector) {}
+  async admit(session, operation) {} // operation(freshnessAdmission)
+  async close(session) {}
+}
+
+async function ensureProjectionCurrent(freshnessAdmission, writerTurn) {}
+async function ensureReadableProjection(freshnessAdmission, query) {}
+```
+
+- [ ] 沿用 Task 8B 已有 deep-frozen registry identity 与 `lifecyclePlatformIdentity` validator，不把 registry 根改成 exact 四键，也不新增 clone/foreign identity 声明；只补验 own enumerable data `projectUid`/`projectInstanceId` 是 canonical UUID，并始终保存 registry callback 交付的原对象引用。`preStartVerifier.verifyBeforeFeedStart(fullIdentity)` 在 config lease 退出后消费该原引用并直接返回 exact frozen `{ changeFeedPlatformIdentity }`；该字段必须是 Task 9A exact 五键对象。真实 trusted path/identity derivation 只留 Task 14B，9C 不 live 重算、不接受 caller-built feed identity，也不声称验证一个外部 port 无法铸造给本模块的私有 brand。
+- [ ] 七个 constructor ports 都必填并在任何 side effect 前验证：`preStartVerifier` 如上；`feedAdapter.assertIdentity(startBasis.changeFeedPlatformIdentity)` 必须先返回同一引用，`tryOpen()` 才可按 capability 分支产生 Task 9A union；同步 `notificationCapability.read()` 只返回 boolean；`writerTurns.withWriterTurn(admission, callback)` 铸 opaque turn且 `assertTurn(admission, writerTurn)` 绑定同 owner/admission；`recovery.recoverBeforeRefresh(admission, writerTurn)`；`fullRefresh.validateAndPublish({ admission, writerTurn, claimSnapshot, baseToken })`；`projectionAccess.readCurrent(admission, query)` 与 `currentToken(admission)`。Task 9C 只用 exact fake ports，不导入 product/config DB 或预留 self-event/incremental seam。
+- [ ] `fullRefresh` 输入只接受上面四个 exact frozen own data keys；`admission`/`writerTurn` 仍是同模块 authorities，`claimSnapshot` 必须是 9B 为 freshness 所持 opaque claim 返回的 exact frozen `{ baseGeneration, dirtyPaths }`，外部 port 不接收 claim。返回 Task 9B 定义的 exact frozen plain `COMMITTED | ALREADY_CURRENT | KNOWN_NOT_COMMITTED | UNKNOWN` union，成功 variant 携匹配的 generation，失败 variant 携原始 `error`，统一 `refreshKind='FULL'`。`COMMITTED` 表示确定发布新 generation；`ALREADY_CURRENT` 必须保持 generation/token 不变；`KNOWN_NOT_COMMITTED` 合回 dirty并原样抛 error，`UNKNOWN` 锁存 loss后原样抛 error。基线始终把 ordinary dirty 交 FULL；只有显式选择 Task 10P 才后续增加 `INCREMENTAL` producer。任何 full-after 无变化都必须返回稳定 `ALREADY_CURRENT`，不能每次 bump generation。
+- [ ] `notificationCapability` 在 Task 17B final production capability 之前的 production composition 只能读出 false，此时不得调用 `feedAdapter.tryOpen()`，并以 `CAPABILITY_DISABLED` 进入 9B degraded owner；focused candidate 可用必填 true fake 覆盖 direct-feed 分支，但不能写 build-info 或声称 production true。true 时 `OPENED` 才建立三 feed；`NO_SLOT`/`UNAVAILABLE+KNOWN_CLOSED` 分别以 `NO_SLOT`/`KNOWN_UNAVAILABLE` 调用 `enterDegraded()`；`UNAVAILABLE+UNKNOWN`/own marker 立即 fence，不能返回 session或释放 shared 后重开。
+- [ ] registry callback 内只做 shared acquire、route verify，并在 route verify 成功后的下一次 `await` 前同步调用 `createOwner()`、安装唯一 inert owner/deferred `startPromise`；不得在 config lease 内运行 pre-start verify、capability check、打开 feed、取得 writer 或扫描。callback 退出后，首次 opener 才驱动 `start(owner, originalIdentity)`：它在首个 `await` 前登记 owner-private startup admission，再执行 pre-start verify → pure feed identity assert → capability branch → feed arm（若启用）→ `withWriterTurn(startupAdmission)` 下 recovery/full baseline → 排空校验窗口，并在 `finally` 结清 startup admission。所有 joiner 等同一 promise，完成前 opaque session 不暴露。每个 joiner 都保留并重验自己的原 identity，调用 `assertSameBinding(owner, fullIdentity)` 比较 project/lifecycle/feed binding 后才能共享 owner。
+- [ ] `start/admit/close` 都是 module-branded async exact-once 操作；controller shared entry 是 owner 唯一 owner。`admit()` 必须在首个 `await` 前由 freshness owner 同步登记 project gate，再向 operation 传 opaque admission，并在 `finally` 唯一撤销；gate 计数只由 owner 线性化，session controller 不维护第二份。非最后 session close 只关闭自身，不拆 feed。
+- [ ] `ensureProjectionCurrent(admission, writerTurn)` 无 options，先用 `writerTurns.assertTurn()` 证明 Task 9D 已持同一 turn，禁止内部二次 acquire；随后 recovery，并以固定顺序同步 drain 每项 native completion：platform take → 9B observe/unarmed → platform rearm → 9B recordRearm → platform decode → 规范 relative dirty/loss 进入 9B account → platform retire，循环到同一 `gateSnapshot()` 无 signaled event且 observed=accounted；任一步失败都先 account/latch loss，绝不拼 clean。再 claim、在 freshness 内保留该 opaque authority、通过 `claimSnapshot()` 取 frozen data，并只把 snapshot 交 `fullRefresh`；结果仍由 freshness 使用原 claim 调 `settleRefresh()`。Task 9C 不做 self-event 对消或增量；失败、取消、`KNOWN_NOT_COMMITTED` 合回 dirty，`UNKNOWN`/错 generation/port throw 锁存 loss。读路径只有观察 dirty/loss 时才由 9C 内部 `withWriterTurn(admission, callback)` 调用同一函数。
+- [ ] 已运行 feed 的 rearm/decode/platform 调用失败不允许借 `enterDegraded()` 假装换 mode：先结清可证明的 completion/account、锁存 loss并原样失败，保留 native owner直到 zero-ref cleanup。live close→degraded 需要新的 mode epoch/完整 state replacement，明确后移；本任务不得在失败后继续以 event clean 服务。
+- [ ] `projectionAccess.readCurrent(admission, query)` 必须在同一 admitted SQLite connection 内完整序列化查询并返回 exact frozen `{ token: { generation, connectionEpoch, basisDigest }, value }`；`currentToken(admission)` 返回同形 exact token。direct-feed clean 路径在 readCurrent 前后各做一次 Task 9B gate snapshot并比较 currentToken；`DB_CONNECTION_STALE` 丢弃结果并从整个 readable gate 重入，其他错误原样传播。direct 与 degraded 两条读取路径合计都只允许一次完整重试，第二次仍 stale/变化则报 `MANUSCRIPT_TREE_CHANGED_DURING_READ`。
+- [ ] capability=false/`NO_SLOT`/known-unavailable fallback 永不以 event clean：writer turn 内 full-before（允许 COMMITTED/ALREADY_CURRENT）→ `readCurrent` → writer turn 内 full-after（无变化必须 ALREADY_CURRENT）→ `currentToken`，只有 read token 与 after token 的 generation/connectionEpoch/basisDigest 全同才返回；否则按上一条唯一重试预算重入。owner 始终全脏并输出 frozen degraded status，UI 留 Task 15。
+- [ ] 普通 session close 只有在减 ref 前满足 `sessionRefs == 1 && reservations == 0` 才启动 teardown：首个 `await` 前原子把 entry 置 stopping/releasing 并安装唯一 `cleanupPromise`，新 reserve 必须等待整条 feed close → shared release。存在 pending reservation 时当前 session 可关闭/减 ref但不得拆 owner；reservation 转 session 后按新的最后-close 条件处理，reservation 失败后若达到 post-accounting `sessionRefs == 0 && reservations == 0`，由同一 cleanup 函数安装/复用唯一 promise。cleanup 阻新 gate、等 owner gates、逐 feed cancel/terminal→observe/account→retire，再要求 platform/state known closed；随后才减最后 ref（若尚未减）并 Task 8A release shared。任一未知态 sticky fence、无 shared release、无 closed。
+- [ ] Task 9C 只交付 freshness/session candidate 与 local focused 证据，不修改 build-info、不设置或广告 production `manuscriptChangeNotification = true`，不运行 full/build/VM。
+- [ ] 运行并提交：
+
+```powershell
+bun test --timeout 60000 server/tests/manuscript-freshness.test.js server/tests/manuscript-session-controller.test.js
+git diff --check
+git add server/manuscript/freshness.js server/tests/manuscript-freshness.test.js server/manuscript/session-controller.js server/tests/manuscript-session-controller.test.js
 git commit -m "feat: maintain manuscript projection freshness"
 ```
 
 ---
 
-## Task 9B: 建立 admission/freshness wrapper
+## Task 9D: 建立 admission/freshness wrapper
 
-**Depends on:** Task 7B + Task 9。此任务不得修改任何 REST、AI、导出、自动保存或产品入口；Task 7B 的 L2 service 也只作为 callback 后端，真实写入、冲突 gate、ignored 动作与迁移/创建/退役产品接线统一推迟到 Task 14B。
+**Depends on:** Task 7B + Task 9C。此任务不得修改任何 REST、AI、导出、自动保存或产品入口；Task 7B 的 L2 service 也只作为 callback 后端，真实写入、冲突 gate、ignored 动作与迁移/创建/退役产品接线统一推迟到 Task 14B。
 
 **Files:**
 
@@ -722,19 +912,28 @@ git commit -m "feat: maintain manuscript projection freshness"
 **Interfaces:**
 
 ```js
-async function withCurrentManuscriptWriteTurn(projectIdentity, logicalRequestId, callback) {
-  // Task 8 session admission → writer lease → Task 9 freshness → injected policy gate → callback(turnContext)
-}
-
-async function withReadableManuscriptProjection(projectIdentity, query) {
-  // Task 8 session admission → Task 9 ensureReadableProjection(session, query)
+function createManuscriptProductGates({
+  projectSessionAdmission,
+  writerTurns,
+  freshness,
+  turnContextSource,
+  policy,
+}) {
+  return {
+    async withCurrentManuscriptWriteTurn(projectSelector, writeRequest, callback) {},
+    async withReadableManuscriptProjection(projectSelector, query) {},
+  };
 }
 ```
 
-- [ ] 用 fake admission/writer/freshness/policy/service 实现纯 wrapper 测试，固定取得与释放顺序；policy gate 是显式必填依赖，当前只可使用 fail-closed fake，不得把尚未实现的 DraftConflictJournal 或 ignored 行为伪装成可用产品能力。
-- [ ] `withCurrentManuscriptWriteTurn()` 只在 admission、writer、freshness 与注入 gate 全部成功后调用 callback；失败、取消和 stale response 不创建 FilePublicationJournal candidate，也不清除 feed dirty、refresh claim 或未来 conflict evidence。
-- [ ] `withReadableManuscriptProjection()` 只包装 session admission、`ensureReadableProjection()` 与 ActiveManuscriptProjection 查询，并固定 generation/connection epoch 传递；本任务不把任何现有产品读入口宣称为已迁移。
+- [ ] 五个 ports 都是必填 exact methods，并在任何 admission/writer/freshness 副作用前验证。`projectSessionAdmission.withAdmission(projectSelector, operation)` 只借用 Task 14B 管理的长生命周期 session admission；9D 不 open/close session、不得每请求拆 feed/重做 startup FULL。`writeRequest` 是 exact frozen own-data `{ logicalRequestId, policyInput }`：ID 为非空字符串，`policyInput` 保留原 opaque 引用且不 clone/求值，供 Task 11/14B 判断正文、sidecar、卷 metadata 与结构资源域。
+- [ ] `withCurrentManuscriptWriteTurn()` 的唯一顺序是 `withAdmission → writerTurns.withWriterTurn()` 恰好一次，并在同一 writer callback 内执行 `ensureProjectionCurrent(admission, sameTurn) → turnContextSource.capture(...) → policy.authorizeWrite(...) → callback(turnContext)`；不得二次 acquire、释放后再取、在 freshness/context/policy/callback 间留无锁窗口，或接受 caller-built admission/turn。任一 port 重复调用 callback 都在第二次 freshness/领域 callback 前拒绝。
+- [ ] `turnContextSource.capture(Object.freeze({ admission, writerTurn, logicalRequestId }))` 是 9D 唯一上下文来源，返回 exact recursively frozen Task 7B 六键 `{ journalId, logicalRequestId, projectedAt, currentProjection, fileSnapshot, ignoredLedger }`：`journalId` 为 canonical UUIDv4，`projectedAt` 为 canonical UTC millisecond ISO，logical ID 逐字节回显，file snapshot 保留同一 ManuscriptStore opaque 原引用。source 自己拥有 production CSPRNG/clock；9D 不拼字段、不重扫文章树。本任务只用 fake 证明 mandatory contract；真实 source 必须在 Task 14B 证明 file snapshot、compact basis、ignored ledger、project/instance 与 generation `B` 来自同一已刷新 writer turn。
+- [ ] `policy.authorizeWrite(Object.freeze({ admission, writerTurn, policyInput, turnContext }))` 成功只接受 exact frozen `{ disposition:'ALLOWED' }`；deny、throw、额外键/accessor/truthy 均 fail-closed，领域 callback 为 0。真实 DraftConflictJournal/ignored policy 留 Task 11/14B，9D 不伪装为已实现。
+- [ ] callback 开始前 admission/writer/freshness/context/policy 任一步失败时，本 logical request 的新 FilePublicationJournal candidate 调用数为 0，且不清 dirty/claim/conflict evidence；freshness recovery 仍可处理既有 journal，policy 后续也可持久化其自身冲突证据。callback 一旦进入 Task 7B/10B 并完成 `stageAssets()`，后续失败允许留下非终态 publication journal并沿用原 recovery；9D 不回滚、不吞原错、不自动重试，也不得再宣称 journal 零副作用。no-op 是否零 journal 仍由 Task 7B 保证。
+- [ ] `withReadableManuscriptProjection()` 只执行 `projectSessionAdmission.withAdmission(projectSelector, admission => freshness.ensureReadableProjection(admission, query))`，原样返回结果/错误；它不取 writer、不调用 policy/context source、不重复 ActiveManuscriptProjection 或 retry，generation/connection epoch 与唯一重试预算继续由 9C 独占。本任务不把任何现有产品读入口宣称为已迁移。
 - [ ] 本任务不修改静态扫描器或 SQL guard，也不建立临时 allowlist；文章真值 SQL、受控文件直写、freshness 绕过、tombstone 读取、`MAX(num)` 与旧伏笔编号的完整 RED→零债务扫描统一在 Task 14B 与产品接线同一次完成。
+- [ ] focused RED→GREEN 覆盖 happy 顺序/逆序释放、各 stage 短路、context exactness与同引用、policy ALLOWED gate、callback 开始后的 journal recovery 边界、重复 callback 以及 readable 原样传播；删除无真实 source 的 fake service/第二次 projection 调用。本任务只跑下面的 focused wrapper test；不跑 full/build/VM，不修改 build-info 或 capability。
 - [ ] 运行并提交：
 
 ```powershell
@@ -746,67 +945,61 @@ git commit -m "feat: establish L2 product gate foundation"
 
 ---
 
-## Task 10A: 实现 ignored identity ledger、孤儿出口与安全增量刷新
+## Task 10A1: 规范化 ignored identity ledger 与 opaque serializer
 
-**Depends on:** Task 9B。
+**Depends on:** Task 2 + Task 3 + Task 5。本任务是纯 ledger/Store/target 合同，不依赖 Task 9C/9D，可与 freshness 实施并行。
 
 **Files:**
 
 - Create: `server/manuscript/ignored-ledger.js`
-- Create: `server/manuscript/orphan-resolution-service.js`
-- Create: `server/manuscript/incremental-refresh.js`
 - Modify: `server/manuscript/store.js`
 - Modify: `server/manuscript/projection-store.js`
+- Modify: `server/native/durability-schema.js`
 - Create: `server/tests/manuscript-ignored-ledger.test.js`
-- Create: `server/tests/manuscript-orphan-resolution.test.js`
-- Create: `server/tests/manuscript-incremental-refresh.test.js`
 - Modify: `server/tests/manuscript-store.test.js`
+- Modify: `server/tests/manuscript-projection-store.test.js`
+- Modify: `server/tests/manuscript-schema-12.test.js`
+- Modify: `server/tests/manuscript-service-l2.test.js`
+- Modify: `server/tests/manuscript-uid-reservation.test.js`
 
 **Interfaces:**
 
 ```js
-class IgnoredIdentityLedger {
-  ignoreInPlace(record) {}
-  revoke(uid, kind) {}
-  moveOpaqueReference(uid, targetContainer) {}
-  detachOpaqueReference(uid) {}
-  serializeOpaqueMembers(container, knownMembers) {}
-}
+const IGNORED_MEMBER_SNAPSHOT_VERSION = 1;
 
-class OrphanResolutionService {
-  ignoreInPlace(request, turnContext) {}
-  revokeIgnore(request, turnContext) {}
-  preserveAndMoveToUnassigned(request, turnContext) {}
-  detachOpaqueReference(request, turnContext) {}
+class IgnoredIdentityLedger {
+  toValidationEntries(rows, baseGeneration) {}
+  compileAfter({ beforeRows, observations, targetGeneration }) {}
+  serializeOpaqueMembers({ container, knownMembers, rows }) {}
 }
 ```
 
-- [ ] `active|revoked` 记录永久保留 UID；active 保存规范成员集合、存在性、大小、普通文件身份、`indexed|detached` 和当前容器。
-- [ ] 后端纯服务完整实现四个用户动作：就地忽略、撤销忽略、保留并转为未分卷、解除不透明索引引用。就地忽略/撤销只更新同 generation ledger/projection；转未分卷固定闭包为原索引 + `unassigned.json`；解除引用固定闭包为原索引。所有动作都要求 writer turn、before/after ledger、索引 raw-hash CAS 和 generation CAS，任一 stale 均零本动作副作用。
-- [ ] ignore/revoke 仍枚举规范形状、实名、非 reparse、link count、单文件/项目容量；只跳过 UTF-8/JSON 语义解释。孤儿动作重写索引时保留 known member 领域顺序，并把同容器 indexed opaque members 稳定追加到末尾，多个按 UID UTF-8 字节序。
-- [ ] “保留并转未分卷”闭包为原索引+`unassigned.json`；“解除索引引用”闭包为原索引；ignored before/after、索引 raw hash 和 generation 同 journal 发布。
-- [ ] active ignored 路径 dirty 时重枚举全部成员并用 before capacity snapshot 算增量；before 无法证明、事件含糊或快照不完整时锁存全脏。增量刷新按 UID 扩展最小结构闭包；索引变化、归属含糊和未知新 UID 升级完全校验，不能凭局部信息猜测删除/创建。
-- [ ] 已索引未知 UID、孤儿、单边章节资源、卷删除阻断谓词、容量超限、revoke 后再出现分别按规范错误收敛；不移动或删除用户文件。四个动作的测试逐字节证明只允许规范索引与 SQLite ledger/projection 变化。
-- [ ] 本任务只交付 ledger/orphan/incremental backend，不修改 `l2-service.js`、FilePublicationJournal、route/CLI/UI；结构命令留 Task 10B，最终 API 接线在 Task 14B，UI 与交互测试在 Task 15。
-- [ ] 运行并提交；只跑本任务 focused files，不跑全量 suite 或 VM：
+- [ ] `active | revoked` 行仍使用 Task 5 的 exact schema-12 标量键，但 `member_snapshot_json` 只接受唯一 canonical JSON：root exact `{ version: 1, members }`；chapter 成员角色固定按 `chapter_body, chapter_sidecar`，volume 固定为 `volume_index`。absent member exact `{ role, present: false }`；present member exact `{ role, present: true, byteSize, fileIdentity, parentIdentity }`，两个 identity 都是 exact `{ dev, ino }` 十进制字符串。额外键、accessor、稀疏/错序成员、非 canonical JSON 或任一身份/大小异常都拒绝；`projection-store.js` 仍是 `canonicalIgnoredLedgerDigest()` 的唯一导出和摘要实现，只复用 ledger 模块的唯一 row/member normalizer，不复制排序或 digest material。
+- [ ] 修正 indexed ignored volume 无法表示的合同漏洞：`opaque_container_kind` 增加 `manuscript`。exact 交叉约束为 volume+indexed 只能 `manuscript/null`，chapter+indexed 只能 `unassigned/null | volume/canonical-volume-uid`，detached 必须 kind/uid 都为 null；`durability-schema.js` 的离线 schema-12 descriptor 与 `projection-store.js` 纯 validator 使用同一语义。本任务不打开项目数据库、不实现 Task 12 NativeProjectStore/SQL DML。
+- [ ] `IgnoredIdentityLedger.toValidationEntries()` 唯一把完整 rows 变换为 Task 3 `validateFull()` 使用的 compact `{ kind, status, uid }` entries，并逐行核对 base generation。Task 3 仍不理解 SQL row，但 ignored observation 必须扩展为 exact `{ kind, uid, status, members, reference }`；`reference` 只能是 exact `{ state:'indexed', containerKind:'manuscript'|'unassigned'|'volume', containerUid:null|canonical-volume-uid }` 或 `{ state:'detached', containerKind:null, containerUid:null }`，并执行与 resource kind 相同的交叉约束。它只能从同一次已校验索引闭包推导，不接受 caller container。active ignored 资源仍枚举规范形状、实名、非 reparse、link count、大小与普通文件身份，并纳入容量；只跳过 UTF-8/JSON 内容语义解释。
+- [ ] `compileAfter()` 是 Task 3 candidate `ignoredLedgerAfter` observations → Task 5 完整 target rows 的唯一 compiler：本任务中每个 before row 必须有且只有一个同 status observation，用它重建 canonical member/reference，并统一绑定 target generation；缺行、额外行、重复行、错 status/kind/uid/generation 或 observation/member/reference 不一致全部 fail-closed。Task 10A1 不铸造也不接受 ledger action/transition authority；Task 10A2 才在同一模块内扩展 Store-validated `new_active | reactivate | revoke` 三种 branded transition。Task 3 candidate 保持 generation-neutral observation，Task 5 保持 SQL-shaped rows，不让两份可独立变异的 ledger 与 capacity/candidate 拼成同 generation target。
+- [ ] `projection-store.js` 把 Task 5 既有 `buildTarget({ ..., ignoredLedger, ... })` 参数固定解释为完整 **before rows**：先重算它的 canonical digest并匹配 `currentProjection.basis.ignoredBeforeDigest`，逐行匹配 base generation，再仅调用上述 `compileAfter({ beforeRows: ignoredLedger, observations: candidate.ignoredLedgerAfter, targetGeneration })` 产生 target after rows；必须把 Store candidate 内的 observations 数组原引用交给 compiler，不能 clone 后丢失后续 Task 10A2 的 transition provenance。调用者不再能另传 SQL-shaped after ledger，target 中的 ignored rows 也只能来自该 compiler；这保持 Task 7B 现有调用面不变，同时消除 candidate observations 与独立 after rows 的双真值。
+- [ ] `serializeOpaqueMembers()` 只是无副作用 serializer：保留 known member 领域顺序，只把同容器 active+indexed opaque UID 按 UTF-8 字节序稳定追加到末尾；detached/revoked/其他容器不追加，重复 known/opaque UID 拒绝。它只为 Task 10B 结构闭包提供纯数据能力，本任务不改索引、不发布 projection、不实现 ignore/revoke/move/detach 动作。
+- [ ] focused RED 固定为：① canonical row/member JSON 与 digest；② chapter volume/unassigned/detached 及 volume manuscript/detached 交叉约束；③ ignored present/absent metadata、零语义内容读取与容量；④ Task 3 observation → compiler → Task 5 target 的 before-digest/generation/member/reference 一致性，并拒绝独立 after-row 注入；⑤ known+opaque 稳定序列化；⑥ revoked/未知/孤儿仍 fail-closed。只跑下列 focused tests，不跑全量 suite、build 或 VM：
 
 ```powershell
-bun test server/tests/manuscript-ignored-ledger.test.js server/tests/manuscript-orphan-resolution.test.js server/tests/manuscript-incremental-refresh.test.js server/tests/manuscript-store.test.js
+bun test server/tests/manuscript-ignored-ledger.test.js server/tests/manuscript-store.test.js server/tests/manuscript-projection-store.test.js server/tests/manuscript-schema-12.test.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-uid-reservation.test.js
 git diff --check
-git add server/manuscript/ignored-ledger.js server/manuscript/orphan-resolution-service.js server/manuscript/incremental-refresh.js server/manuscript/store.js server/manuscript/projection-store.js server/tests/manuscript-ignored-ledger.test.js server/tests/manuscript-orphan-resolution.test.js server/tests/manuscript-incremental-refresh.test.js server/tests/manuscript-store.test.js
-git commit -m "feat: preserve ignored manuscript identities"
+git add server/manuscript/ignored-ledger.js server/manuscript/store.js server/manuscript/projection-store.js server/native/durability-schema.js server/tests/manuscript-ignored-ledger.test.js server/tests/manuscript-store.test.js server/tests/manuscript-projection-store.test.js server/tests/manuscript-schema-12.test.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-uid-reservation.test.js
+git commit -m "feat: normalize ignored manuscript identities"
 ```
 
 ---
 
-## Task 10B: 实现结构命令与 ordinary create reservation 恢复
+## Task 10B: 实现结构命令、opaque reference 动作与 ordinary create reservation 恢复
 
-**Depends on:** Task 7B + Task 10A。
+**Depends on:** Task 7B + Task 10A1。不依赖后移的 Task 10A2 或可选 Task 10P。
 
 **Files:**
 
 - Modify: `server/manuscript/l2-service.js`
 - Modify: `server/manuscript/store.js`
+- Modify: `server/manuscript/ignored-ledger.js`
 - Modify: `server/manuscript/file-publication-journal.js`
 - Modify: `server/tests/manuscript-service-l2.test.js`
 - Modify: `server/tests/manuscript-store.test.js`
@@ -827,18 +1020,19 @@ fileJournal.reservationSource()
 // constructor-bound project 的全部仍存在、未 GC ordinary identity reservations；完整枚举或 fail-closed
 ```
 
-- [ ] 在 Task 7A/7B 的同一 Store/compiler 与 `l2-service.js` 上补齐普通 `chapter|volume.create`、move/reorder/delete 领域命令；不建立第二套 service。command→closure 只包含实际变化的索引/资源对，delete 只做权威结构移除 + SQLite tombstone，卷仍承载 indexed ignored 章节时在任何文件副作用前返回 `IGNORED_REFERENCE_BLOCKS_CONTAINER_DELETE`。
-- [ ] 所有结构命令都调用 Task 10A 的 serializer：保留 known member 领域顺序，同容器 indexed opaque members 按 UID UTF-8 字节序稳定追加；普通 create/move/reorder/delete 不能丢失、解释或偷偷移动不透明引用。
+- [ ] 在 Task 7A/7B 的同一 Store/compiler 与 `l2-service.js` 上补齐普通 `chapter|volume.create`、move/reorder/delete，以及两个 ignored-aware 结构命令 `ignored.preserve_move_to_unassigned | ignored.detach_reference`；不建立第二套 service。command→closure 只包含实际变化的索引/资源对，delete 只做权威结构移除 + SQLite tombstone，卷仍承载 indexed ignored 章节时在任何文件副作用前返回 `IGNORED_REFERENCE_BLOCKS_CONTAINER_DELETE`。
+- [ ] 所有结构命令都调用 Task 10A1 的 serializer：保留 known member 领域顺序，同容器 indexed opaque members 按 UID UTF-8 字节序稳定追加；普通 create/move/reorder/delete 不能丢失、解释或偷偷移动不透明引用。`ignored.preserve_move_to_unassigned` 的 exact 文件闭包是原卷索引 + `unassigned.json`，将该 chapter UID 从原容器移到 unassigned opaque tail；`ignored.detach_reference` 闭包只有原索引，并把 ledger reference 改为 detached。两者都不移动、删除或解释章节资源文件。
+- [ ] 两个 opaque-reference 动作与普通结构命令共用 Task 6 FilePublicationJournal：ignored before/after、全部受影响索引 raw-hash CAS、base/target generation 和 exact closure 绑定到同一 target；任一 stale 在文件发布前零本动作副作用，已进入 journal 则只按 Task 6 恢复，不建立 orphan 专用 journal。内部 ledger move/detach 只消费同一 turn 的 validated row/container，不暴露 caller-built target container。
 - [ ] 普通 create 复用 Task 7A 的 UID core，但本任务测试只注入完整 fake reservation sources/path probe，不接线 registry/root/journal 的生产枚举。首次执行必须先用 core 的 `assertReservation()` 验证 fresh authority，再把同一 frozen `reserved_new` assignment 交给 `stageAssets()`；恢复/同 journal 重试则先经新增窄接口 `readReservation()` 取回 exact persisted identityReservation 与 opaque resume authority，再调用同一 FilePublicationJournal 的 `assertReservation()`，通过后才可复用原 UID/ID/num，绝不二次抽号。两类 authority 不得互换。接口只接受 constructor-bound project 加 canonical journal/request，并逐项绑定 generation/basis/input；无 reservation 返回 null，错绑定或冲突事件 fail-closed，且两个方法都纯读、不追加事件。
 - [ ] 同一 constructor-bound parser 还暴露只读 `reservationSource()`：完整枚举该项目所有仍存在、未 GC 的 ordinary FilePublicationJournal identity reservations（无论 nonterminal/terminal），不能只看当前 logical request；损坏、重复、读取不全或无法证明 GC 状态一律 fail-closed。它与 `readReservation()` 共用验证逻辑，不追加事件，不扩展 Task 6 crash matrix。
 - [ ] Task 12 提供 registry/existing-root/MigrationJournal source 与真实 Store name-index path adapter，Task 13 再提供 ProjectCreationJournal source；只有 Task 14B composition root 把这些 sources、Task 10B ordinary FilePublicationJournal source 与 production path probe/CSPRNG 一次性注入 ordinary create。任一 adapter 缺失或枚举不完整时禁止把 default-empty 当作“无碰撞”。
-- [ ] focused tests 覆盖 create/move/reorder/delete 精确闭包、tombstone、ignored-aware 序列化、卷删除阻断、首次 reservation 与重启 read/resume；不重跑 Task 6 journal suite、Task 10A tests、全量 suite 或 VM。
+- [ ] focused tests 覆盖 create/move/reorder/delete 精确闭包、tombstone、ignored-aware 序列化、卷删除阻断、preserve/detach 精确闭包与 stale 零副作用、首次 reservation 与重启 read/resume；不重跑 Task 6 journal suite、Task 10A1 独立 tests、全量 suite、build 或 VM。
 - [ ] 运行并提交：
 
 ```powershell
 bun test server/tests/manuscript-service-l2.test.js server/tests/manuscript-store.test.js server/tests/file-publication-reservation-recovery.test.js
 git diff --check
-git add server/manuscript/l2-service.js server/manuscript/store.js server/manuscript/file-publication-journal.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-store.test.js server/tests/file-publication-reservation-recovery.test.js
+git add server/manuscript/l2-service.js server/manuscript/store.js server/manuscript/ignored-ledger.js server/manuscript/file-publication-journal.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-store.test.js server/tests/file-publication-reservation-recovery.test.js
 git commit -m "feat: add recoverable L2 structure commands"
 ```
 
@@ -846,7 +1040,7 @@ git commit -m "feat: add recoverable L2 structure commands"
 
 ## Task 11: 实现 DraftConflictJournal 与客户端 dirty registry
 
-**Depends on:** Task 9B。
+**Depends on:** Task 9D。
 
 **Files:**
 
@@ -921,7 +1115,7 @@ git commit -m "feat: recover external manuscript draft conflicts"
 
 ## Task 12: 实现 SQLite→files MigrationJournal
 
-**Depends on:** Task 9B。
+**Depends on:** Task 9D。
 
 **Files:**
 
@@ -995,7 +1189,7 @@ unprovable state: RECOVERY_REQUIRED
 
 - [ ] `ManuscriptRouteStore` 构造时固定注入 module-branded、只读 `journalAuthority`；`readRoute()`、`verifyAfterLease()` 与 CAS 授权都只能消费该 authority 的同一冻结观察，caller 不能逐次替换 journal 或传入 journal 状态自证。
 - [ ] schema 11 的 route/journal admission 冻结为四态矩阵：① 四个 L2 保留键全缺且无非终结 MigrationJournal，才是普通 implicit `sqlite`；② 四键全缺且存在唯一、精确匹配的 `migration_reserved`，只允许恢复安全终结 reservation，普通入口不接纳；③ 四键完整、route=`migrating` 且绑定同一 journal 的 `route_fenced` 或后续规范状态，普通入口稳定返回 `PROJECT_MIGRATION_BUSY`，只允许迁移/恢复/诊断；route CAS 已耐久但 journal 仍停在 `migration_reserved` 的崩溃窗口，只能由 `journalAuthority` 凭同一 CAS 证据先前滚为 `route_fenced` 后归入本项；④ 其余缺键、重复、显式 sqlite、非法组合、多个/错误 journal 或身份不符一律 `MIGRATION_STATE_MISMATCH`。schema 12 inspector 继续精确要求全部十个 `project_meta` 行，缺失 `manuscript_route` 或任一其他必需行都 fail-closed，绝不回退为 sqlite。
-- [ ] `verifyAfterLease()` 是 Task 8 verifier contract 的真实实现，复核 files route、project UID/instance、数据库/文章根物理身份、projection generation 与“存在则成功终态”的 parent journal；Task 14B 只能注入这一实例，不能用 live schema snapshot、caller facade 或产品侧 callback 替代。
+- [ ] `verifyAfterLease()` 是 Task 8B verifier contract 的真实实现，复核 files route、project UID/instance、数据库/文章根物理身份、projection generation 与“存在则成功终态”的 parent journal；Task 14B 只能注入这一实例，不能用 live schema snapshot、caller facade 或产品侧 callback 替代。
 - [ ] `compareAndSwap()` 只能在真实 NativeProjectStore transition 中消费内部 branded capability，并同时绑定 project UID、project instance、数据库/文章根物理身份、projection generation 与精确 parent journal transition proof；live schema、route 当前值、caller 参数或普通 SQL 不能自证授权。协议化安全中止在相同 guard 下以一次 native 原子事务删除全部四个 L2 保留键，恢复 D7 的 legacy implicit sqlite；只有事务已知提交且 journal 已规范终结后才重建 config cache，不能把 cache 值反写项目数据库。
 - [ ] Task 12 同时安装 `config.db` route cache schema，并由 `rebuildConfigCache()` 从逐个已 admission 项目数据库的 route 真值重建；缓存删除、损坏、缺项或陈旧时可丢弃重建，枚举/项目 admission 不完整则 fail-closed，缓存永远不能反向覆盖项目数据库 route 真值，重建也不能写项目数据库。
 - [ ] “稍后升级”测试 route、journal、reservation、目标根与业务字节零变化；未显式实验启用时不弹默认迁移、不创建 files 项目。
@@ -1014,7 +1208,7 @@ unprovable state: RECOVERY_REQUIRED
 - [ ] transition proof 精确绑定 kind=`migration | new_creation`、before/after schema 与 trigger digest、project instance、before/final commit seq、candidate identity、parent journal ID/digest 和 target generation。Task 12 实现并消费 `migration` kind；同时把 verifier/builder 作为 Task 13 的唯一 `new_creation` 接口，不新增平行 ControlStore 事件链。
 - [ ] `native-sql-authorization.js` 与 sql.js guard 共同消费 Task 2 的四个 `RESERVED_PROJECT_META_KEYS`：普通业务 SQL 在 schema11 route fence 前后及 schema12 都不能插入、更新、删除或借 CTE/subquery/复杂 predicate 间接修改这些键；只有绑定同一 transition/journal 的内部语句可写。schema12 的章节/卷物理 DELETE 由 authorization 与 v2 barrier 双重拒绝，schema11 的 legacy sqlite 删除语义在 Task 14B 接线前保持不变。
 - [ ] 把 Stage B fixture/store 改为显式 versioned fixture：既有 schema11 genesis、payload exact keys、18/54/digest 与全部测试值不变；schema12 fixture 必须由真实 v2 candidate + 持久 transition proof 建立，不能靠测试参数或 live schema 自证。用该 fixture 聚焦验证冷启动、cached open、事务 preflight、commit 后、recovery 与 transition 漂移拒绝。
-- [ ] route fence 后由 MigrationJournal parent 创建或验证规范 lifecycle lock，并记录 before/after 身份及 file/parent flush 谓词；Task 8 adapter 只可 `OPEN_EXISTING`。随后建立一致源快照与迁移前备份，完成 integrity、foreign-key、旧章节编号、伏笔预期位置、schema 依赖、容量和目标缺席检查。只有这些谓词、源/备份身份与 SHA-256 全部冻结后才写 `source_snapshot_ready`；任何不明确分别返回对应 legacy/schema 错误，不能进入 child `assets_reserved`/`stageAssets()`。
+- [ ] route fence 后由 MigrationJournal parent 创建或验证规范 lifecycle lock，并记录 before/after 身份及 file/parent flush 谓词；Task 8A adapter 只可 `OPEN_EXISTING`。随后建立一致源快照与迁移前备份，完成 integrity、foreign-key、旧章节编号、伏笔预期位置、schema 依赖、容量和目标缺席检查。只有这些谓词、源/备份身份与 SHA-256 全部冻结后才写 `source_snapshot_ready`；任何不明确分别返回对应 legacy/schema 错误，不能进入 child `assets_reserved`/`stageAssets()`。
 - [ ] 本任务首次扩展 Task 7A 的同一个 Store compiler，增加只供 MigrationService 使用的 `migration.full_snapshot`：只接受 frozen schema11 source snapshot、`bind_legacy` plan 与已验证目标树/目录品牌，生成全量 canonical after 和 exact closure；caller 不能传文件名/路径/任意成员。同步实现 Store-backed name-index path probe adapter，只查询已验证的规范 UID/ref 索引并返回完整或 fail-closed，供 reservation core 使用；产品 composition 仍留 Task 14B。
 - [ ] `route_fenced` 冻结 `<data>/manuscripts/<project_uid>/`、`mythpen/`、`volumes/`、`chapters/` 四级目录逐级 before/after canonical real identity、父身份、absent/owned 谓词和本 migration ID 所有权，且必须早于第一个 `mkdir`。parent 在进入既有 `source_snapshot_ready/files_candidate_ready` 阶段的动作中逐级创建并重新 canonicalize，fsync 每个新目录及其父目录；身份不符进入 `RECOVERY_REQUIRED`。不新增 `directories_ready` 等规范外状态。
 - [ ] source snapshot ready 后先调用 Task 7A 扩展后的 `buildClosure()` **恰好一次**（纯读），随后 `files_candidate_ready` 在 child `stageAssets()` 前冻结该 exact closure/digest、唯一 caller-provided child journal ID、logical request、projection basis digest、共同 target generation、目标身份、files before/after 谓词和 child asset reservation；parent 不得创建第二个 child。重新读取该事件后由真实 authority 铸 `parentReservationAuthority`，再严格执行 `stageAssets → finalizeCandidate(stagedAfterFacts) → buildTarget → bindTarget`，不二次 build closure，也不让 service、Task 5 或后续 adapter 宽松 merge/补 physical identity。
@@ -1034,6 +1228,93 @@ git diff --check
 git add server/native/durability-schema.js server/native/native-project-store.js server/native/native-sql-authorization.js server/testing/native-stage-b-fixture.js server/testing/native-stage-b-store.js server/db.js server/manuscript-sql-guard.js server/manuscript/store.js server/manuscript/uid-reservation.js server/manuscript/uid-reservation-sources.js server/manuscript/route-store.js server/manuscript/migration-journal.js server/manuscript/migration-service.js server/tests/durability-schema.test.js server/tests/manuscript-schema-12.test.js server/tests/native-project-store.test.js server/tests/native-project-store-crash.test.js server/tests/manuscript-store.test.js server/tests/manuscript-uid-reservation.test.js server/tests/manuscript-route-store.test.js server/tests/manuscript-migration.test.js server/tests/manuscript-migration-crash.test.js server/tests/fixtures/manuscript-migration-crash.js server/tests/fixtures/manuscript-tree.js
 git commit -m "feat: migrate projects to file authority"
 ```
+
+---
+
+## Task 10A2: 实现 projection-only ignore/revoke（后移）
+
+**Depends on:** Task 9D + Task 10A1 + Task 12。只有 Task 12 的真实 projection adapter 完成后才开始；不用 fake publish 把两个产品动作提前宣称可用。
+
+**Files:**
+
+- Modify: `server/manuscript/ignored-ledger.js`
+- Modify: `server/manuscript/store.js`
+- Create: `server/manuscript/orphan-resolution-service.js`
+- Modify: `server/tests/manuscript-ignored-ledger.test.js`
+- Modify: `server/tests/manuscript-store.test.js`
+- Create: `server/tests/manuscript-orphan-resolution.test.js`
+
+**Interfaces:**
+
+```js
+class OrphanResolutionService {
+  ignoreInPlace(request, turnContext) {}
+  revokeIgnore(request, turnContext) {}
+}
+```
+
+- [ ] request exact own data 只接受 `{ kind, uid }`；不接受路径、member snapshot、identity、容器、容量或 caller-built record。`ignoreInPlace()` 必须让同一 ManuscriptStore 在内部把该 UID 临时视为 pending active ignored，完成整树形状/身份/容量/索引闭包校验；无 before row 时铸 `new_active`、revoked before 时铸 `reactivate`，已经 active 且 after 无变化只返回稳定 no-op。任一其他未知 UID、孤儿、不安全路径或超限都在 projection 副作用前拒绝。不得把 Task 3 原本的 `EXTERNAL_RESOURCE_CREATION_UNSUPPORTED` 异常改成携带可信 record 的 caller capability。
+- [ ] `revokeIgnore()` 只接受当前 active exact row，先以 active 语义重验成员/身份/容量，再由 Task 10A1 compiler 生成保留 UID 和 canonical member snapshot 的 revoked after。发布后对应文件仍存在时，下一 freshness gate 必须重新以 `EXTERNAL_RESOURCE_CREATION_UNSUPPORTED` 阻断；撤销不删行、不释放生命周期 UID 容量。
+- [ ] Store 与 `ignored-ledger.js` 只在完整验证成功后共同铸 exact `new_active | reactivate | revoke` module-branded transition，并绑定 before digest/generation、kind/UID、原 observations 数组和 capacity snapshot；plain/clone/foreign/stale transition 全部拒绝。OrphanResolutionService 只消费同一 Store 调用原样返回的 branded candidate 引用，并把该原引用与当前完整 before ledger 交给 Task 5 `buildTarget()`；不得接受 caller observations、复制 candidate、预编译第二份 ledger 或从异常 details 拼 row。Task 10A1 compiler 仍是 `buildTarget()` 内唯一 observation→after-row 路径，只在原 observations 携匹配 transition 时允许新增 active row或 active/revoked 状态切换。两个动作都必须在 Task 9D 同一 admission/writer turn 内使用 Task 12 真实 adapter 做 base-generation/ignored-digest/target-generation CAS，并将 candidate、compiler 生成的 ledger after 与 capacity snapshot 作为唯一 projection target 提交。stale、known-not-committed 或 unknown 都保留原现场并零本动作文件副作用；本任务不创建 FilePublicationJournal，不移动、删除或重写任何用户文件。
+- [ ] `preserveAndMoveToUnassigned` / `detachOpaqueReference` 以及内部 opaque-reference move/detach 都不属于本任务；它们是 Task 10B 的结构闭包。本任务也不修改 freshness、route/CLI/UI 或产品 API，最终接线留 Task 14B/15。
+- [ ] focused RED 用 Task 12 真实 NativeProjectStore projection adapter fixture（禁止 fake publish）覆盖 exact request、Store-internal candidate/transition provenance、new_active/reactivate/revoke → exact 八键 row、plain/clone/caller/异常伪造 row 拒绝、其他外部异常零 publish、三种 transition 同 generation target、active no-op、stale/unknown 零文件副作用、revoke 后再阻断；不重跑 Task 12 全量 suite、full/build/VM：
+
+```powershell
+bun test server/tests/manuscript-orphan-resolution.test.js server/tests/manuscript-ignored-ledger.test.js server/tests/manuscript-store.test.js
+git diff --check
+git add server/manuscript/ignored-ledger.js server/manuscript/store.js server/manuscript/orphan-resolution-service.js server/tests/manuscript-ignored-ledger.test.js server/tests/manuscript-store.test.js server/tests/manuscript-orphan-resolution.test.js
+git commit -m "feat: resolve ignored manuscript resources"
+```
+
+---
+
+## Task 10P（可选）: 实现 self-event 对消与安全增量刷新
+
+**Depends on:** Task 9C + Task 10A1 + Task 11 + Task 12。这是 Task 11 与真实 projection adapter 之后的可选性能优化，不是 L2 correctness 或 Task 10B/12 的前置；是否实施的唯一决策截止点是 **Task 14B 开始前**。只有在该截止点前明确选择、完成实现并通过本任务 focused tests，同时标记进入后续 Task 16 条件 join，Task 14B 才能接入其 ports。若省略或届时未通过，Task 9C 继续把所有 ordinary dirty 交 FULL，项目保持 `CORRECTNESS_COMPLETE / PERFORMANCE_DEFERRED`。
+
+**Files:**
+
+- Create: `server/manuscript/incremental-refresh.js`
+- Modify: `server/manuscript/freshness.js`
+- Modify: `server/manuscript/store.js`
+- Create: `server/tests/manuscript-incremental-refresh.test.js`
+- Modify: `server/tests/manuscript-freshness.test.js`
+- Modify: `server/tests/manuscript-store.test.js`
+
+**Interfaces:**
+
+```js
+selfEventProof.prove({ admission, writerTurn, claimSnapshot, baseToken })
+draftSafety.proveNoLocalDraft({ admission, writerTurn, resourceKeys, baseToken })
+incrementalRefresh.validateAndPublish({
+  admission,
+  writerTurn,
+  remainingSnapshot,
+  baseToken,
+})
+
+// 只是 freshness 在 settle 前识别的内部预检结果，不是 Task 9B result。
+Object.freeze({
+  disposition: 'FULL_REQUIRED',
+  reason: 'STRUCTURAL' | 'UNKNOWN_UID' | 'INCOMPLETE_BASIS' | 'DRAFT_STATE_UNAVAILABLE',
+})
+```
+
+- [ ] Task 9C 仍是 opaque claim 的唯一 owner：它先用 Task 9B `claimSnapshot(claim)` 得到 exact recursively frozen `{ baseGeneration, dirtyPaths }`，并验证 `baseToken.generation === baseGeneration`。`selfEventProof` 只收 admission/writer-turn authorities、plain `claimSnapshot` 与 base token；`incrementalRefresh` 只收同样 authorities、freshness 从已验证 proof 计算的 exact frozen `remainingSnapshot`。两个 port 都不得接收、解析、clone 或返回 opaque claim，settle 始终由 freshness 使用原 claim 执行。
+- [ ] self-event proof 不能只凭 journal/path/time window；必须在同一 admitted project/generation 中取得 current projection 的 exact controlled after predicate，再通过 Task 3 新增的 stable handle-bound predicate read 核对当前 existence/raw SHA-256，且任一身份证明缺失、外部覆盖、删除、错 generation/project/turn 都不铸 proof。proof 由同一 port 的私有 brand 验证；plain/clone/foreign/stale proof、重复或 claim 之外的路径都 fail-closed。这个最小版本对 delete/absence self-event 不作猜测，直接转 FULL。
+- [ ] freshness 只能从原 `claimSnapshot.dirtyPaths` 减去已精确证明且唯一的路径，生成 base generation 不变、排序稳定的 `remainingSnapshot`。若全部被 self proof 覆盖，由 freshness 直接产生 Task 9B exact `ALREADY_CURRENT + INCREMENTAL`；否则才调 incremental producer。claim 后到达的事件只留在普通 dirty，不得被本轮 proof/result 清除。
+- [ ] 本可选版本只增量发布当前 schema-12 projection 已知、完整配对的章节 body/sidecar 变化。`draftSafety` 是 constructor-bound mandatory port，由 Task 14B 从 Task 11 的真实 policy 构造；它必须在同一 admission/writer turn 对 exact resource keys 铸 module-branded no-local-draft proof，producer 在调用 Task 12 真实 adapter 前重验同一 proof。不得接收 caller boolean、plain/clone/foreign proof，也不得在 producer 里复制 conflict state machine；无可验证 proof 返回 `FULL_REQUIRED/DRAFT_STATE_UNAVAILABLE`。`manuscript.json` / `unassigned.json` / volume index、未知 UID、单边资源、delete/rename 含糊、active ignored before/capacity snapshot 不完整或任一无法证明的归属，同样返回 exact frozen `FULL_REQUIRED`，不猜测局部 target。active ignored dirty 由 FULL 重枚举全部成员、身份与容量，本任务不做其局部性能优化。
+- [ ] `FULL_REQUIRED` 不是 Task 9B refresh-result，不得传给 `settleRefresh()`，且只能在调用 Task 12 projection adapter 前以零 projection/journal/file 副作用返回；producer 一旦尝试发布就只能返回 Task 9B exact result，不能再改报 `FULL_REQUIRED`。freshness 在同一 writer turn 内保留原 claim，用原始 `claimSnapshot`（不是 remaining subset）与同一 base token 调用 FULL，最后对 FULL result 结算原 claim 恰好一次。incremental 已尝试发布后的 `KNOWN_NOT_COMMITTED` 必须合回 dirty并原样传播，不自动转 FULL；`UNKNOWN`、port throw、inexact result 或错 generation 必须锁存 loss/fail-closed，不盲目重试。只有已确定成功的 FULL 可清 coverage loss，INCREMENTAL 永不清 loss。
+- [ ] 启动、degraded capability、既有 coverage loss、显式刷新、恢复和迁移始终直接 FULL，不调 self/incremental。focused RED 覆盖 opaque-claim 不泄露、live predicate 与合并外部覆盖、remaining subset、all-self ALREADY_CURRENT、Task 11 draft proof 缺失/foreign 拒绝、known body/sidecar publish、FULL_REQUIRED 同 claim 仅一次 settle、new-dirty 保留、KNOWN/UNKNOWN/throw、FULL-only loss clear。只跑下列 focused tests，不跑 full/build/VM：
+
+```powershell
+bun test server/tests/manuscript-incremental-refresh.test.js server/tests/manuscript-freshness.test.js server/tests/manuscript-store.test.js
+git diff --check
+git add server/manuscript/incremental-refresh.js server/manuscript/freshness.js server/manuscript/store.js server/tests/manuscript-incremental-refresh.test.js server/tests/manuscript-freshness.test.js server/tests/manuscript-store.test.js
+git commit -m "perf: add safe manuscript incremental refresh"
+```
+
+**Optional stop condition:** Task 14B 开始时，本任务若未被明确选择或任一 focused invariant 未通过，就永久冻结为本计划的 omitted 分支：Task 14B 不接入三个 ports，Task 16 只验证 full-only baseline，Task 17A 只记录 `PERFORMANCE_DEFERRED`。Task 14B 完成后，本计划禁止对 omitted 分支晚启用或回填 Task 10P；未来若要实现，必须另立计划，显式重开 composition root 与既有 `manuscript-product-routing.test.js` 产品路由合同。不得用不完整 incremental 换取 capability/default-ready 结论。
 
 ---
 
@@ -1071,7 +1352,7 @@ unprovable state: RECOVERY_REQUIRED
 - [ ] `ProjectCreationService` 必须注入并调用 Task 7A 建立、Task 12 扩展的同一个 `ManuscriptUidReservation`；本任务向 `uid-reservation-sources.js` 增加全部未 GC ProjectCreationJournal 的真实 source adapter，并与 Task 12 的 registry、现存 roots、MigrationJournal adapters 显式组合。任一来源缺失或枚举不完整即在 journal/目录副作用前 fail-closed，禁止 default-empty。
 - [ ] 共享 reservation 服务冻结 project UID、四个目标路径/身份及 absent 谓词；同一 creation ID 重试复用 UID，落盘前碰撞可重抽，落盘后碰撞只返回 `UID_RESERVATION_COLLISION`。不得在 ProjectCreationService 内实现第二套随机、扫描或碰撞逻辑。
 - [ ] 本任务首次扩展 Task 7A 的同一个 Store compiler，增加只供 ProjectCreationService 使用的 `creation.empty_bootstrap`：只接受 branded empty-tree snapshot 与 frozen project identity，精确生成空 `manuscript.json`/`unassigned.json` 两成员 closure/candidate；不开放 caller path 或任意初始成员。
-- [ ] `creation_reserved` 在任何 `mkdir` 前逐级冻结目标 ControlStore、数据库、sibling lifecycle lock、文章根及 `<project_uid>/mythpen/{volumes,chapters}` 的 canonical before/after identity、父身份、absent/owned 谓词和本 creation ID 所有权。parent 先创建项目 ControlStore、不可变身份、sibling lifecycle lock 和四级文章目录并逐项重新 canonicalize/fsync；取得项目 writer 后，对初始空文件调用上述 `creation.empty_bootstrap` `buildClosure()` 恰好一次（纯读），再追加 `project_control_ready` 冻结 exact closure/digest、唯一 child journal ID、logical request、projection basis digest、共同 target generation 与 child asset reservation。Task 8 adapter 仍只用 `OPEN_EXISTING`。
+- [ ] `creation_reserved` 在任何 `mkdir` 前逐级冻结目标 ControlStore、数据库、sibling lifecycle lock、文章根及 `<project_uid>/mythpen/{volumes,chapters}` 的 canonical before/after identity、父身份、absent/owned 谓词和本 creation ID 所有权。parent 先创建项目 ControlStore、不可变身份、sibling lifecycle lock 和四级文章目录并逐项重新 canonicalize/fsync；取得项目 writer 后，对初始空文件调用上述 `creation.empty_bootstrap` `buildClosure()` 恰好一次（纯读），再追加 `project_control_ready` 冻结 exact closure/digest、唯一 child journal ID、logical request、projection basis digest、共同 target generation 与 child asset reservation。Task 8A adapter 仍只用 `OPEN_EXISTING`。
 - [ ] 上述目标 ControlStore 目录下的 exact `file-assets/` 是 canonical 项目级 recovery root `<data>/control/manuscripts/<project_uid>/<project_instance_id>/file-assets/`；ProjectCreationService 必须在 child `assets_reserved` 前完成 ControlStore 根与该容器的 create-new/fsync/handle identity 证明并绑定进 project/child reservation。child 只在该既有容器创建扁平 `<journal_id>.<asset_name>`，不得建立 per-journal 目录；创建中止仍按 ControlStore-last 顺序删除整个项目 ControlStore，成功项目则长期保留该容器供普通 Task 7B/10B writer 使用。
 - [ ] 重新读取 `project_control_ready` 并由 creation 真实 parentAuthority 铸 `parentReservationAuthority` 后，初始 `manuscript.json`/`unassigned.json` 空数组才按 `stageAssets → finalizeCandidate(stagedAfterFacts) → buildTarget → bindTarget` 建立，不得二次 build closure 或自行宽松 merge。ProjectCreationService 把完整 manifest+canonical digest 和 exact bindings 写入 `file_publication_started` 耐久 pin，重新读取并 `assertPin()` 后 child 才可 `prepare → publishFiles`。child 不创建/接管目录、不写 parent 状态；完整 after 后 parent 才写 `files_published`。
 - [ ] 以 `sourceKind = empty` 调用 Task 12 的同一个 schema 12 candidate builder，构造唯一空投影 candidate，route 出生即 `files`，全程不出现 `migrating`；不得复制 DDL、trigger、digest、inspector 或另建 empty-candidate generator。`database_candidate_ready → activation_intent → activated` 使用同一 verifier 的 `new_creation` kind，绑定 empty-before/after-v2 digest、project instance、commit seq、candidate identity 与 creation ID；activation intent 后原子发布，重启 admission 不接受 live schema 自证。
@@ -1092,7 +1373,7 @@ git commit -m "feat: create file-authority projects recoverably"
 
 ## Task 14: 实现退役、重激活和数据根屏障
 
-**Depends on:** Task 9B + Task 10A + Task 10B + Task 11 + Task 12 + Task 13。
+**Depends on:** Task 8A + Task 8B + Task 9C + Task 9D + Task 10A1 + Task 10A2 + Task 10B + Task 11 + Task 12 + Task 13。
 
 **Files:**
 
@@ -1102,15 +1383,16 @@ git commit -m "feat: create file-authority projects recoverably"
 - Create: `server/tests/manuscript-retirement.test.js`
 - Create: `server/tests/manuscript-data-root-guard.test.js`
 
+- [ ] Task 14 才首次为 Task 8B/9C `ManuscriptSessionController` 增加 retirement API：`beginRetiring(projectSelector)` 在 registry/config lease 内原子关闭该项目的新 `openSession()`/新 `admit()` 并返回只能由同 controller 消费的 opaque retirement epoch；`drain(retirementEpoch)` 只在释放 registry/config 与 writer lease 后等待该项目全部已 admission in-flight 归零。Task 8B/9C 不得预留 plain epoch、duck token 或提前实现 retirement API。
 - [ ] files 项目进入旧物理删除接口时，在删除 DB/封面/目录之前返回 `PROJECT_PERMANENT_DELETE_UNSUPPORTED`；sqlite 项目保持旧删除行为。
 - [ ] 退役锁序固定：registry/config 下 controller→retiring → 释放 lease → 无锁排空已 admission 请求 → 重取 registry/config 并复核 → writer → 拆 feed/关 session/放 shared → 非阻塞 exclusive → route/cache CAS。
 - [ ] 确定性交错把请求停在 admission 后、registry/config 前与 writer 前，退役必须让已 admission 请求完成，不能持 registry/config/writer 等待它。
-- [ ] 其他进程仍有 shared session 时 exclusive 返回 `PROJECT_WRITE_BUSY` 且 route/cache 零变化；失败后本进程 controller 恢复可用状态。
+- [ ] 其他进程仍有 shared session 时 exclusive 返回 `PROJECT_WRITE_BUSY` 且 route/cache 零变化；失败后只能消费同一 opaque retirement epoch 恢复本进程 controller，重新复核 route/身份/generation 后才恢复 admission，不得用 caller boolean 或 plain token 解除 retiring。
 - [ ] 重激活在 exclusive 下 CAS `retired→files`；首会话重新 shared/recheck/feed/full validation，不复用旧 clean、buffer、counter。
 - [ ] retired 不进入普通列表/路由，不持 feed/shared handle；专用列表可重激活，所有资产原位保留。
 - [ ] 只要存在 files/migrating/retired 或非终结 creation journal，数据根设置/迁移在创建目录或复制前返回 `NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED`。
 - [ ] 创建、迁移、设置数据根三个入口检测 OneDrive/iCloud/reparse 并提供替代位置引导。
-- [ ] 本任务只实现可注入的 retirement/data-root backend policy 与 lease 状态机，不修改 API、CLI、项目删除或 storage-migration 产品入口；这些入口在 Task 14B 一次性接线，避免在 Task 10A–14 完成前暴露半套行为。
+- [ ] 本任务只实现可注入的 retirement/data-root backend policy 与 lease 状态机，不修改 API、CLI、项目删除或 storage-migration 产品入口；这些入口在 Task 14B 一次性接线，避免在 Task 10A1、10A2、10B–14 完成前暴露半套行为。
 - [ ] 运行并提交：
 
 ```powershell
@@ -1124,7 +1406,7 @@ git commit -m "feat: retire file-authority projects safely"
 
 ## Task 14B: 最终接线产品 API、CLI、读写入口与恢复动作
 
-**Depends on:** Task 9B + Task 10A + Task 10B + Task 11 + Task 12 + Task 13 + Task 14。只有这些任务的 backend/journal 合同完成后才能开始；这是 `files` route 首次可达真实 DraftConflictJournal、ignored 出口、迁移、创建与退役行为的唯一接线点。
+**Depends on:** Task 8A + Task 8B + Task 9C + Task 9D + Task 10A1 + Task 10A2 + Task 10B + Task 11 + Task 12 + Task 13 + Task 14；Task 10P 仅在本任务开始前已选择且 focused green 时成为条件输入。必选 backend/journal 合同完成后即可开始；这是 `files` route 首次可达真实 DraftConflictJournal、ignored 出口、迁移、创建与退役行为的唯一接线点。开始时必须冻结 Task 10P 为 wired 或 omitted，完成后不得在本计划内改变。
 
 **Files:**
 
@@ -1157,15 +1439,16 @@ git commit -m "feat: retire file-authority projects safely"
 - Create: `server/tests/manuscript-recovery-api.test.js`
 - Create: `tests/manuscriptMigrationAdmission.test.ts`
 
-- [ ] 为正文、标题、大纲、状态、摘要、五个叙事字段、卷创建/改名/移动/重排/删除分别写 route/tool 失败测试，断言 `files` route 不执行文章真值 SQL 直写；REST、自动保存、AI 工具、续写和提案接受统一调用 Task 9B 写 turn。
-- [ ] 最终写 turn 固定为 Task 8 session admission → writer lease → Task 9 `ensureProjectionCurrent()` → Task 11 基于完整 dirty registry 的真实 conflict gate → Task 7B/10B 同一个 `l2Service.execute()`；任何前置失败不得创建 FilePublicationJournal candidate。`sqlite` 继续走 L1，`migrating` 返回 `PROJECT_MIGRATION_BUSY`，`retired` 拒绝普通入口。
-- [ ] 产品 composition root 构造 Task 12 的真实 `ManuscriptRouteStore({ journalAuthority })`，并把同一实例作为 Task 8 必填 `routeAdmissionVerifier` 注入；生产不得注入 Task 8 fake、caller callback 或 live-schema verifier。`manuscript-product-routing.test.js` 注入 route-admission 拒绝，断言读取、写入、导出和 AI context 都不进入后续 query/operation，且原始 admission error code/cause 原样向调用方传播。
+- [ ] 为正文、标题、大纲、状态、摘要、五个叙事字段、卷创建/改名/移动/重排/删除分别写 route/tool 失败测试，断言 `files` route 不执行文章真值 SQL 直写；REST、自动保存、AI 工具、续写和提案接受统一调用 Task 9D 写 turn。
+- [ ] 最终写 turn 固定为 Task 8B/9C 长生命周期 session admission → writer lease → Task 9C `ensureProjectionCurrent()` → 真实 `turnContextSource` 捕获同 generation 上下文 → Task 11 基于完整 dirty registry 与 `policyInput` 的真实 conflict gate → Task 7B/10B 同一个 `l2Service.execute()`；领域 callback 前任一失败不得为本 logical request 创建新的 FilePublicationJournal candidate。callback 已进入并产生 `assets_reserved` 后的失败必须保留 Task 7B recovery 语义，不能被 wrapper 回滚或误报零副作用。`sqlite` 继续走 L1，`migrating` 返回 `PROJECT_MIGRATION_BUSY`，`retired` 拒绝普通入口。
+- [ ] 同一 composition root 首次构造 Task 9D 的真实 `projectSessionAdmission`、`turnContextSource` 与 Task 11 policy：session admission 复用已打开 owner而非每请求 open/close；context source 自持 production CSPRNG/clock，并在同一 admission/writer turn 从 Task 3 Store brand、Task 12 compact basis/ignored ledger 与当前 projection token 一次捕获六键上下文，逐项证明 project/instance/generation `B` 一致。缺项、stale、foreign snapshot 或 logical ID 不回显都必须在 policy/callback/新 publication candidate 前拒绝，禁止用每请求额外全树扫描或 caller `journalId/projectedAt` 补洞。
+- [ ] 产品 composition root 在本任务首次同时构造 Task 8B/9C 的四个真实 controller 依赖：现有 registry/config owner 的 `registryAdmission.withProjectIdentity()`；Task 8A lifecycle adapter；Task 12 同一个 `ManuscriptRouteStore({ journalAuthority })`；以及用同一 full identity/pre-start verifier、Task 9A adapter、Task 9B state、Task 3/5 FULL refresh、真实 recovery/writer turns/Task 4 projection access 构造的 Task 9C `freshnessLifecycle`。基线不要求 self-event/incremental port；只有 Task 10P 已在本任务开始前被选择、focused green 且登记进入 Task 16 条件 join，才按其 exact `selfEventProof`/`draftSafety`/`incrementalRefresh` authority/port 合同接入，其中 `draftSafety` 必须来自同一 Task 11 policy，不能用 duck seam 代替。否则 composition 固定 full-only；`manuscript-product-routing.test.js` 必须锁定所选分支，Task 14B 完成后不得晚接线。`notificationCapability` 只从 build-info authority 读取，在 Task 17B 前 production fallback 固定 false；不得注入 caller boolean/fake/identity/path/live-schema verifier。任一缺失/错配都在锁/feed/枚举/query/journal 前 fail-closed；route/pre-start 拒绝测试断言后续调用为零。本任务不修改 build-info、不广告 production capability；最终 true 只留 Task 17B。
 - [ ] 同一 composition root 必须调用 Task 6 零注入 `createProductionManuscriptFileBoundary()`，先用 production pair validator 重验原始 frozen pair、production mode 与共同 backend token，再只把 read cap 交给 ManuscriptStore、只把 writer cap 交给 FilePublisher；不得接受 caller pair/cap、plain clone、test mint、foreign backend 拼接或 read/writer swap。`manuscript-product-routing.test.js` 必须证明以上替换在任何目录枚举、asset 创建或 journal 事件前拒绝。
 - [ ] 同一 composition root 首次把 Task 10B ordinary FilePublicationJournal、Task 12 registry/existing-root/MigrationJournal、Task 13 ProjectCreationJournal 的全部真实 reservation sources，与 production CSPRNG、Store name-index path probe 组成无缺项 catalog 后注入 Task 10B ordinary create；任一 source 缺失/枚举不完整或 probe 非 production brand 都在抽号、journal 与文章副作用前 fail-closed，禁止默认空 catalog。
-- [ ] 列表、详情、导出、统计、角色关联、AI 上下文和只读工具统一走 Task 9B readable wrapper + ActiveManuscriptProjection；消除产品路径 tombstone、旧 generation 和 `MAX(num)` 读取。
+- [ ] 列表、详情、导出、统计、角色关联、AI 上下文和只读工具统一走 Task 9D readable wrapper + ActiveManuscriptProjection；消除产品路径 tombstone、旧 generation 和 `MAX(num)` 读取。
 - [ ] `server/prompts/context.js` 不再直接打开项目数据库或用 broad catch 把 admission/freshness/route 错误降级成 `项目: <name>`；它通过同一 readable wrapper + ActiveManuscriptProjection 取得 active metadata context，admission 错误必须原样抛出并中止本次 AI 调用。该覆盖写入既有 `server/tests/manuscript-product-routing.test.js`，不新增无对应实现边界的 prompt 测试文件。
 - [ ] `recent-projects.js` 只消费 Task 12 的 route cache；缓存缺失、损坏、缺项或陈旧时调用同一 `rebuildConfigCache()` 从项目数据库真值重建，不能从 config/caller 值反写项目 route。产品 progress/overdue 只使用活跃行的 `manuscript_position`，并以 `currentMax(manuscript_position) >= expected_resolve_manuscript_position` 判定 overdue；不得读取 `MAX(num)` 或旧 `expected_resolve_chapter`。
-- [ ] API 完整接线 Task 10A 四个动作：就地忽略、撤销忽略、保留并转为未分卷、解除不透明引用；请求只接受规范 UID/动作枚举，不接受路径，响应返回 generation/ledger 状态。API 集成测试逐字节证明四条路径都不移动或删除用户资源 bytes。
+- [ ] API 完整接线 Task 10A2 的 projection-only `ignoreInPlace`/`revokeIgnore` 与 Task 10B 的 `ignored.preserve_move_to_unassigned`/`ignored.detach_reference`；请求只接受规范 UID/动作枚举，不接受路径，响应返回 generation/ledger 状态。前两个动作不触碰受控文件，后两个动作只发布 Task 10B 的 exact 索引闭包；API 集成测试逐字节证明四条路径都不移动或删除对应 opaque 资源文件 bytes。
 - [ ] API/CLI 调用 Task 12 同一个 MigrationService；项目创建调用 Task 13 ProjectCreationService；旧物理删除、退役/重激活和数据根入口调用 Task 14 policy。不得在 route/CLI 内复制 journal 状态机、UID reservation、目录创建或锁文件创建逻辑。
 - [ ] 建立 host-only migration admission seam `beginMigrationAfterHostPreflight(frozenSnapshot, request)`：只接受同一 project/window set 的不可变 snapshot 且每个 dirty resource 均为 `persisted | explicitly_resolved`、全部 save queue 已 `cancelled_and_drained`、所有窗口均已响应；否则在调用 migration API 之前 fail-closed。服务端 route 明确不能独立验证 host dirty registry，也不得把“收到 API 请求”误写成 host preflight 证明；它只在 host seam 真正发起请求后调用 Task 12 service。
 - [ ] call-order integration test 用可观察 fake host admission、真实 route/MigrationService fixture 与目录字节快照证明：freeze 未完成、任一 dirty resource 未解决、save queue 未 drain、snapshot/window set 改变或任一窗口无响应时，migration API/MigrationService 调用次数为 0，`migration_reserved`、route/project DB、ControlStore 和全部目标路径 bytes/存在性逐字节不变；只有完整 resolved snapshot 可恰好调用一次。Task 15 的 coordinator 必须调用这一 seam，不得直接调用 route。
@@ -1282,7 +1565,7 @@ git commit -m "feat: expose file-authority recovery workflows"
 
 ## Task 16: 完成本地正确性 join 与最终验收 harness
 
-**Depends on (explicit join):** Task 2 + Task 3 + Task 4 + Task 5 + Task 6 + Task 7A + Task 7B + Task 8 + Task 9 + Task 9B + Task 10A + Task 10B + Task 11 + Task 12 + Task 13 + Task 14 + Task 14B + Task 15。这里只做 source/local join；不冻结 production source，不运行 VM，不发布 manifest/candidate/result/attestation。
+**Depends on (explicit join):** Task 2 + Task 3 + Task 4 + Task 5 + Task 6 + Task 7A + Task 7B + Task 8A + Task 8B + Task 9A + Task 9B + Task 9C + Task 9D + Task 10A1 + Task 10A2 + Task 10B + Task 11 + Task 12 + Task 13 + Task 14 + Task 14B + Task 15；仅当 Task 10P 已在 Task 14B 前选择、focused green 且由 Task 14B 接线时，再把 Task 10P 加入本 join。这里只做 source/local join；不冻结 production source，不运行 VM，不发布 manifest/candidate/result/attestation。
 
 **Files:**
 
@@ -1292,9 +1575,10 @@ git commit -m "feat: expose file-authority recovery workflows"
 - Create: `server/tests/l2-performance-benchmark.test.js`
 - Create: `server/tests/fixtures/create-l2-benchmark-project.js`
 
-- [ ] 汇总规范 15.1–15.7 为逐行可追踪矩阵，记录 test ID、命令、产物、退出码和结论，不使用“同类情况已覆盖”。格式/安全矩阵覆盖 case alias、reparse、hard link、未知文件、journal candidate、孤儿、外部 UID 四出口、容量边界/超限和外部连续改写；Markdown 专项覆盖精确可视方言每一构造、合法 out-of-dialect UTF-8 只读透传、元数据写仍成功、自动保存/AI/提案等语义正文写拒绝、U+0000 投影 content 置空但 raw hash/word count/generation 正确，以及 Task 15 UI 只读状态。
+- [ ] 汇总规范 15.1–15.7 为逐行可追踪矩阵，记录 test ID、命令、产物、退出码和结论，不使用“同类情况已覆盖”。格式/安全矩阵覆盖 case alias、reparse、hard link、未知文件、journal candidate、孤儿、外部 UID 四出口、容量边界/超限和外部连续改写；ignored 矩阵锁定 Task 10A1 canonical member snapshot、`manuscript` container 与 Task 3 observation → Task 5 rows compiler/serializer，并分别覆盖 Task 10A2 projection-only ignore/revoke 和 Task 10B preserve/detach。Markdown 专项覆盖精确可视方言每一构造、合法 out-of-dialect UTF-8 只读透传、元数据写仍成功、自动保存/AI/提案等语义正文写拒绝、U+0000 投影 content 置空但 raw hash/word count/generation 正确，以及 Task 15 UI 只读状态。
 - [ ] DDL/投影矩阵覆盖 ID/sequence 保留、tombstone/复活、真实两阶段 position/活跃编号更新、部分唯一索引、章节 `data_version` 每次逻辑 projection 最多 `+1`、`chapter_revisions` literal `stale` CHECK 与 rows/ID/sequence/index 保留、proposal invalidation 原子性、物理 DELETE barrier、overdue、schema/digest 三方检查和 schema too new 零修改；同时锁定 schema 11 的 revision CHECK、data-version trigger 与 v1 digest 逐字节不变。普通 publication、draft conflict、migration、creation 的每个指定阶段前后都做强杀并核对完整 before/after。Task 15 已用 focused `desktop-manuscript-migration-preflight-smoke.ps1` 经过真实 compiled debug coordinator/admission/route 链验证固定 7 负 + 1 正 matrix；Task 16 只把同一 case ID/result schema 锁进本地 correctness harness，不重复构建或运行 desktop。最终 source 的 fresh compiled/production smoke 只在 Task 17B 再运行一次，source-only client test 不能替代它。
 - [ ] 两进程矩阵运行 writer/refresh/session/retire 竞争，验证 lease 顺序、false-clean 不变量、强杀释放与 admission 后 route/identity 复核。容量矩阵用 10,000 章节身份、2,000 卷身份、25,000 文件、20,000 chapter dir entries、16 MiB md、256 KiB json、1 GiB 累计边界 fixture，并读取 Task 3 observer/counter seam，逐维证明第一次超限后枚举数、身份 probe 数和内容打开数不再增长；超限现场不读全树、不清 dirty、不改外部字节。
+- [ ] freshness join 的必选基线证明 Task 9C 把 ordinary dirty 全部交 FULL、原 `claimSnapshot` 只 settle 一次且新 dirty 保留。若 Task 10P 已在 Task 14B 前锁定为 wired，再加入 live controlled-after predicate、remaining subset、`FULL_REQUIRED` 回退原始 snapshot、KNOWN/UNKNOWN 与 loss latch；若锁定为 omitted，只验证 full-only，不得在本任务补实现、补接线或声称存在 incremental，并把性能结论保持为 `PERFORMANCE_DEFERRED`。
 - [ ] 冻结两个不可缩小的**本地** fixture（3,000 章/30–40 MiB 与 10,000 章/1 GiB），记录 seed、文件数、字节数和 manifest hash；Task 16 只验证 fixture/harness 的确定性、容量短路和 correctness case 集，不构建或接纳 production artifact。
 - [ ] 在源码态跑一次本地 join；全部通过后只提交 correctness/performance harness 与 fixture。此提交不是 production evidence source freeze：
 
@@ -1306,17 +1590,19 @@ git commit -m "test: join L2 local correctness"
 git status --short
 ```
 
-**Stop condition:** 任一本地 correctness、容量、两进程或 benchmark-harness focused case 失败时停止并修复；不得把 Task 16 的源码态/fixture 结果称为 production evidence，也不得在本任务运行完整源码回归、desktop build/smoke、13/19 VM 矩阵或构建 production candidate。
+**Stop condition:** 任一本地 correctness、容量、两进程或 benchmark-harness focused case 失败时停止并修复；Task 10P 的 wired/omitted 状态若与 Task 14B 已冻结 composition 不一致也立即停止，禁止在此处补实现或回填接线。不得把 Task 16 的源码态/fixture 结果称为 production evidence，也不得在本任务运行完整源码回归、desktop build/smoke、13/19 VM 矩阵或构建 production candidate。
 
 ---
 
 ## Task 17A: 做最小性能 preflight 并决定默认路由
 
+**Depends on:** Task 16；Task 10P 的 wired/omitted 状态已在 Task 14B 开始时冻结，只有 wired 分支才通过 Task 16 条件 join 成为本任务输入，本任务不得改变该选择。
+
 **Files:**
 
 - Create: `docs/superpowers/plans/l2-performance-preflight.md`
 
-- [ ] 使用 Task 16 已冻结的 3,000 章与 10,000 章/1 GiB fixture，在本机编译 sidecar/debug desktop 上做开发期 preflight；测量章节列表/侧栏、自动保存 E2E、L2 文件侧增量，以及启动完全校验和显式完全刷新。记录全部样本、nearest-rank p50/p95/max、CPU/磁盘、冷/热缓存和安全软件状态；不生成 production manifest/candidate/attestation，也不把结果称为最终验收。
+- [ ] 使用 Task 16 已冻结的 3,000 章与 10,000 章/1 GiB fixture，在本机编译 sidecar/debug desktop 上做开发期 preflight；测量章节列表/侧栏、自动保存 E2E，以及启动完全校验和显式完全刷新。只有 Task 10P 的 wired 分支已通过 Task 16 条件 join 时才测量 L2 文件侧 incremental；omitted 分支只记录 full-only ordinary-dirty 成本，并把 incremental 门禁记为 `NOT_RUN / PERFORMANCE_DEFERRED`，不得把 FULL 样本改名为 incremental。记录全部样本、nearest-rank p50/p95/max、CPU/磁盘、冷/热缓存和安全软件状态；不生成 production manifest/candidate/attestation，也不把结果称为最终验收。
 - [ ] 默认路由的 go/no-go 仍使用三项既定目标：列表/侧栏 p95 `<150 ms`、自动保存 E2E p95 `<300 ms`、L2 文件侧增量 p95 `<120 ms`；启动完全校验与显式刷新还必须在两个 fixture 上完成校准，且 UI 线程外执行、有可见进度、刷新可取消。任何一项无把握时选择 `CORRECTNESS_COMPLETE / PERFORMANCE_DEFERRED`，继续 sqlite 默认；不得缩小 fixture、降低样本数、删慢样本或放宽阈值。
 - [ ] preflight 命令只消费源码态/本地编译产物：
 
@@ -1325,7 +1611,7 @@ pnpm build:sidecar
 bun test --timeout 600000 server/tests/l2-performance-benchmark.test.js
 ```
 
-- [ ] 只把 preflight 数字、运行条件和默认路由决定写入文档；若需要优化生产代码，先提交优化并重跑 Task 16 本地 join 与本任务。所有 production source 和默认路由决定稳定后才进入 Task 17B：
+- [ ] 只把 preflight 数字、运行条件和默认路由决定写入文档；任一性能门禁未通过时只记录 `CORRECTNESS_COMPLETE / PERFORMANCE_DEFERRED` 并保持 sqlite 默认，不得回头实施、修复或接线 Task 10P。未来若要改变已冻结的 omitted/wired 选择，必须另立计划并重开 composition root 与产品路由测试。所有 production source 和默认路由决定稳定后才进入 Task 17B：
 
 ```powershell
 git diff --check
@@ -1335,11 +1621,21 @@ git commit -m "docs: record L2 performance preflight"
 
 ---
 
-## Task 17B: 切换默认路由并验收最终 production artifact
+## Task 17B: 冻结 capability build-info、按门禁切换默认路由并验收最终 production artifact
+
+**Depends on:** Task 17A；Task 10P 若为 wired，必须已在 Task 14B 前选择并由 Task 16 条件 join 纳入同一最终 source。
 
 **Files:**
 
 - Modify: `server/build-info.js`
+- Modify: `server/sidecar-control.js`
+- Modify: `server/tests/sidecar-control.test.js`
+- Modify: `scripts/build-sidecars.mjs`
+- Modify: `scripts/tests/build-sidecars.test.mjs`
+- Modify: `src-tauri/src/sidecar_protocol.rs`
+- Modify: `src/lib/backendRuntime.ts`
+- Modify: `tests/backendRuntime.test.ts`
+- Modify: `tests/apiNonceTransport.test.ts`
 - Modify: `server/manuscript/project-creation-service.js`
 - Modify: `src/pages/ProjectList.tsx`
 - Modify: `server/tests/project-creation-journal.test.js`
@@ -1361,6 +1657,20 @@ git add server/tests/native-durability-benchmark.test.js scripts/tests/l1-produc
 git commit -m "test: freeze L2 production acceptance harness"
 ```
 
+- [ ] 不论 Task 17A 结果是 `DEFAULT_READY` 还是 `PERFORMANCE_DEFERRED`，都必须无条件完成 capability source checkpoint：`server/build-info.js` 以 exact frozen booleans 增加 `manuscriptLifecycleLease | manuscriptChangeNotification`，未编译/非 production fallback 保持 false；production build arguments 才把两个 compile-time define 固定为 true。JS `ready` / `build.info` validator、Rust `sidecar_protocol.rs` exact-key parser/handshake/`SidecarBuildInfo`、renderer `backendRuntime.ts` session validator/types 与 `smokeCompiledServer()` 必须逐项携带、比较这两个 boolean，拒绝缺键、额外键、非 boolean、ready/build.info 不一致或非 production 误广告；Tauri IPC 发布的 session 不能丢弃或弱化这两个字段。该 checkpoint 只跑四个 source-contract focused cases，不构建 candidate、不跑 benchmark/compiled E2E/VM：
+
+```powershell
+bun test --test-name-pattern "manuscript capability build-info source contract" server/tests/sidecar-control.test.js
+node --test --test-name-pattern "manuscript capability build-info source contract" scripts/tests/build-sidecars.test.mjs
+cargo test --manifest-path src-tauri/Cargo.toml sidecar_protocol::tests::manuscript_capability_build_info_source_contract
+node --test --test-concurrency=1 --test-name-pattern "manuscript capability build-info source contract" tests/backendRuntime.test.ts tests/apiNonceTransport.test.ts
+git diff --check
+git add server/build-info.js server/sidecar-control.js server/tests/sidecar-control.test.js scripts/build-sidecars.mjs scripts/tests/build-sidecars.test.mjs src-tauri/src/sidecar_protocol.rs src/lib/backendRuntime.ts tests/backendRuntime.test.ts tests/apiNonceTransport.test.ts
+git commit -m "feat: bind manuscript native capabilities to build info"
+```
+
+- [ ] Task 17B 是全文唯一允许为最终 compiled candidate 增加/广告 `manuscriptLifecycleLease` 与 `manuscriptChangeNotification` capability 的任务。上述 source checkpoint 只冻结生产编译合同；Task 9C `notificationCapability` 在此之前的 production fallback 必须读为 false，只有绑定同一 final source/build-info/candidate 的 production define 才可读 true。后续 compiled L2 E2E 必须验证真实 Task 8A/9A–9C self-test 与 port 值一致才可接受；Task 8A、9A–9D、14B、16 的 local/source 结果都不能把 production capability 记为 true或代替 compiled 验收。
+
 - [ ] 只有 Task 17A 全部性能门禁通过，才将 production 状态设为 `DEFAULT_READY`，让普通新项目默认创建 files，并向 sqlite 项目显示默认迁移入口；显式回退开关只选择新建路由，不建立双写或 migrated 项目的 sqlite-authoritative 回退。
 - [ ] 先以两个直接相关的 focused source tests 固定 default route、explicit sqlite opt-out、迁移延期和无双写语义，并提交唯一的默认路由产品代码 checkpoint；本步骤不跑完整回归、build 或 VM：
 
@@ -1368,7 +1678,7 @@ git commit -m "test: freeze L2 production acceptance harness"
 bun test server/tests/project-creation-journal.test.js
 node --test --test-concurrency=1 tests/manuscriptRoute.test.ts
 git diff --check
-git add server/build-info.js server/manuscript/project-creation-service.js src/pages/ProjectList.tsx server/tests/project-creation-journal.test.js tests/manuscriptRoute.test.ts
+git add server/manuscript/project-creation-service.js src/pages/ProjectList.tsx server/tests/project-creation-journal.test.js tests/manuscriptRoute.test.ts
 git commit -m "feat: enable file authority by default"
 git status --short
 ```
@@ -1425,7 +1735,7 @@ node scripts/build-sidecars.mjs --production-reviewed-manifest $finalL1ManifestP
 $finalCandidatePath = (Resolve-Path -LiteralPath '.\src-tauri\target\production-sidecars\mythpen-server-production-x86_64-pc-windows-msvc.exe').Path
 ```
 
-- [ ] 在这个最终 candidate 上依次运行 compiled L1/L2 E2E、L1 native/save benchmark、L2 performance benchmark，以及 fresh debug desktop 的 lifecycle、files 与 migration-preflight smoke。完整 server/contracts/client/typecheck/build 已在同一冻结 SHA、VM 之前唯一执行，本阶段不得重复。每个进程必须真实退出；Task 17A 样本不能替代最终样本。若默认决定是 deferred，E2E 必须断言 sqlite 仍为默认且显式实验入口可用；若是 default-ready，则断言 files 默认与显式 sqlite opt-out：
+- [ ] 在这个最终 candidate 上依次运行 compiled L1/L2 E2E、L1 native/save benchmark、L2 performance benchmark，以及 fresh debug desktop 的 lifecycle、files 与 migration-preflight smoke。compiled L2 E2E 必须复核 build-info 广告与 Task 8A lifecycle adapter、Task 9A platform feed、Task 9B state、Task 9C startup/teardown/fallback 的真实启动自检、两进程行为和 fail-closed 分支一致，不得用 source fake 代替；Task 10P 若冻结为 wired，还必须覆盖 live predicate、remaining subset 与 `FULL_REQUIRED` 使用原始 `claimSnapshot` 的回退，若冻结为 omitted 则必须断言 ordinary dirty 始终走 FULL 且性能状态为 deferred。完整 server/contracts/client/typecheck/build 已在同一冻结 SHA、VM 之前唯一执行，本阶段不得重复。每个进程必须真实退出；Task 17A 样本不能替代最终样本。若默认决定是 deferred，E2E 必须断言 sqlite 仍为默认且显式实验入口可用；若是 default-ready，则断言 files 默认与显式 sqlite opt-out：
 
 ```powershell
 $env:MYTHPEN_L1_PRODUCTION_CANDIDATE = $finalCandidatePath
@@ -1464,13 +1774,13 @@ git commit -m "docs: attest L2 default-ready artifact"
 - [ ] §1.1 L1 correctness 基线与默认启用前性能/VM 门禁：Task 1A、Task 17A–17B
 - [ ] §4–6 权威布局、controlled role+UID API、规范字节、路径安全、精确/方言外/U+0000 Markdown：Task 3、Task 15、Task 16
 - [ ] §7 schema 12、tombstone、positions、foreshadow：Task 2、Task 4、Task 5、Task 12–13
-- [ ] §8 服务边界与全部写入口：Task 4–6、Task 7A–7B、Task 10B、Task 9B wrapper、Task 14B final wiring
-- [ ] §9 direct feed、freshness、`OPEN_EXISTING` lifecycle lease 与产品 admission：Task 8–9B、Task 14B
+- [ ] §8 服务边界与全部写入口：Task 4–6、Task 7A–7B、Task 10B、Task 9D wrapper、Task 14B final wiring
+- [ ] §9 direct feed、freshness、`OPEN_EXISTING` lifecycle lease 与产品 admission：Task 8A、Task 8B、Task 9A–9D、Task 14B
 - [ ] §10 FilePublicationJournal 及“只发布到 parent 已建立目录”：Task 6、Task 12–13
 - [ ] §11 全资源域草稿冲突、epoch/intent/parent-child/audit/retention：Task 11、Task 14B、Task 15、Task 16
 - [ ] §12 host-only dirty-resource preflight、debug-only authenticated compiled-desktop harness、迁移、UID reservation、新建项目、parent 目录所有权：Task 11–13、Task 14B–16、Task 17B
 - [ ] §13 退役、重激活、数据根：Task 14、Task 14B、Task 15
-- [ ] §14 错误、四个 orphan/external UID 出口、恢复与诊断：Task 2、Task 10A–10B、Task 11、Task 14B–15
-- [ ] §15 correctness/regression、compiled preflight 的绝对 DesktopPath/SidecarPath/ResultPath 与最终原始日志/退出码/hash 账本：Task 15–17B（Task 16 显式 join Task 2、3、4、5、6、7A、7B、8、9、9B、10A、10B、11、12、13、14、14B、15）
-- [ ] §16 容量立即短路 seams、性能、默认启用：Task 3、Task 10A–10B、Task 15–16、Task 17A–17B
+- [ ] §14 错误、四个 orphan/external UID 出口、恢复与诊断：Task 2、Task 10A1、Task 10A2、Task 10B、Task 11、Task 14B–15
+- [ ] §15 correctness/regression、compiled preflight 的绝对 DesktopPath/SidecarPath/ResultPath 与最终原始日志/退出码/hash 账本：Task 15–17B（Task 16 显式 join Task 2、3、4、5、6、7A、7B、8A、8B、9A、9B、9C、9D、10A1、10A2、10B、11、12、13、14、14B、15，以及 Task 10P〔仅限 Task 14B 前已冻结为 wired〕）
+- [ ] §16 容量立即短路 seams、性能、默认启用：Task 3、Task 10A1、Task 10A2、Task 10B、Task 15–16、Task 10P（仅限 Task 14B 前已冻结为 wired）、Task 17A–17B
 - [ ] §17 产品决定：所有任务均保持零 Git、迁移可延期、两级性能状态

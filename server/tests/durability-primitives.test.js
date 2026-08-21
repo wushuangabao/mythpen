@@ -91,6 +91,34 @@ function writeWin32FileInformation(buffer, {
   buffer.writeUInt32LE(Number(fileId & 0xffffffffn), 48);
 }
 
+function fakeWin32Lstat({
+  dev = '501',
+  ino = '503',
+  kind = 'file',
+  links = 1,
+  reparse = false,
+  size = 0,
+} = {}) {
+  return {
+    dev: BigInt(dev),
+    ino: BigInt(ino),
+    nlink: BigInt(links),
+    size: BigInt(size),
+    isDirectory: () => kind === 'directory',
+    isFile: () => kind === 'file',
+    isSymbolicLink: () => reparse,
+  };
+}
+
+function assertImmutableDispositionUnknown(error) {
+  assert.deepEqual(Object.getOwnPropertyDescriptor(error, 'releaseDispositionUnknown'), {
+    configurable: false,
+    enumerable: true,
+    value: true,
+    writable: false,
+  });
+}
+
 function decodeWideString(buffer) {
   return buffer.toString('utf16le').replace(/\0+$/, '');
 }
@@ -2555,4 +2583,625 @@ test('startup capability assertion fails closed with a stable diagnostic error',
 
 test('the POSIX backend can be loaded without resolving libc on Windows', () => {
   assert.doesNotThrow(() => require('../platform/durability-posix'));
+});
+
+test('existing-file range lease uses the exact OPEN_EXISTING one-byte Win32 ABI', () => {
+  const filePath = 'C:\\control\\.manuscript-range.lifecycle.lock';
+  const expectedIdentity = { dev: '501', ino: '503' };
+  const calls = { lstat: [], order: [], pointerAlignments: [] };
+  let loadCalls = 0;
+  let overlapped;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW(source, desiredAccess, shareMode, security, disposition, flags, template) {
+        calls.open = {
+          source: decodeWideString(source),
+          desiredAccess,
+          shareMode,
+          security,
+          disposition,
+          flags,
+          template,
+        };
+        return 151n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        calls.informationHandle = handle;
+        writeWin32FileInformation(information, expectedIdentity);
+        return 1;
+      },
+      CloseHandle(handle) {
+        calls.order.push(`close:${handle}`);
+        return 1;
+      },
+      GetLastError: () => 0,
+    },
+    lstatSync(target, options) {
+      calls.lstat.push({ target, options });
+      return fakeWin32Lstat(expectedIdentity);
+    },
+    loadRangeLockApi() {
+      loadCalls += 1;
+      return {
+        ptr(value) {
+          calls.pointerAlignments.push(value.byteOffset % BigUint64Array.BYTES_PER_ELEMENT);
+          return value;
+        },
+        symbols: {
+          LockFileEx(handle, flags, reserved, low, high, value) {
+            calls.order.push(`lock:${handle}`);
+            overlapped = value;
+            calls.lock = { handle, flags, reserved, low, high, value };
+            return 1;
+          },
+          UnlockFileEx(handle, reserved, low, high, value) {
+            calls.order.push(`unlock:${handle}`);
+            calls.unlock = { handle, reserved, low, high, value };
+            return 1;
+          },
+        },
+      };
+    },
+    ptr: (value) => value,
+  });
+
+  assert.equal(loadCalls, 0);
+  const lease = backend.acquireExistingFileRangeLease(filePath, {
+    expectedIdentity,
+    exclusive: false,
+  });
+  assert.equal(loadCalls, 1);
+  assert.deepEqual(calls.open, {
+    source: filePath,
+    desiredAccess: 0xc0000000,
+    shareMode: 0x00000003,
+    security: 0,
+    disposition: 3,
+    flags: 0x00200080,
+    template: 0,
+  });
+  assert.equal(calls.informationHandle, 151n);
+  assert.equal(calls.lstat.length, 2);
+  assert.ok(calls.lstat.every(({ target }) => target === filePath));
+  assert.ok(calls.lstat.every(({ options }) => options.bigint === true));
+  assert.deepEqual(calls.lock, {
+    handle: 151n,
+    flags: 0x00000001,
+    reserved: 0,
+    low: 1,
+    high: 0,
+    value: overlapped,
+  });
+  assert.equal(overlapped.byteLength, 32);
+  assert.equal(overlapped.every((byte) => byte === 0), true);
+  assert.equal(Object.isFrozen(lease), true);
+  assert.deepEqual(Object.keys(lease).sort(), ['release', 'state']);
+  assert.equal(lease.state, 'HELD');
+  assert.throws(() => ({ ...lease }).release(), { code: 'LEASE_LOST' });
+  assert.equal(lease.state, 'HELD');
+
+  const released = lease.release();
+  assert.equal(Object.isFrozen(released), true);
+  assert.deepEqual(released, { disposition: 'UNLOCKED_AND_CLOSED' });
+  assert.equal(lease.state, 'RELEASED');
+  assert.deepEqual(calls.unlock, {
+    handle: 151n,
+    reserved: 0,
+    low: 1,
+    high: 0,
+    value: overlapped,
+  });
+  assert.deepEqual(calls.order, ['lock:151', 'unlock:151', 'close:151']);
+  assert.ok(calls.pointerAlignments.every((alignment) => alignment === 0));
+  assert.throws(() => lease.release(), { code: 'LEASE_LOST' });
+});
+
+test('existing-file range lease adds exclusive locking without broadening its fixed range', () => {
+  const calls = {};
+  const expectedIdentity = { dev: '521', ino: '523' };
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW: () => 153n,
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, expectedIdentity);
+        return 1;
+      },
+      CloseHandle: () => 1,
+      GetLastError: () => 0,
+    },
+    lstatSync: () => fakeWin32Lstat(expectedIdentity),
+    loadRangeLockApi: () => ({
+      ptr: (value) => value,
+      symbols: {
+        LockFileEx(handle, flags, reserved, low, high) {
+          calls.lock = { handle, flags, reserved, low, high };
+          return 1;
+        },
+        UnlockFileEx: () => 1,
+      },
+    }),
+    ptr: (value) => value,
+  });
+
+  backend.acquireExistingFileRangeLease('C:\\control\\exclusive.lock', {
+    expectedIdentity,
+    exclusive: true,
+  }).release();
+  assert.deepEqual(calls.lock, {
+    handle: 153n,
+    flags: 0x00000003,
+    reserved: 0,
+    low: 1,
+    high: 0,
+  });
+});
+
+test('existing-file range lease lazy symbols cannot break the legacy L1 lease backend', () => {
+  const loadFailure = new Error('LockFileEx symbols unavailable');
+  let loadCalls = 0;
+  let createCalls = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW() {
+        createCalls += 1;
+        return 155n;
+      },
+      CloseHandle: () => 1,
+      GetLastError: () => 0,
+    },
+    lstatSync: () => fakeWin32Lstat(),
+    loadRangeLockApi() {
+      loadCalls += 1;
+      throw loadFailure;
+    },
+    ptr: (value) => value,
+  });
+
+  assert.equal(loadCalls, 0);
+  backend.acquireExclusiveLease('C:\\control\\legacy.lock').release();
+  assert.equal(loadCalls, 0);
+  assert.equal(createCalls, 1);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.throws(
+      () => backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+        expectedIdentity: { dev: '501', ino: '503' },
+        exclusive: false,
+      }),
+      (error) => error?.code === 'DURABILITY_UNSUPPORTED' && error.cause === loadFailure,
+    );
+  }
+  assert.equal(loadCalls, 1);
+  assert.equal(createCalls, 1);
+});
+
+test('existing-file range lease rejects missing lazy symbols without opening the lock file', () => {
+  let createCalls = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW() {
+        createCalls += 1;
+        return 157n;
+      },
+      CloseHandle: () => 1,
+      GetLastError: () => 0,
+    },
+    lstatSync: () => fakeWin32Lstat(),
+    loadRangeLockApi: () => ({ symbols: { LockFileEx: () => 1 } }),
+    ptr: (value) => value,
+  });
+
+  assert.throws(
+    () => backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+      expectedIdentity: { dev: '501', ino: '503' },
+      exclusive: false,
+    }),
+    { code: 'DURABILITY_UNSUPPORTED' },
+  );
+  assert.equal(createCalls, 0);
+});
+
+test('existing-file range lease maps Win32 open and range conflicts to LEASE_BUSY', () => {
+  const expectedIdentity = { dev: '541', ino: '547' };
+  for (const conflict of [
+    { operation: 'open', win32Code: 32 },
+    { operation: 'lock', win32Code: 33 },
+    { closeUnknown: true, operation: 'lock', win32Code: 33 },
+  ]) {
+    let closed = 0;
+    let lastError = conflict.win32Code;
+    const backend = createWin32Backend(durabilityErrors, {
+      kernel32: {
+        CreateFileW: () => conflict.operation === 'open' ? 0xffffffffffffffffn : 159n,
+        GetFileInformationByHandle(handle, information) {
+          writeWin32FileInformation(information, expectedIdentity);
+          return 1;
+        },
+        CloseHandle() {
+          closed += 1;
+          if (conflict.closeUnknown) {
+            lastError = 6;
+            return 0;
+          }
+          return 1;
+        },
+        GetLastError: () => lastError,
+      },
+      lstatSync: () => fakeWin32Lstat(expectedIdentity),
+      loadRangeLockApi: () => ({
+        ptr: (value) => value,
+        symbols: {
+          LockFileEx: () => conflict.operation === 'lock' ? 0 : 1,
+          UnlockFileEx: () => 1,
+        },
+      }),
+      ptr: (value) => value,
+    });
+
+    const acquire = () => backend.acquireExistingFileRangeLease(
+      'C:\\control\\lifecycle.lock',
+      { expectedIdentity, exclusive: false },
+    );
+    if (conflict.closeUnknown) {
+      assert.throws(
+        acquire,
+        (error) => {
+          assertImmutableDispositionUnknown(error);
+          return (
+            error?.code === 'LEASE_LOST'
+            && error.cause?.win32Code === 6
+            && error.acquireError?.code === 'LEASE_BUSY'
+            && error.secondaryErrors?.[0] === error.acquireError
+          );
+        },
+      );
+    } else {
+      assert.throws(
+        acquire,
+        (error) => error?.code === 'LEASE_BUSY' && error.cause?.win32Code === conflict.win32Code,
+      );
+    }
+    assert.equal(closed, conflict.operation === 'lock' ? 1 : 0);
+  }
+});
+
+test('existing-file range lease validates pre-open and post-open lstat facts before LockFileEx', () => {
+  const expectedIdentity = { dev: '557', ino: '563' };
+  for (const invalidStats of [
+    fakeWin32Lstat({ ...expectedIdentity, kind: 'directory' }),
+    fakeWin32Lstat({ ...expectedIdentity, reparse: true }),
+    fakeWin32Lstat({ ...expectedIdentity, links: 2 }),
+    fakeWin32Lstat({ ...expectedIdentity, size: 1 }),
+    fakeWin32Lstat({ dev: expectedIdentity.dev, ino: '569' }),
+  ]) {
+    let openCalls = 0;
+    let lockCalls = 0;
+    const backend = createWin32Backend(durabilityErrors, {
+      kernel32: {
+        CreateFileW() {
+          openCalls += 1;
+          return 161n;
+        },
+        CloseHandle: () => 1,
+        GetLastError: () => 0,
+      },
+      lstatSync: () => invalidStats,
+      loadRangeLockApi: () => ({
+        ptr: (value) => value,
+        symbols: {
+          LockFileEx() {
+            lockCalls += 1;
+            return 1;
+          },
+          UnlockFileEx: () => 1,
+        },
+      }),
+      ptr: (value) => value,
+    });
+    assert.throws(
+      () => backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+        expectedIdentity,
+        exclusive: false,
+      }),
+      { code: 'VERIFIED_SOURCE_MISMATCH' },
+    );
+    assert.equal(openCalls, 0);
+    assert.equal(lockCalls, 0);
+  }
+
+  let lstatCalls = 0;
+  let lockCalls = 0;
+  let closeCalls = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW: () => 163n,
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, expectedIdentity);
+        return 1;
+      },
+      CloseHandle() {
+        closeCalls += 1;
+        return 1;
+      },
+      GetLastError: () => 0,
+    },
+    lstatSync() {
+      lstatCalls += 1;
+      return lstatCalls === 1
+        ? fakeWin32Lstat(expectedIdentity)
+        : fakeWin32Lstat({ dev: expectedIdentity.dev, ino: '571' });
+    },
+    loadRangeLockApi: () => ({
+      ptr: (value) => value,
+      symbols: {
+        LockFileEx() {
+          lockCalls += 1;
+          return 1;
+        },
+        UnlockFileEx: () => 1,
+      },
+    }),
+    ptr: (value) => value,
+  });
+  assert.throws(
+    () => backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+      expectedIdentity,
+      exclusive: false,
+    }),
+    { code: 'VERIFIED_SOURCE_MISMATCH' },
+  );
+  assert.equal(lstatCalls, 2);
+  assert.equal(lockCalls, 0);
+  assert.equal(closeCalls, 1);
+});
+
+test('existing-file range lease rejects unsafe handle facts before LockFileEx', () => {
+  const expectedIdentity = { dev: '577', ino: '587' };
+  const cases = [
+    { attributes: 0x00000010 },
+    { attributes: 0x00000400 },
+    { byteSize: 1 },
+    { links: 2 },
+    { ino: '593' },
+  ];
+  for (const facts of cases) {
+    let lockCalls = 0;
+    let closeCalls = 0;
+    const backend = createWin32Backend(durabilityErrors, {
+      kernel32: {
+        CreateFileW: () => 165n,
+        GetFileInformationByHandle(handle, information) {
+          writeWin32FileInformation(information, { ...expectedIdentity, ...facts });
+          return 1;
+        },
+        CloseHandle() {
+          closeCalls += 1;
+          return 1;
+        },
+        GetLastError: () => 0,
+      },
+      lstatSync: () => fakeWin32Lstat(expectedIdentity),
+      loadRangeLockApi: () => ({
+        ptr: (value) => value,
+        symbols: {
+          LockFileEx() {
+            lockCalls += 1;
+            return 1;
+          },
+          UnlockFileEx: () => 1,
+        },
+      }),
+      ptr: (value) => value,
+    });
+    assert.throws(
+      () => backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+        expectedIdentity,
+        exclusive: false,
+      }),
+      { code: 'VERIFIED_SOURCE_MISMATCH' },
+    );
+    assert.equal(lockCalls, 0);
+    assert.equal(closeCalls, 1);
+  }
+
+  let lockCalls = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW: () => 166n,
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, { ...expectedIdentity, attributes: 0x00000400 });
+        return 1;
+      },
+      CloseHandle: () => 0,
+      GetLastError: () => 6,
+    },
+    lstatSync: () => fakeWin32Lstat(expectedIdentity),
+    loadRangeLockApi: () => ({
+      ptr: (value) => value,
+      symbols: {
+        LockFileEx() {
+          lockCalls += 1;
+          return 1;
+        },
+        UnlockFileEx: () => 1,
+      },
+    }),
+    ptr: (value) => value,
+  });
+  assert.throws(
+    () => backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+      expectedIdentity,
+      exclusive: false,
+    }),
+    (error) => {
+      assertImmutableDispositionUnknown(error);
+      return (
+        error?.code === 'LEASE_LOST'
+        && error.cause?.win32Code === 6
+        && error.admissionError?.code === 'VERIFIED_SOURCE_MISMATCH'
+        && error.secondaryErrors?.[0] === error.admissionError
+      );
+    },
+  );
+  assert.equal(lockCalls, 0);
+
+  let openCalls = 0;
+  const inspectBackend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW() {
+        openCalls += 1;
+        return openCalls === 1 ? 171n : 172n;
+      },
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, {
+          attributes: 0x00000010,
+          dev: '631',
+          ino: handle === 171n ? '641' : '643',
+        });
+        return 1;
+      },
+      CloseHandle(handle) {
+        return handle === 172n ? 0 : 1;
+      },
+      GetLastError: () => 6,
+    },
+    ptr: (value) => value,
+    realpathSync: (value) => value,
+  });
+  assert.throws(
+    () => inspectBackend.inspectPath('C:\\control-store'),
+    (error) => {
+      assertImmutableDispositionUnknown(error);
+      return error?.code === 'LEASE_LOST' && error.cause?.win32Code === 6;
+    },
+  );
+});
+
+test('existing-file range lease reports known unlock failure only after a known close', () => {
+  const expectedIdentity = { dev: '599', ino: '601' };
+  let lastError = 0;
+  const backend = createWin32Backend(durabilityErrors, {
+    kernel32: {
+      CreateFileW: () => 167n,
+      GetFileInformationByHandle(handle, information) {
+        writeWin32FileInformation(information, expectedIdentity);
+        return 1;
+      },
+      CloseHandle: () => 1,
+      GetLastError: () => lastError,
+    },
+    lstatSync: () => fakeWin32Lstat(expectedIdentity),
+    loadRangeLockApi: () => ({
+      ptr: (value) => value,
+      symbols: {
+        LockFileEx: () => 1,
+        UnlockFileEx() {
+          lastError = 158;
+          return 0;
+        },
+      },
+    }),
+    ptr: (value) => value,
+  });
+  const lease = backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+    expectedIdentity,
+    exclusive: false,
+  });
+
+  assert.deepEqual(lease.release(), { disposition: 'CLOSED_AFTER_UNLOCK_FAILURE' });
+  assert.equal(lease.state, 'RELEASED');
+});
+
+test('existing-file range lease makes close failure a sticky unknown disposition', () => {
+  const expectedIdentity = { dev: '607', ino: '613' };
+  for (const closeMode of ['returned_failure', 'thrown_failure']) {
+    let closeCalls = 0;
+    const closeFailure = new Error(`close ${closeMode}`);
+    const backend = createWin32Backend(durabilityErrors, {
+      kernel32: {
+        CreateFileW: () => 169n,
+        GetFileInformationByHandle(handle, information) {
+          writeWin32FileInformation(information, expectedIdentity);
+          return 1;
+        },
+        CloseHandle() {
+          closeCalls += 1;
+          if (closeMode === 'thrown_failure') throw closeFailure;
+          return 0;
+        },
+        GetLastError: () => 6,
+      },
+      lstatSync: () => fakeWin32Lstat(expectedIdentity),
+      loadRangeLockApi: () => ({
+        ptr: (value) => value,
+        symbols: {
+          LockFileEx: () => 1,
+          UnlockFileEx: () => 1,
+        },
+      }),
+      ptr: (value) => value,
+    });
+    const lease = backend.acquireExistingFileRangeLease('C:\\control\\lifecycle.lock', {
+      expectedIdentity,
+      exclusive: true,
+    });
+
+    assert.throws(
+      () => lease.release(),
+      (error) => {
+        assertImmutableDispositionUnknown(error);
+        return (
+          error?.code === 'LEASE_LOST'
+          && (closeMode === 'returned_failure'
+            ? error.cause?.win32Code === 6
+            : error.cause === closeFailure)
+        );
+      },
+    );
+    assert.equal(lease.state, 'RELEASE_DISPOSITION_UNKNOWN');
+    assert.throws(() => lease.release(), { code: 'LEASE_LOST' });
+    assert.equal(closeCalls, 1);
+  }
+});
+
+test('existing-file range lease public wrapper validates exact options before delegation', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const sentinel = Object.freeze({ kind: 'range-lease' });
+  let received;
+  withIsolatedWin32Durability(() => ({
+    backend: 'win32',
+    acquireExistingFileRangeLease(filePath, options) {
+      received = { filePath, options };
+      return sentinel;
+    },
+  }), (isolatedDurability) => {
+    const result = isolatedDurability.acquireExistingFileRangeLease(
+      'C:\\control\\lifecycle.lock',
+      { expectedIdentity: { dev: '617', ino: '619' }, exclusive: false },
+    );
+    assert.strictEqual(result, sentinel);
+    assert.deepEqual(received, {
+      filePath: 'C:\\control\\lifecycle.lock',
+      options: {
+        expectedIdentity: { dev: '617', ino: '619' },
+        exclusive: false,
+      },
+    });
+    assert.equal(Object.isFrozen(received.options), true);
+    assert.equal(Object.isFrozen(received.options.expectedIdentity), true);
+    assert.throws(
+      () => isolatedDurability.acquireExistingFileRangeLease(
+        'C:\\control\\lifecycle.lock',
+        { expectedIdentity: { dev: '0617', ino: '619' }, exclusive: false },
+      ),
+      { code: 'VERIFIED_SOURCE_MISMATCH' },
+    );
+    assert.throws(
+      () => isolatedDurability.acquireExistingFileRangeLease(
+        'C:\\control\\lifecycle.lock',
+        { expectedIdentity: { dev: '617', ino: '619' }, exclusive: false, range: 2 },
+      ),
+      TypeError,
+    );
+  });
 });

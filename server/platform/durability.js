@@ -95,6 +95,7 @@ function getBackend() {
     backendLoadError = error;
     backend = {
       backend: process.platform === 'win32' ? 'win32' : 'posix',
+      acquireExistingFileRangeLease: unsupportedOperation,
       acquireExclusiveLease: unsupportedOperation,
       createAssetVerified: unsupportedOperation,
       deleteVerified: unsupportedOperation,
@@ -113,6 +114,59 @@ function getBackend() {
 
 function acquireExclusiveLease(lockPath) {
   return getBackend().acquireExclusiveLease(lockPath);
+}
+
+function snapshotCanonicalIdentity(value, label) {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'dev,ino'
+    || typeof value.dev !== 'string'
+    || !/^(0|[1-9]\d*)$/.test(value.dev)
+    || typeof value.ino !== 'string'
+    || !/^(0|[1-9]\d*)$/.test(value.ino)
+  ) {
+    throw new VerifiedSourceMismatchError(
+      `${label} must contain exact canonical decimal dev and ino strings`,
+    );
+  }
+  return Object.freeze({ dev: value.dev, ino: value.ino });
+}
+
+function acquireExistingFileRangeLease(filePath, options) {
+  if (
+    typeof filePath !== 'string'
+    || filePath.length === 0
+    || filePath.includes('\0')
+    || !path.isAbsolute(filePath)
+    || path.resolve(filePath) !== filePath
+  ) {
+    throw new DurabilityUnsupportedError(
+      'Existing-file range lease path must be one absolute normalized path',
+    );
+  }
+  if (
+    options === null
+    || typeof options !== 'object'
+    || Array.isArray(options)
+    || Object.keys(options).sort().join(',') !== 'exclusive,expectedIdentity'
+    || typeof options.exclusive !== 'boolean'
+  ) {
+    throw new TypeError('Existing-file range lease options must contain exact expectedIdentity and exclusive');
+  }
+  const facts = Object.freeze({
+    expectedIdentity: snapshotCanonicalIdentity(
+      options.expectedIdentity,
+      'Existing-file range lease identity',
+    ),
+    exclusive: options.exclusive,
+  });
+  const activeBackend = getBackend();
+  if (typeof activeBackend.acquireExistingFileRangeLease !== 'function') {
+    return unsupportedOperation();
+  }
+  return activeBackend.acquireExistingFileRangeLease(filePath, facts);
 }
 
 function fsyncFile(filePath) {
@@ -798,6 +852,7 @@ module.exports = {
   VerifiedInstallError,
   VerifiedSourceMismatchError,
   VerifiedSourceTopologyError,
+  acquireExistingFileRangeLease,
   acquireExclusiveLease,
   assertDurabilitySupported,
   atomicReplace,
