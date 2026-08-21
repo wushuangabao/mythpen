@@ -5,6 +5,9 @@ const path = require('node:path');
 
 const { LIMITS, manuscriptError } = require('./contracts');
 const {
+  assertManuscriptLifecycleLockPreflight,
+} = require('./lifecycle-lock');
+const {
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
 } = require('./projection-store');
@@ -576,7 +579,13 @@ function migrationReservationId(material) {
     .digest('hex');
 }
 
-function projectReservationMaterial({ migrationId, projectInstanceId, sourceBasisDigest, uid }) {
+function projectReservationMaterial({
+  lifecycleLockPreflight,
+  migrationId,
+  projectInstanceId,
+  sourceBasisDigest,
+  uid,
+}) {
   return {
     domain: MIGRATION_RESERVATION_ID_DOMAIN,
     version: 1,
@@ -584,6 +593,7 @@ function projectReservationMaterial({ migrationId, projectInstanceId, sourceBasi
     objectKind: 'project',
     migrationId,
     projectInstanceId,
+    lifecycleLockPreflight,
     sourceBasisDigest,
     sourceId: null,
     sourceNum: null,
@@ -647,12 +657,31 @@ function normalizeMigrationRequest(value) {
     request.projectRootProbe === null
     || typeof request.projectRootProbe !== 'object'
     || typeof request.projectRootProbe.probe !== 'function'
+    || typeof request.projectRootProbe.selected !== 'function'
   ) invalid('projectRootProbe must provide probe()');
   return {
     ...request,
     ...normalizeMigrationBasis(request.sourceBasis),
     probeRoot: request.projectRootProbe.probe.bind(request.projectRootProbe),
+    selectRoot: request.projectRootProbe.selected.bind(request.projectRootProbe),
   };
+}
+
+function normalizeMigrationRootSelection(value, request, projectUid) {
+  const selection = exactObject(value, [
+    'lifecycleLockPreflight',
+    'operationId',
+    'projectInstanceId',
+    'projectUid',
+  ], 'migration project root selection');
+  if (!Object.isFrozen(value)) invalid('migration project root selection must be frozen');
+  if (
+    selection.operationId !== request.migrationId
+    || selection.projectInstanceId !== request.projectInstanceId
+    || selection.projectUid !== projectUid
+  ) invalid('migration project root selection changed after its absence proof');
+  assertManuscriptLifecycleLockPreflight(selection.lifecycleLockPreflight);
+  return selection.lifecycleLockPreflight;
 }
 
 function normalizeMigrationSourceBasisInput(value) {
@@ -837,6 +866,7 @@ function validateMigrationReservationManifest(value) {
     'migrationId',
     'projectInstanceId',
     'sourceBasisDigest',
+    'lifecycleLockPreflight',
     'projectReservation',
     'localIdentityPlan',
   ], 'migration identity reservation');
@@ -847,6 +877,7 @@ function validateMigrationReservationManifest(value) {
   canonicalUuid(manifest.migrationId, 'migration identity reservation migrationId');
   canonicalUuid(manifest.projectInstanceId, 'migration identity reservation projectInstanceId');
   canonicalDigest(manifest.sourceBasisDigest, 'migration identity reservation sourceBasisDigest');
+  assertManuscriptLifecycleLockPreflight(manifest.lifecycleLockPreflight);
   const project = exactObject(
     manifest.projectReservation,
     ['uid', 'reservationId'],
@@ -855,6 +886,7 @@ function validateMigrationReservationManifest(value) {
   canonicalUuid(project.uid, 'migration identity reservation project UID');
   canonicalDigest(project.reservationId, 'migration identity reservation project reservationId');
   const projectMaterial = projectReservationMaterial({
+    lifecycleLockPreflight: manifest.lifecycleLockPreflight,
     migrationId: manifest.migrationId,
     projectInstanceId: manifest.projectInstanceId,
     sourceBasisDigest: manifest.sourceBasisDigest,
@@ -886,6 +918,7 @@ function validateMigrationReservationManifest(value) {
     migrationId: manifest.migrationId,
     projectInstanceId: manifest.projectInstanceId,
     sourceBasisDigest: manifest.sourceBasisDigest,
+    lifecycleLockPreflight: manifest.lifecycleLockPreflight,
     projectReservation: {
       uid: project.uid,
       reservationId: project.reservationId,
@@ -1275,6 +1308,7 @@ class ManuscriptUidReservation {
     };
 
     let projectUid = null;
+    let lifecycleLockPreflight = null;
     for (let attempt = 0; attempt < MAX_UID_ATTEMPTS; attempt += 1) {
       const candidate = this.#uuidV4();
       canonicalUuid(candidate, 'uuidV4 result');
@@ -1293,6 +1327,15 @@ class ManuscriptUidReservation {
       }
       if (absent) {
         projectUid = candidate;
+        try {
+          lifecycleLockPreflight = normalizeMigrationRootSelection(
+            request.selectRoot(),
+            request,
+            candidate,
+          );
+        } catch (cause) {
+          throw recoveryRequired('migration_project_root_binding_unproven', cause);
+        }
         break;
       }
     }
@@ -1337,6 +1380,7 @@ class ManuscriptUidReservation {
     }
     assignments.sort(compareIdentityAssignments);
     const projectMaterial = projectReservationMaterial({
+      lifecycleLockPreflight,
       migrationId: request.migrationId,
       projectInstanceId: request.projectInstanceId,
       sourceBasisDigest: request.sourceBasisDigest,
@@ -1348,6 +1392,7 @@ class ManuscriptUidReservation {
       migrationId: request.migrationId,
       projectInstanceId: request.projectInstanceId,
       sourceBasisDigest: request.sourceBasisDigest,
+      lifecycleLockPreflight,
       projectReservation: {
         uid: projectUid,
         reservationId: migrationReservationId(projectMaterial),

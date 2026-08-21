@@ -30,15 +30,11 @@ function fallbackProject(row, openState) {
   };
 }
 
-function readRecentProject(row, {
-  fsApi = fs,
-  getProjectOpenState = () => null,
+function readLegacyRecentProject(row, {
+  fsApi,
+  getProjectOpenState,
   openProjectDb,
-  recordProjectOpenFailure = () => ({
-    openState: 'isolated',
-    reasonCode: 'RECOVERY_REQUIRED',
-    recommendedAction: null,
-  }),
+  recordProjectOpenFailure,
 }) {
   const openState = normalizeOpenState(getProjectOpenState(row.file_path));
   if (openState.openState === 'isolated') return fallbackProject(row, openState);
@@ -87,6 +83,37 @@ function readRecentProject(row, {
       normalizeOpenState(recordProjectOpenFailure(row.file_path, error)),
     );
   }
+}
+
+async function readRecentProject(row, {
+  fsApi = fs,
+  getProjectOpenState = () => null,
+  openProjectDb,
+  readFilesRecentSummary = null,
+  recordProjectOpenFailure = () => ({
+    openState: 'isolated',
+    reasonCode: 'RECOVERY_REQUIRED',
+    recommendedAction: null,
+  }),
+}) {
+  if (readFilesRecentSummary !== null) {
+    if (typeof readFilesRecentSummary !== 'function') {
+      throw new TypeError('readFilesRecentSummary must be a function');
+    }
+    const filesSummary = await readFilesRecentSummary(row);
+    if (filesSummary !== null) {
+      if (typeof filesSummary !== 'object' || Array.isArray(filesSummary)) {
+        throw new TypeError('readFilesRecentSummary must return a project object or null');
+      }
+      return filesSummary;
+    }
+  }
+  return readLegacyRecentProject(row, {
+    fsApi,
+    getProjectOpenState,
+    openProjectDb,
+    recordProjectOpenFailure,
+  });
 }
 
 module.exports = { readRecentProject };

@@ -5,6 +5,15 @@ const { createHash } = require('node:crypto');
 const { assertCanonicalUuid, manuscriptError } = require('./contracts');
 
 const serviceRecords = new WeakMap();
+const LIFECYCLE_READY_STATES = new Set([
+  'source_snapshot_ready',
+  'files_candidate_ready',
+  'file_publication_started',
+  'files_published',
+  'database_candidate_ready',
+  'activation_intent',
+  'activated',
+]);
 
 function recoveryRequired(reason, details = {}, cause) {
   return manuscriptError('RECOVERY_REQUIRED', { reason, ...details }, cause);
@@ -139,13 +148,55 @@ async function resumeDurableMigration(record, request) {
   });
   if (
     persisted.state === 'activation_intent'
-    || persisted.state === 'activated'
     || persisted.state === 'migration_aborted'
-  ) return record.journal.recover(request.migrationId);
+  ) {
+    if (persisted.state === 'activation_intent') {
+      verifyLifecycleReady(record, persisted);
+    }
+    return record.journal.recover(request.migrationId, recoveryActivationVerifier(record));
+  }
+  if (persisted.state === 'activated') {
+    verifyLifecycleReady(record, persisted);
+    return record.journal.recover(request.migrationId, recoveryActivationVerifier(record));
+  }
   throw recoveryRequired('durable migration state requires explicit recovery', {
     migrationId: request.migrationId,
     state: persisted.state,
   });
+}
+
+function verifyLifecycleReady(record, persisted) {
+  if (
+    persisted?.lifecycleLockReceipt === null
+    || persisted?.lifecycleLockReceipt === undefined
+    || record.directories.verifyExisting(persisted.lifecycleLockReceipt)
+      !== persisted.lifecyclePlatformIdentity
+  ) throw recoveryRequired('migration lifecycle lock is not proven ready', {
+    migrationId: persisted?.migrationId,
+    state: persisted?.state,
+  });
+}
+
+function recoveryActivationVerifier(record) {
+  return Object.freeze({
+    verifyActivationLifecycleAfterInspection(persisted) {
+      verifyLifecycleReady(record, persisted);
+    },
+  });
+}
+
+function assertActivationAfter(value, targetGeneration) {
+  const descriptors = exactDescriptors(
+    value,
+    ['disposition', 'generation', 'route'],
+    'verified migration activation after evidence',
+  );
+  if (
+    descriptors.disposition.value !== 'after'
+    || descriptors.generation.value !== targetGeneration
+    || descriptors.route.value !== 'files'
+  ) throw recoveryRequired('migration activation is not completely proven after');
+  return value;
 }
 
 class MigrationService {
@@ -179,7 +230,11 @@ class MigrationService {
         'resumeMigrationIdentities',
       ], 'uidReservations'),
       route: capturePort(descriptors.route.value, ['abort', 'activate', 'fence'], 'route'),
-      directories: capturePort(descriptors.directories.value, ['cleanup', 'ensure', 'plan'], 'directories'),
+      directories: capturePort(
+        descriptors.directories.value,
+        ['cleanup', 'ensure', 'plan', 'verifyExisting'],
+        'directories',
+      ),
       source: capturePort(descriptors.source.value, ['capture'], 'source'),
       store: capturePort(descriptors.store.value, ['buildClosure', 'finalizeCandidate'], 'store'),
       projection: capturePort(descriptors.projection.value, ['buildTarget'], 'projection'),
@@ -189,7 +244,11 @@ class MigrationService {
         'publishFiles',
         'stageAssets',
       ], 'childJournal'),
-      database: capturePort(descriptors.database.value, ['activate', 'build'], 'database'),
+      database: capturePort(
+        descriptors.database.value,
+        ['activate', 'build', 'verifyActivationAfter'],
+        'database',
+      ),
     }));
     Object.freeze(this);
   }
@@ -228,6 +287,7 @@ class MigrationService {
 
     const directoryPlan = await record.directories.plan({
       migrationId: request.migrationId,
+      migrationReservation: reserved.migrationReservation,
       projectRootProbe: request.projectRootProbe,
     });
     const reservationAuthority = await record.journal.reserve(Object.freeze({
@@ -250,17 +310,36 @@ class MigrationService {
       routeEvidence,
       directoryPlan,
     );
-    const targetEnumerationSnapshot = await record.directories.ensure(Object.freeze({
+    const ready = await record.directories.ensure(Object.freeze({
       migrationId: request.migrationId,
+      migrationReservation: reserved.migrationReservation,
       directoryPlan,
     }));
+    const readyDescriptors = exactDescriptors(ready, [
+      'enumeration',
+      'lifecycleLockReceipt',
+      'lifecyclePlatformIdentity',
+    ], 'migration project control readiness');
+    if (
+      !Object.isFrozen(ready)
+      || readyDescriptors.lifecyclePlatformIdentity.value
+        !== readyDescriptors.lifecycleLockReceipt.value?.lifecyclePlatformIdentity
+    ) throw recoveryRequired('migration project control readiness lost its lifecycle identity', {
+      migrationId: request.migrationId,
+    });
+    const targetEnumerationSnapshot = readyDescriptors.enumeration.value;
+    const lifecycleLockReceipt = readyDescriptors.lifecycleLockReceipt.value;
     const sourceSnapshot = await record.source.capture(Object.freeze({
       migrationId: request.migrationId,
       sourceBasis: request.sourceBasis,
       migrationReservation: reserved.migrationReservation,
       readOnly: true,
     }));
-    const sourceAuthority = await record.journal.recordSourceSnapshot(routeAuthority, sourceSnapshot);
+    const sourceAuthority = await record.journal.recordSourceSnapshot(
+      routeAuthority,
+      sourceSnapshot,
+      lifecycleLockReceipt,
+    );
 
     const localIdentityPlan = record.uidReservations.assertMigrationIdentities({
       authority: reserved.authority,
@@ -359,6 +438,7 @@ class MigrationService {
       filesAuthority,
       databaseCandidate,
     );
+    verifyLifecycleReady(record, record.journal.read(request.migrationId));
     const activationAuthority = await record.journal.beginActivation(databaseAuthority);
     const migrationContext = record.journal.prepareMigrationContext(
       activationAuthority,
@@ -385,12 +465,27 @@ class MigrationService {
       migrationContext,
       routeEvidence: activationRouteEvidence,
     });
-    return record.journal.recordActivated(activationAuthority, databaseEvidence);
+    const verifiedAfter = assertActivationAfter(
+      await record.database.verifyActivationAfter(Object.freeze({
+        activationEvidence: databaseEvidence,
+        databaseCandidate,
+        migrationContext,
+        target,
+      })),
+      migrationContext.targetGeneration,
+    );
+    verifyLifecycleReady(record, record.journal.read(request.migrationId));
+    return record.journal.recordActivated(activationAuthority, verifiedAfter);
   }
 
   async recover(migrationId) {
     const record = serviceRecords.get(this);
-    return record.journal.recover(assertCanonicalUuid(migrationId, 'migration_id'));
+    const safeMigrationId = assertCanonicalUuid(migrationId, 'migration_id');
+    const persisted = record.journal.read(safeMigrationId);
+    if (LIFECYCLE_READY_STATES.has(persisted.state)) {
+      verifyLifecycleReady(record, persisted);
+    }
+    return record.journal.recover(safeMigrationId, recoveryActivationVerifier(record));
   }
 }
 

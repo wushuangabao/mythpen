@@ -18,6 +18,8 @@ const KNOWN_RELEASE_DISPOSITIONS = new Set([
 const controllerRecords = new WeakMap();
 const sessionRecords = new WeakMap();
 const retirementEpochRecords = new WeakMap();
+const retryableOpenFailures = new WeakMap();
+const ORPHAN_START_AUTHORITY = Object.freeze({});
 
 function invalid(message) {
   throw new TypeError(message);
@@ -633,7 +635,7 @@ function installFreshnessOwner(record, entry, identity) {
   return true;
 }
 
-function ensureFreshnessStarted(record, entry) {
+function ensureFreshnessStarted(record, entry, orphanStart) {
   if (entry.freshnessOwner === null || entry.freshnessOwnerIdentity === null) {
     invalid('freshness owner was not installed under registry admission');
   }
@@ -643,8 +645,12 @@ function ensureFreshnessStarted(record, entry) {
       // Calling the async start method here executes its synchronous admission
       // prefix immediately, after registry/config has exited.
       started = Reflect.apply(
-        record.startFreshness.method,
-        record.startFreshness.receiver,
+        orphanStart
+          ? record.startOrphanFreshness.method
+          : record.startFreshness.method,
+        orphanStart
+          ? record.startOrphanFreshness.receiver
+          : record.startFreshness.receiver,
         [entry.freshnessOwner, entry.freshnessOwnerIdentity],
       );
     } catch (error) {
@@ -700,6 +706,11 @@ class ManuscriptSessionController {
         'start',
         'freshnessLifecycle',
       ),
+      startOrphanFreshness: requiredMethod(
+        values.freshnessLifecycle,
+        'startOrphan',
+        'freshnessLifecycle',
+      ),
       projects: new Map(),
       verifyAfterLease: requiredMethod(
         values.routeAdmissionVerifier,
@@ -716,9 +727,13 @@ class ManuscriptSessionController {
     Object.freeze(this);
   }
 
-  async openSession(projectSelector) {
+  async openSession(projectSelector, startupAuthority) {
     const record = controllerRecord(this);
     assertControllerUsable(record);
+    if (startupAuthority !== undefined && startupAuthority !== ORPHAN_START_AUTHORITY) {
+      invalid('startup authority is private to the session controller');
+    }
+    const orphanStart = startupAuthority === ORPHAN_START_AUTHORITY;
     const selector = snapshotSelector(projectSelector);
     let callbackCalls = 0;
     let reservationTicket = null;
@@ -772,7 +787,7 @@ class ManuscriptSessionController {
       if (callbackCalls !== 1 || returned !== reservationTicket || reservationTicket === null) {
         invalid('registryAdmission must return its single callback result');
       }
-      await ensureFreshnessStarted(record, reservationTicket.entry);
+      await ensureFreshnessStarted(record, reservationTicket.entry, orphanStart);
       assertControllerUsable(record);
       if (!reservationTicket.ownerCreator) {
         await Reflect.apply(
@@ -791,11 +806,13 @@ class ManuscriptSessionController {
       pendingOpen = false;
       return mintedSession;
     } catch (error) {
+      let knownRollback = false;
       if (mintedSession) {
         await rollbackMintedSession(record, mintedSession);
       } else if (reservationTicket) {
         try {
           await rollbackReservation(record, reservationTicket.entry);
+          knownRollback = true;
         } catch {
           // The original registry/start/binding error remains authoritative;
           // cleanup uncertainty has already fenced the controller.
@@ -805,8 +822,30 @@ class ManuscriptSessionController {
         finishPendingOpen(record, pendingProject);
         pendingOpen = false;
       }
+      if (
+        knownRollback
+        && record.fencedError === null
+        && error !== null
+        && (typeof error === 'object' || typeof error === 'function')
+      ) retryableOpenFailures.set(error, record);
       throw error;
     }
+  }
+
+  openOrphanSession(projectSelector) {
+    return this.openSession(projectSelector, ORPHAN_START_AUTHORITY);
+  }
+
+  openOrphanSessionAfterKnownFailure(projectSelector, failure) {
+    const record = controllerRecord(this);
+    assertControllerUsable(record);
+    if (
+      failure === null
+      || (typeof failure !== 'object' && typeof failure !== 'function')
+      || retryableOpenFailures.get(failure) !== record
+    ) invalid('orphan retry requires this controller original known open failure');
+    retryableOpenFailures.delete(failure);
+    return this.openSession(projectSelector, ORPHAN_START_AUTHORITY);
   }
 
   async admit(session, operation) {

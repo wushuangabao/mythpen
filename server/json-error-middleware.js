@@ -5,6 +5,8 @@ function freezeSpec(status, message, recoverable) {
 const PUBLIC_ERROR_SPECS = Object.freeze({
   CONFIG_DATABASE_BUSY: freezeSpec(423, '配置数据库正在被其他进程使用', true),
   PROJECT_WRITE_BUSY: freezeSpec(423, '项目正在被其他写入操作占用', true),
+  EXTERNAL_DRAFT_CONFLICT: freezeSpec(409, '稿件文件已被外部修改，请刷新后重试', true),
+  MANUSCRIPT_TREE_CHANGED_DURING_READ: freezeSpec(409, '稿件文件在读取期间发生变化，请重试', true),
   RECOVERY_REQUIRED: freezeSpec(409, '项目需要恢复后才能继续', true),
   RECOVERY_SNAPSHOT_STALE: freezeSpec(409, '项目现场已变化，请刷新后重试', true),
   PROJECT_IDENTITY_REBIND_REQUIRED: freezeSpec(409, '项目身份已变化，需要确认后继续', true),

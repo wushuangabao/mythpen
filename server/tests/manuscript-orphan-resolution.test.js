@@ -11,6 +11,8 @@ const {
   SQLiteProjectionStore,
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
+  canonicalSchema12ReuseIdentityPlan,
+  currentProjectionAfterTarget,
 } = require('../manuscript/projection-store');
 const { ManuscriptStore } = require('../manuscript/store');
 const {
@@ -33,12 +35,13 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-function createStore(fixture, limits = LIMITS) {
+function createStore(fixture, limits = LIMITS, installedOrphanBaselineAuthority) {
   return new ManuscriptStore({
     dataRoot: fixture.dataRoot,
     fileBoundary: fixture.fileBoundary,
     journalAuthority: fixture.journalAuthority,
     limits,
+    installedOrphanBaselineAuthority,
   });
 }
 
@@ -368,6 +371,154 @@ test('canonical schema12 reuse plan covers active and tombstone identities in st
       /schema12/i,
     );
   });
+});
+
+test('cold installed baseline mints one branded Store baseline and rejects clone, foreign, and stale receipts', async () => {
+  const fixture = createManuscriptTreeFixture();
+  const projectionStore = new SQLiteProjectionStore();
+  const authority = projectionStore.installedOrphanBaselineAuthority();
+  const store = createStore(fixture, LIMITS, authority);
+  const before = await initialProjection(store, fixture);
+  const candidate = baselineCandidateByStore.get(store);
+  const target = projectionStore.buildTarget({
+    candidate,
+    currentProjection: before,
+    targetGeneration: 2,
+    projectedAt: PROJECTED_AT,
+    ignoredLedger: deepFreeze([]),
+    localIdentityPlan: canonicalSchema12ReuseIdentityPlan(before),
+  });
+  const current = currentProjectionAfterTarget(target);
+  let capacityAdjustment = 0;
+  let projectionPublishes = 0;
+  const projectStore = Object.freeze({
+    inspectProjectionTarget() {
+      return 'base';
+    },
+    publishProjectionTarget() {
+      projectionPublishes += 1;
+      throw new Error('capacity drift must reject before projection publication');
+    },
+    readAll(sql) {
+      if (/FROM volumes/u.test(sql)) {
+        return target.volumes.filter((row) => row.is_present === 1)
+          .sort((left, right) => left.sort_order - right.sort_order)
+          .map((row) => ({ ...row }));
+      }
+      if (/FROM chapters/u.test(sql)) {
+        return target.chapters.filter((row) => row.is_present === 1)
+          .sort((left, right) => left.manuscript_position - right.manuscript_position)
+          .map((row) => ({ ...row }));
+      }
+      if (/FROM manuscript_controlled_files/u.test(sql)) {
+        return target.controlledFiles.map((row) => ({
+          file_role: row.role,
+          resource_uid: row.resourceUid,
+          raw_sha256: row.rawSha256,
+          byte_size: row.byteSize,
+          file_identity_json: JSON.stringify({
+            fileIdentity: row.fileIdentity,
+            parentIdentity: row.parentIdentity,
+          }),
+          projection_generation: target.targetGeneration,
+        }));
+      }
+      if (/FROM manuscript_capacity_snapshot/u.test(sql)) {
+        const measurements = target.capacitySnapshot.measurements;
+        return [{
+          singleton_id: 1,
+          chapter_identities: measurements.chapterIdentities,
+          volume_identities: measurements.volumeIdentities,
+          controlled_files: measurements.controlledFiles + capacityAdjustment,
+          chapter_directory_entries: measurements.chapterDirectoryEntries,
+          controlled_bytes: measurements.controlledBytes,
+          projection_generation: target.targetGeneration,
+        }];
+      }
+      throw new Error(`unexpected installed baseline SQL: ${sql}`);
+    },
+  });
+  const receipt = projectionStore.captureInstalledOrphanBaseline({
+    projectStore,
+    currentProjection: current,
+    ignoredLedger: target.ignoredLedger,
+  });
+  const input = Object.freeze({
+    projectBinding: fixture.projectBinding,
+    currentProjection: current,
+    ignoredLedger: target.ignoredLedger,
+    installedProjectionBaseline: receipt,
+  });
+  assert.throws(
+    () => store.captureOrphanBaseline({ ...input, installedProjectionBaseline: Object.freeze({}) }),
+    TypeError,
+  );
+  const foreignStore = createStore(
+    fixture,
+    LIMITS,
+    new SQLiteProjectionStore().installedOrphanBaselineAuthority(),
+  );
+  assert.throws(() => foreignStore.captureOrphanBaseline(input), TypeError);
+
+  const nextTarget = projectionStore.buildTarget({
+    candidate,
+    currentProjection: current,
+    targetGeneration: 3,
+    projectedAt: '2026-08-20T01:02:04.004Z',
+    ignoredLedger: target.ignoredLedger,
+    localIdentityPlan: canonicalSchema12ReuseIdentityPlan(current),
+  });
+  assert.throws(
+    () => store.captureOrphanBaseline({
+      ...input,
+      currentProjection: currentProjectionAfterTarget(nextTarget),
+    }),
+    /stale/i,
+  );
+
+  fixture.controls.addChapter(UNKNOWN_CHAPTER_UID);
+  capacityAdjustment = 1;
+  const driftedCapacityReceipt = projectionStore.captureInstalledOrphanBaseline({
+    projectStore,
+    currentProjection: current,
+    ignoredLedger: target.ignoredLedger,
+  });
+  capacityAdjustment = 0;
+  const resolutionService = serviceFor(store, projectStore);
+  await assert.rejects(
+    resolutionService.preflightResolution(
+      'ignore_in_place',
+      resolutionService.snapshotRequest({ kind: 'chapter', uid: UNKNOWN_CHAPTER_UID }),
+      store.captureOrphanBaseline({
+        ...input,
+        installedProjectionBaseline: driftedCapacityReceipt,
+      }),
+    ),
+    (error) => error?.code === 'RECOVERY_REQUIRED',
+  );
+  assert.equal(projectionPublishes, 0);
+  fixture.controls.setJson(fixture.refs.chapterSidecar, {
+    ...fixture.values.chapter,
+    title: 'non-target metadata drift',
+  });
+  await assert.rejects(
+    store.preflightOrphanResolution(
+      'ignore_in_place',
+      Object.freeze({ kind: 'chapter', uid: UNKNOWN_CHAPTER_UID }),
+      store.captureOrphanBaseline(input),
+    ),
+    /non-target installed projection change/i,
+  );
+  fixture.controls.setJson(fixture.refs.chapterSidecar, fixture.values.chapter);
+  const baselineAuthority = store.captureOrphanBaseline(input);
+  const prepared = await store.preflightOrphanResolution(
+    'ignore_in_place',
+    Object.freeze({ kind: 'chapter', uid: UNKNOWN_CHAPTER_UID }),
+    baselineAuthority,
+  );
+  const description = store.describeOrphanResolution(prepared);
+  assert.equal(description.requestKind, 'chapter');
+  assert.equal(description.requestUid, UNKNOWN_CHAPTER_UID);
 });
 
 test('ignore, active no-op, revoke, and reactivate use one scan and projection-only publication', async () => {
@@ -1034,7 +1185,7 @@ test('ignored-ledger digest drift rejects before projection publication', async 
   });
 });
 
-test('projection-only ignore commits through the real proof-bound schema12 project store', async (t) => {
+test('projection-only ignore and revoke commit through the real proof-bound schema12 project store', async (t) => {
   const { Database } = require('bun:sqlite');
   const { buildSchema12Candidate } = require('../native/durability-schema');
   const { createProofBoundSchema12ProjectStore } = require('../native/native-project-store');
@@ -1163,4 +1314,34 @@ test('projection-only ignore commits through the real proof-bound schema12 proje
   assert.deepEqual(projectStore.readGet(
     "SELECT value FROM project_meta WHERE key = 'manuscript_projection_generation'",
   ), { value: '2' });
+
+  const revokePrepared = await service.preflightResolution(
+    'revoke_ignore',
+    request,
+    baseline(store, fixture, noopCurrent, deepFreeze(liveRows)),
+  );
+  assert.deepEqual(
+    service.publishResolution(revokePrepared, projectionContext(noopCurrent)),
+    { disposition: 'after', generation: 3, route: 'files' },
+  );
+  assert.deepEqual(projectStore.readGet(
+    "SELECT value FROM project_meta WHERE key = 'manuscript_projection_generation'",
+  ), { value: '3' });
+  const revokedRows = projectStore.readAll(`
+    SELECT resource_kind, resource_uid, ignore_status,
+           opaque_container_kind, opaque_container_uid,
+           is_currently_referenced, member_snapshot_json,
+           projection_generation
+    FROM manuscript_ignored_resources
+    ORDER BY resource_kind, resource_uid
+  `);
+  assert.deepEqual(revokedRows, [{
+    ...liveRows[0],
+    ignore_status: 'revoked',
+    projection_generation: 3,
+  }]);
+  assert.notEqual(
+    canonicalIgnoredLedgerDigest(revokedRows),
+    canonicalIgnoredLedgerDigest(liveRows),
+  );
 });

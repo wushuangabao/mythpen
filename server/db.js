@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { createHash, randomUUID } = require('node:crypto');
+const { types: { isProxy } } = require('node:util');
 const { resolveStoragePaths } = require('./storage-paths');
 const { repairRecentProjectPaths } = require('./recent-project-paths');
 const { compareTimelineEvents } = require('./timeline-order');
@@ -280,7 +281,7 @@ function getStoragePaths() {
 // Schema versioning — bump these when adding migrations
 // ═══════════════════════════════════════════════════════════════
 
-const CONFIG_SCHEMA_VERSION = 1;
+const CONFIG_SCHEMA_VERSION = 2;
 // PROJECT_SCHEMA_VERSION is the highest project schema this build can admit.
 // SQL.js remains the schema-10 authority; schema 11 is installed only by the
 // native activation transaction and is never a sql.js migration target.
@@ -1313,6 +1314,27 @@ const configMigrations = [
       innerTx();
     }
   },
+  // v1 -> v2: product route cache. This cache is derived only from project
+  // database truth and is never allowed to write route facts back to a
+  // project database.
+  (db) => {
+    db.exec(`
+      CREATE TABLE manuscript_route_cache (
+        name                  TEXT PRIMARY KEY,
+        file_path             TEXT NOT NULL UNIQUE,
+        route                 TEXT NOT NULL,
+        project_uid           TEXT,
+        project_instance_id   TEXT,
+        route_journal         TEXT,
+        projection_generation INTEGER NOT NULL,
+        last_modified         TEXT NOT NULL
+      );
+      CREATE TABLE manuscript_route_cache_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 function makeVersionGetter(tableName) {
@@ -1885,6 +1907,12 @@ function inspectSchema12RouteAdmission(bytes) {
       "SELECT key, value FROM project_meta WHERE key IN ('durability_commit_seq', 'project_instance_id', 'manuscript_project_uid', 'manuscript_projection_generation', 'manuscript_route', 'manuscript_route_journal')",
     ).all();
     const meta = new Map(metaRows.map((row) => [row.key, row.value]));
+    if (meta.get('manuscript_route') !== 'files') {
+      throw projectDatabaseError(
+        'PROJECT_SCHEMA_TOO_NEW',
+        'Schema12 is admitted only through an activated files route',
+      );
+    }
     const committed = meta.get('durability_commit_seq');
     if (typeof committed !== 'string' || !/^(?:0|[1-9]\d*)$/.test(committed)) {
       throw projectDatabaseError('RECOVERY_REQUIRED', 'Schema12 commit sequence is not canonical');
@@ -2363,7 +2391,10 @@ function inspectProjectManuscriptRoute(name) {
     throw projectDatabaseError('PROJECT_NOT_FOUND', 'Project name is required');
   }
   const filePath = getProjectDbPath(name);
-  const pathState = assertControlledProjectDatabasePath(filePath);
+  const pathState = assertControlledProjectDatabasePath(filePath, { allowMissing: true });
+  if (!pathState.exists) {
+    throw projectDatabaseError('PROJECT_NOT_FOUND', `Project database does not exist: ${filePath}`);
+  }
   const migration = inspectDurableMigrationRoute(pathState.filePath);
   if (migration !== null) return migration;
   const identity = assertMythpenProjectIdentity(pathState.filePath);
@@ -2390,120 +2421,193 @@ function inspectProjectManuscriptRoute(name) {
   }
 }
 
-const FILES_PROJECT_ICON = Object.freeze({
-  'sci-fi': 'Rocket',
-  fantasy: 'Wand',
-  romance: 'Heart',
-  history: 'Landmark',
-  urban: 'Building',
-  'power-fantasy': 'Zap',
-  biography: 'BookOpen',
-  other: 'Scroll',
-});
-const FILES_PROJECT_GENRE_LABEL = Object.freeze({
-  'sci-fi': '科幻',
-  fantasy: '玄幻',
-  romance: '言情',
-  history: '历史',
-  urban: '都市',
-  'power-fantasy': '爽文',
-  biography: '传记',
-  other: '其他',
-});
+const PROJECT_ROUTE_CACHE_ROUTES = new Set(['sqlite', 'files', 'migrating', 'retired']);
 
-function readVerifiedFilesProjectProductView(name, filePath, admission) {
-  const database = new SQL.Database(fs.readFileSync(filePath));
-  try {
-    const facade = sqlJsQueryFacade(database);
-    const meta = Object.create(null);
-    for (const row of facade.query('SELECT key, value FROM project_meta').all()) {
-      meta[row.key] = row.value;
+function captureProjectRouteTruth() {
+  assertStorageAvailable();
+  const entries = fs.readdirSync(getStoragePaths().projectsDir, { withFileTypes: true });
+  const records = [];
+  const catalog = [];
+  for (const entry of entries) {
+    if (!entry.name.endsWith(PROJECT_DATABASE_SUFFIX)) continue;
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Project route catalog contains a non-file database entry');
     }
+    const name = entry.name.slice(0, -PROJECT_DATABASE_SUFFIX.length);
     if (
-      (meta.name !== undefined && meta.name !== name)
-      || (admission.activatedProof.kind === 'creation' && meta.name !== name)
-      || meta.project_instance_id !== admission.databaseFacts.projectInstanceId
-      || meta.manuscript_project_uid !== admission.databaseFacts.projectUid
-      || meta.manuscript_route !== 'files'
-    ) throw projectDatabaseError(
-      'RECOVERY_REQUIRED',
-      `Files project metadata does not match its activated route: ${filePath}`,
-    );
-    const counts = facade.query(
-      'SELECT COUNT(*) AS chapter_count, COALESCE(SUM(word_count), 0) AS word_count FROM chapters WHERE is_present = 1',
-    ).get();
-    const genres = facade.query('SELECT genre FROM project_genres ORDER BY genre').all()
-      .map((row) => row.genre);
-    const sidebarItems = facade.query(
-      'SELECT * FROM sidebar_items WHERE enabled = 1 ORDER BY sort_order',
-    ).all().filter((item) => {
-      if (item.category === 'universal') return true;
-      if (item.category !== 'genre') return false;
-      const itemGenres = item.genres ? item.genres.split(',').map((entry) => entry.trim()) : [];
-      return genres.some((genre) => itemGenres.includes(genre));
-    });
-    const wordCount = Number(counts?.word_count ?? 0);
-    const chapterCount = Number(counts?.chapter_count ?? 0);
-    const lastOpened = fs.statSync(filePath).mtime.toISOString();
-    return Object.freeze({
-      metadata: Object.freeze({ ...meta, genres: Object.freeze([...genres]), filePath }),
-      sidebarItems: Object.freeze(sidebarItems.map((item) => Object.freeze({ ...item }))),
-      summary: Object.freeze({
-        id: name,
-        name,
-        iconName: genres.map((genre) => FILES_PROJECT_ICON[genre] || 'BookOpen').join(' ') || 'BookOpen',
-        genres: Object.freeze(genres.map((genre) => FILES_PROJECT_GENRE_LABEL[genre] || genre)),
-        wordCount,
-        chapterCount,
-        lastOpened,
-        mode: meta.mode || 'medium-novel',
-        instanceId: admission.databaseFacts.projectInstanceId,
-        status: wordCount > 30000 ? '写作中' : wordCount > 5000 ? '进行中' : '刚起步',
-        openState: 'ready',
-        reasonCode: null,
-        recommendedAction: null,
-        manuscriptRoute: 'files',
-      }),
-    });
-  } finally {
-    database.close();
-  }
-}
-
-function readFilesProjectProductView(name) {
-  assertStorageAvailable();
-  if (typeof name !== 'string' || name.length === 0) {
-    throw projectDatabaseError('PROJECT_NOT_FOUND', 'Project name is required');
-  }
-  const filePath = getProjectDbPath(name);
-  const pathState = assertControlledProjectDatabasePath(filePath);
-  const identity = assertMythpenProjectIdentity(pathState.filePath);
-  if (identity.route !== 'files') {
-    throw projectDatabaseError('RECOVERY_REQUIRED', `Project is not an activated files project: ${name}`);
-  }
-  return readVerifiedFilesProjectProductView(name, pathState.filePath, identity.admission);
-}
-
-function listFilesProjectSummaries() {
-  assertStorageAvailable();
-  const summaries = [];
-  for (const item of fs.readdirSync(getStoragePaths().projectsDir, { withFileTypes: true })) {
-    if (!item.isFile() || !item.name.endsWith(PROJECT_DATABASE_SUFFIX)) continue;
-    const name = item.name.slice(0, -PROJECT_DATABASE_SUFFIX.length);
+      name.length === 0
+      || path.basename(name) !== name
+      || path.basename(getProjectDbPath(name)) !== entry.name
+    ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Project route catalog contains a non-canonical project name');
     const filePath = getProjectDbPath(name);
     const pathState = assertControlledProjectDatabasePath(filePath);
-    const identity = assertMythpenProjectIdentity(pathState.filePath);
-    if (identity.route !== 'files') continue;
-    summaries.push(readVerifiedFilesProjectProductView(
+    const stats = fs.lstatSync(pathState.filePath, { bigint: true });
+    const admission = inspectProjectManuscriptRoute(name);
+    const facts = admission.route === 'files'
+      ? admission.databaseFacts
+      : admission;
+    if (!PROJECT_ROUTE_CACHE_ROUTES.has(admission.route)) {
+      throw projectDatabaseError('RECOVERY_REQUIRED', 'Project route truth contains an invalid route');
+    }
+    const record = Object.freeze({
       name,
-      pathState.filePath,
-      identity.admission,
-    ).summary);
+      filePath: pathState.filePath,
+      route: admission.route,
+      projectUid: facts.projectUid ?? null,
+      projectInstanceId: facts.projectInstanceId ?? null,
+      routeJournal: facts.routeJournal ?? null,
+      projectionGeneration: Number(facts.projectionGeneration ?? 0),
+      lastModified: stats.mtime.toISOString(),
+    });
+    records.push(record);
+    catalog.push(Object.freeze({
+      ...record,
+      dev: String(stats.dev),
+      ino: String(stats.ino),
+      size: String(stats.size),
+      mtimeNs: String(stats.mtimeNs),
+    }));
   }
-  summaries.sort((left, right) => (
-    left.lastOpened > right.lastOpened ? -1 : left.lastOpened < right.lastOpened ? 1 : 0
-  ));
-  return Object.freeze(summaries);
+  records.sort((left, right) => left.name.localeCompare(right.name));
+  catalog.sort((left, right) => left.name.localeCompare(right.name));
+  return Object.freeze({
+    digest: createHash('sha256').update(JSON.stringify(catalog)).digest('hex'),
+    records: Object.freeze(records),
+  });
+}
+
+function cachedProjectRouteRecords() {
+  const config = getConfigDb();
+  const cacheColumns = config.prepare('PRAGMA table_info(manuscript_route_cache)').all()
+    .map((row) => row.name);
+  const metaColumns = config.prepare('PRAGMA table_info(manuscript_route_cache_meta)').all()
+    .map((row) => row.name);
+  if (
+    JSON.stringify(cacheColumns) !== JSON.stringify([
+      'name',
+      'file_path',
+      'route',
+      'project_uid',
+      'project_instance_id',
+      'route_journal',
+      'projection_generation',
+      'last_modified',
+    ])
+    || JSON.stringify(metaColumns) !== JSON.stringify(['key', 'value'])
+  ) throw projectDatabaseError('RECOVERY_REQUIRED', 'Project route cache schema is missing or corrupt');
+  const digest = config.prepare(
+    "SELECT value FROM manuscript_route_cache_meta WHERE key = 'truth_digest'",
+  ).get()?.value;
+  const records = config.prepare(`
+    SELECT name, file_path, route, project_uid, project_instance_id,
+           route_journal, projection_generation, last_modified
+    FROM manuscript_route_cache
+    ORDER BY name
+  `).all().map((row) => Object.freeze({
+    name: row.name,
+    filePath: row.file_path,
+    route: row.route,
+    projectUid: row.project_uid ?? null,
+    projectInstanceId: row.project_instance_id ?? null,
+    routeJournal: row.route_journal ?? null,
+    projectionGeneration: Number(row.projection_generation),
+    lastModified: row.last_modified,
+  }));
+  return Object.freeze({ digest: digest ?? null, records: Object.freeze(records) });
+}
+
+function sameProjectRouteRecords(left, right) {
+  return left.length === right.length && left.every((record, index) => {
+    const candidate = right[index];
+    return candidate !== undefined
+      && record.name === candidate.name
+      && record.filePath === candidate.filePath
+      && record.route === candidate.route
+      && record.projectUid === candidate.projectUid
+      && record.projectInstanceId === candidate.projectInstanceId
+      && record.routeJournal === candidate.routeJournal
+      && record.projectionGeneration === candidate.projectionGeneration
+      && record.lastModified === candidate.lastModified;
+  });
+}
+
+function publishConfigCache(truth, resetSchema = false) {
+  const config = getConfigDb();
+  config.transaction(() => {
+    if (resetSchema) {
+      config.exec(`
+        DROP TABLE IF EXISTS manuscript_route_cache;
+        DROP TABLE IF EXISTS manuscript_route_cache_meta;
+        CREATE TABLE manuscript_route_cache (
+          name                  TEXT PRIMARY KEY,
+          file_path             TEXT NOT NULL UNIQUE,
+          route                 TEXT NOT NULL,
+          project_uid           TEXT,
+          project_instance_id   TEXT,
+          route_journal         TEXT,
+          projection_generation INTEGER NOT NULL,
+          last_modified         TEXT NOT NULL
+        );
+        CREATE TABLE manuscript_route_cache_meta (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
+    }
+    config.prepare('DELETE FROM manuscript_route_cache').run();
+    const insert = config.prepare(`
+      INSERT INTO manuscript_route_cache (
+        name, file_path, route, project_uid, project_instance_id,
+        route_journal, projection_generation, last_modified
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const record of truth.records) {
+      insert.run(
+        record.name,
+        record.filePath,
+        record.route,
+        record.projectUid,
+        record.projectInstanceId,
+        record.routeJournal,
+        record.projectionGeneration,
+        record.lastModified,
+      );
+    }
+    config.prepare(`
+      INSERT OR REPLACE INTO manuscript_route_cache_meta (key, value)
+      VALUES ('truth_digest', ?)
+    `).run(truth.digest);
+  })();
+  config.flush();
+  return truth.records;
+}
+
+function rebuildConfigCache() {
+  if (arguments.length !== 0) {
+    throw new TypeError('rebuildConfigCache does not accept caller route facts');
+  }
+  const truth = captureProjectRouteTruth();
+  try {
+    cachedProjectRouteRecords();
+  } catch {
+    return publishConfigCache(truth, true);
+  }
+  return publishConfigCache(truth);
+}
+
+function listProjectRouteCache() {
+  const truth = captureProjectRouteTruth();
+  let cached;
+  try {
+    cached = cachedProjectRouteRecords();
+  } catch {
+    return publishConfigCache(truth, true);
+  }
+  if (
+    cached.digest !== truth.digest
+    || !sameProjectRouteRecords(cached.records, truth.records)
+  ) return publishConfigCache(truth);
+  return cached.records;
 }
 
 function createFilesManuscriptDatabasePort() {
@@ -2511,11 +2615,53 @@ function createFilesManuscriptDatabasePort() {
     throw projectDatabaseError('RECOVERY_REQUIRED', 'Database must be initialized before files runtime construction');
   }
   const entries = new Map();
+  const fullRefreshReceiptRecords = new WeakMap();
+  const fullRefreshReceiptOwner = Object.freeze({});
   let closed = false;
 
   function assertOpen() {
     if (closed) throw projectDatabaseError('RECOVERY_REQUIRED', 'Files database port is closed');
     assertStorageAvailable();
+  }
+
+  function captureFullRefreshTarget(input) {
+    if (
+      input === null
+      || typeof input !== 'object'
+      || Array.isArray(input)
+      || isProxy(input)
+    ) throw new TypeError('inspectFullRefreshTarget input must be a plain data object');
+    const prototype = Object.getPrototypeOf(input);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('inspectFullRefreshTarget input must be a plain data object');
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    const keys = Reflect.ownKeys(descriptors);
+    const target = descriptors.target;
+    if (
+      keys.length !== 1
+      || keys[0] !== 'target'
+      || target?.enumerable !== true
+      || !Object.hasOwn(target, 'value')
+    ) {
+      throw new TypeError(
+        'inspectFullRefreshTarget input.target must be one exact enumerable data property',
+      );
+    }
+    return target.value;
+  }
+
+  function mintFullRefreshReceipt(entry, innerReceipt, target) {
+    const authority = Object.freeze(function fullRefreshDatabaseReceipt() {});
+    fullRefreshReceiptRecords.set(authority, {
+      activeTurn: entry.activeTurn,
+      consumed: false,
+      entry,
+      innerReceipt,
+      owner: fullRefreshReceiptOwner,
+      target,
+    });
+    return authority;
   }
 
   function buildCreationCandidate(input) {
@@ -3212,6 +3358,62 @@ function createFilesManuscriptDatabasePort() {
     projectStore(admission) { return locate(admission).projectStore; },
     inspectProjectionTarget(admission, input) {
       return locate(admission).nativeStore.inspectProjectionTarget(input);
+    },
+    applyAuxiliaryAction(admission, input) {
+      const entry = locate(admission);
+      if (entry.activeTurn === null) {
+        throw projectDatabaseError(
+          'RECOVERY_REQUIRED',
+          'Auxiliary action is outside its admitted writer turn',
+        );
+      }
+      return projectWriteCoordinator.withProjectLogicalRequestSync(
+        entry.filePath,
+        () => entry.nativeStore.applyAuxiliaryAction(input),
+      );
+    },
+    inspectFullRefreshTarget(admission, input) {
+      const entry = locate(admission);
+      if (entry.activeTurn === null) {
+        throw projectDatabaseError(
+          'RECOVERY_REQUIRED',
+          'Full refresh inspection is outside its admitted writer turn',
+        );
+      }
+      const target = captureFullRefreshTarget(input);
+      return projectWriteCoordinator.withProjectLogicalRequestSync(
+        entry.filePath,
+        () => mintFullRefreshReceipt(
+          entry,
+          entry.nativeStore.inspectFullRefreshTarget(Object.freeze({ target })),
+          target,
+        ),
+      );
+    },
+    describeFullRefreshDisposition(admission, authority) {
+      assertOpen();
+      const record = (
+        (typeof authority === 'object' || typeof authority === 'function')
+        && authority !== null
+      ) ? fullRefreshReceiptRecords.get(authority) : undefined;
+      if (record?.owner !== fullRefreshReceiptOwner) {
+        throw new TypeError('full refresh disposition authority is foreign');
+      }
+      const entry = locate(admission);
+      if (record.entry !== entry) {
+        throw new TypeError('full refresh disposition authority is foreign');
+      }
+      if (entry.activeTurn === null || record.activeTurn !== entry.activeTurn) {
+        throw new TypeError('full refresh disposition authority belongs to another writer turn');
+      }
+      if (record.consumed) {
+        throw new TypeError('full refresh disposition authority is already consumed');
+      }
+      record.consumed = true;
+      return entry.nativeStore.describeFullRefreshDisposition(
+        record.innerReceipt,
+        record.target,
+      );
     },
     async withWriterTurn(admission, callback) {
       if (typeof callback !== 'function') throw new TypeError('writer callback is required');
@@ -4033,8 +4235,8 @@ module.exports = {
   enableNativeProject,
   getProjectDb,
   inspectProjectManuscriptRoute,
-  listFilesProjectSummaries,
-  readFilesProjectProductView,
+  listProjectRouteCache,
+  rebuildConfigCache,
   getProjectDbPath,
   openProjectDb,
   closeProjectDb,

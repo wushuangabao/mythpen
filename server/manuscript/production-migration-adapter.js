@@ -16,8 +16,9 @@ const { SQLiteProjectionStore } = require('./projection-store');
 const {
   createCreationDirectoryPlan,
   createProjectRootProbe,
-  ensureCreationDirectories,
+  ensureMigrationDirectories,
   openActivatedProjectRoot,
+  verifyCreationDirectories,
 } = require('./production-project-roots');
 const { ManuscriptRouteStore } = require('./route-store');
 const { ManuscriptStore } = require('./store');
@@ -254,7 +255,7 @@ function createProductionMigrationAdapter({
             databasePort.verifyMigrationSource(state.source);
           },
         });
-        uidCatalog.registerOrdinary(state.childJournal.reservationSource());
+        uidCatalog.registerOrdinary(projectUid, state.childJournal.reservationSource());
         state.manuscriptStore = new ManuscriptStore({
           dataRoot,
           fileBoundary: fileBoundary.readCapability,
@@ -395,9 +396,12 @@ function createProductionMigrationAdapter({
           },
         }),
         directories: Object.freeze({
-          plan({ migrationId: id }) {
+          plan({ migrationId: id, migrationReservation }) {
             const selected = rootProbe.selected();
             if (selected.operationId !== id) throw recoveryError('Migration root probe binding changed');
+            if (selected.lifecycleLockPreflight !== migrationReservation.lifecycleLockPreflight) {
+              throw recoveryError('Migration lifecycle preflight lost reservation identity');
+            }
             state.directoryPlan = createCreationDirectoryPlan({
               dataRoot,
               projectsDir,
@@ -409,20 +413,39 @@ function createProductionMigrationAdapter({
             });
             return state.directoryPlan;
           },
-          async ensure({ directoryPlan }) {
+          async ensure({ directoryPlan, migrationReservation }) {
             if (directoryPlan !== state.directoryPlan) {
               throw recoveryError('Migration directory plan lost object identity');
             }
             const selected = rootProbe.selected();
-            ensureCreationDirectories({
+            const roots = ensureMigrationDirectories({
               dataRoot,
               directoryPlan,
+              lifecycleLockPreflight: migrationReservation.lifecycleLockPreflight,
               projectUid: selected.projectUid,
             });
             ensureChildJournal(selected.projectUid, selected.projectInstanceId);
-            return state.manuscriptStore.enumerateAndClassify(state.roots.projectBinding);
+            return Object.freeze({
+              enumeration: await state.manuscriptStore.enumerateAndClassify(
+                state.roots.projectBinding,
+              ),
+              lifecycleLockReceipt: roots.lifecycleLockReceipt,
+              lifecyclePlatformIdentity: roots.lifecyclePlatformIdentity,
+            });
           },
           cleanup() { throw recoveryError('Automatic migration cleanup is outside the fast Beta'); },
+          verifyExisting(lifecycleLockReceipt) {
+            if (state.directoryPlan === null) {
+              throw recoveryError('Migration directory plan is unavailable for lifecycle verification');
+            }
+            const view = requireJournal().read(migrationId);
+            return verifyCreationDirectories({
+              dataRoot,
+              directoryPlan: state.directoryPlan,
+              lifecycleLockReceipt,
+              projectUid: view.projectUid,
+            });
+          },
         }),
         source: Object.freeze({
           capture({ sourceBasis, migrationReservation, readOnly }) {
@@ -478,6 +501,15 @@ function createProductionMigrationAdapter({
             return databasePort.activateMigration({
               ...activationInput,
               routeCas: activationInput.routeEvidence.routeCas,
+            });
+          },
+          verifyActivationAfter({ migrationContext }) {
+            return databasePort.inspectMigrationActivation({
+              migrationId: migrationContext.migrationId,
+              projectUid: migrationContext.projectUid,
+              projectInstanceId: migrationContext.projectInstanceId,
+              sourcePath: migrationContext.sourcePath,
+              targetGeneration: migrationContext.targetGeneration,
             });
           },
         }),

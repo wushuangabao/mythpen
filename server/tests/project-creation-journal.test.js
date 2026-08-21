@@ -25,6 +25,7 @@ const {
   creationJournalAuthority,
   deepFreeze,
   emptyDirectoryPlan,
+  lifecycleLockReceipt,
   physicalIdentity,
   sha256File,
 } = require('./fixtures/project-creation-crash');
@@ -142,6 +143,8 @@ test('fresh creation and same-logical-request retry publish the exact empty two-
     probe: 0,
     publish: 0,
     uuid: 0,
+    verifyLifecycle: 0,
+    verifyActivation: 0,
   };
   const uidReservations = creationUidService(journals, calls);
   const stagedClosures = [];
@@ -156,6 +159,7 @@ test('fresh creation and same-logical-request retry publish the exact empty two-
     finalizeCandidate(...args) { return empty.store.finalizeCandidate(...args); },
   });
   const projectionStore = new SQLiteProjectionStore();
+  const readyReceipt = lifecycleLockReceipt(dataRoot);
   const service = new ProjectCreationService({
     uidReservations,
     journals: Object.freeze({
@@ -182,7 +186,19 @@ test('fresh creation and same-logical-request retry publish the exact empty two-
     }),
     directories: Object.freeze({
       plan() { calls.plan += 1; return emptyDirectoryPlan(dataRoot); },
-      async ensure() { calls.ensure += 1; return empty.enumeration; },
+      async ensure() {
+        calls.ensure += 1;
+        return Object.freeze({
+          enumeration: empty.enumeration,
+          lifecycleLockReceipt: readyReceipt,
+          lifecyclePlatformIdentity: readyReceipt.lifecyclePlatformIdentity,
+        });
+      },
+      verifyExisting(receipt) {
+        calls.verifyLifecycle += 1;
+        assert.deepEqual(receipt, readyReceipt);
+        return receipt.lifecyclePlatformIdentity;
+      },
     }),
     store,
     projection: Object.freeze({
@@ -265,6 +281,10 @@ test('fresh creation and same-logical-request retry publish the exact empty two-
         assert.ok(creationCas);
         return Object.freeze({ disposition: 'after', generation: 1, route: 'files' });
       },
+      async verifyActivationAfter() {
+        calls.verifyActivation += 1;
+        return Object.freeze({ disposition: 'after', generation: 1, route: 'files' });
+      },
     }),
     route: Object.freeze({
       prepareAbsentInstall(context) { return Object.freeze({ context }); },
@@ -290,6 +310,8 @@ test('fresh creation and same-logical-request retry publish the exact empty two-
   assert.equal(calls.publish, 1);
   assert.equal(calls.build, 1);
   assert.equal(calls.activate, 1);
+  assert.equal(calls.verifyActivation, 1);
+  assert.equal(calls.verifyLifecycle, 4);
   assert.equal(stagedClosures.length, 1);
   assert.deepEqual(
     stagedClosures[0].map((member) => member.ref.role).sort(),
@@ -563,16 +585,39 @@ test('journal checksum, binding, and one-shot creation CAS reject tampering with
     baseGeneration: 0,
     targetGeneration: 1,
   }));
+  await assert.rejects(journal.recordProjectControlReady(authority, deepFreeze({
+    childJournalId: CHILD_JOURNAL_ID,
+    childReservation: { version: 1, childJournalId: CHILD_JOURNAL_ID },
+    closureDigest: DIGEST_A,
+    logicalRequestId: 'create-request-a',
+    lifecycleLockReceipt: lifecycleLockReceipt(
+      dataRoot,
+      PROJECT_UID,
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    ),
+    partialManifest: { version: 1, members: [] },
+    projectionBasisDigest: DIGEST_B,
+    targetBindingDigest: DIGEST_C,
+    targetGeneration: 1,
+  })), (error) => error?.code === 'RECOVERY_REQUIRED');
   authority = await journal.recordProjectControlReady(authority, deepFreeze({
     childJournalId: CHILD_JOURNAL_ID,
     childReservation: { version: 1, childJournalId: CHILD_JOURNAL_ID },
     closureDigest: DIGEST_A,
     logicalRequestId: 'create-request-a',
+    lifecycleLockReceipt: lifecycleLockReceipt(dataRoot),
     partialManifest: { version: 1, members: [] },
     projectionBasisDigest: DIGEST_B,
     targetBindingDigest: DIGEST_C,
     targetGeneration: 1,
   }));
+  const readyView = journal.read();
+  assert.equal(
+    readyView.lifecyclePlatformIdentity,
+    readyView.lifecycleLockReceipt.lifecyclePlatformIdentity,
+  );
+  assert.ok(Object.isFrozen(readyView.lifecycleLockReceipt));
+  assert.ok(Object.isFrozen(readyView.lifecyclePlatformIdentity));
   authority = await journal.recordFilePublicationStarted(authority, deepFreeze({
     manifest: { version: 1, members: [] },
   }));

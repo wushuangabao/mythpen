@@ -4,6 +4,10 @@ const { createHash } = require('node:crypto');
 const path = require('node:path');
 
 const { assertCanonicalUuid, manuscriptError } = require('./contracts');
+const {
+  MANUSCRIPT_LIFECYCLE_LOCK_DERIVATION,
+  assertManuscriptLifecycleLockReceipt,
+} = require('./lifecycle-lock');
 const { validateCreationReservationManifest } = require('./uid-reservation');
 const { faultPoint } = require('../testing/fault-injection');
 
@@ -168,7 +172,7 @@ function snapshotDirectoryPlan(value, record, creationReservation) {
     'digest',
     'fileAssetsRoot',
     'finalDatabasePath',
-    'lifecycleLockPath',
+    'lifecycleLockDerivation',
     'projectControlRoot',
   ], 'directoryPlan');
   const finalDatabasePath = canonicalPath(
@@ -187,10 +191,6 @@ function snapshotDirectoryPlan(value, record, creationReservation) {
     descriptors.fileAssetsRoot.value,
     'directoryPlan.fileAssetsRoot',
   );
-  const lifecycleLockPath = canonicalPath(
-    descriptors.lifecycleLockPath.value,
-    'directoryPlan.lifecycleLockPath',
-  );
   const expectedControlRoot = path.join(
     record.dataRoot,
     'control',
@@ -206,12 +206,12 @@ function snapshotDirectoryPlan(value, record, creationReservation) {
       creationReservation.projectReservation.uid,
     )
     || fileAssetsRoot !== path.join(expectedControlRoot, 'file-assets')
-    || lifecycleLockPath !== `${finalDatabasePath}.lifecycle.lock`
+    || descriptors.lifecycleLockDerivation.value !== MANUSCRIPT_LIFECYCLE_LOCK_DERIVATION
   ) throw recoveryRequired('project creation directory plan is not controlled');
   return Object.freeze({
     digest: assertDigest(descriptors.digest.value, 'directoryPlan.digest'),
     finalDatabasePath,
-    lifecycleLockPath,
+    lifecycleLockDerivation: MANUSCRIPT_LIFECYCLE_LOCK_DERIVATION,
     projectControlRoot,
     articleRoot,
     fileAssetsRoot,
@@ -422,6 +422,9 @@ function stateView(record, aggregate) {
     reservationDigest: reservation.reservationDigest,
     creationReservation: reservation.creationReservation,
     directoryPlan: reservation.directoryPlan,
+    lifecycleLockReceipt: control?.data.lifecycleLockReceipt ?? null,
+    lifecyclePlatformIdentity:
+      control?.data.lifecycleLockReceipt?.lifecyclePlatformIdentity ?? null,
     childReservation: control?.data.childReservation ?? null,
     manifest: pin?.data.manifest ?? null,
     databaseCandidate: database?.data ?? null,
@@ -682,6 +685,7 @@ class ProjectCreationJournal {
       'childJournalId',
       'childReservation',
       'closureDigest',
+      'lifecycleLockReceipt',
       'logicalRequestId',
       'partialManifest',
       'projectionBasisDigest',
@@ -689,8 +693,15 @@ class ProjectCreationJournal {
       'targetGeneration',
     ], 'project control ready input');
     const reservation = reservationOf(aggregate);
+    const lifecycleLockReceipt = snapshotPlain(
+      descriptors.lifecycleLockReceipt.value,
+      'lifecycleLockReceipt',
+    );
+    assertManuscriptLifecycleLockReceipt(lifecycleLockReceipt);
     if (
-      descriptors.logicalRequestId.value !== reservation.logicalRequestId
+      lifecycleLockReceipt.lifecyclePlatformIdentity.canonicalRealControlDirectory
+        !== reservation.directoryPlan.projectControlRoot
+      || descriptors.logicalRequestId.value !== reservation.logicalRequestId
       || descriptors.targetGeneration.value !== reservation.targetGeneration
     ) throw recoveryRequired('project control binding differs from reservation');
     append(record, 'project_control_ready', aggregate.state, {
@@ -703,6 +714,7 @@ class ProjectCreationJournal {
         'childReservation',
       ),
       closureDigest: assertDigest(descriptors.closureDigest.value, 'closureDigest'),
+      lifecycleLockReceipt,
       logicalRequestId: reservation.logicalRequestId,
       partialManifest: snapshotPlain(
         descriptors.partialManifest.value,
@@ -766,7 +778,6 @@ class ProjectCreationJournal {
     ) throw new TypeError('creation candidate must be side-by-side with its absent final path');
     if (
       finalPath !== directoryPlan.finalDatabasePath
-      || candidatePath === directoryPlan.lifecycleLockPath
     ) throw recoveryRequired('project creation database candidate differs from directory plan');
     append(record, 'database_candidate_ready', aggregate.state, {
       candidatePath,

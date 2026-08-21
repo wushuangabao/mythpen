@@ -54,6 +54,11 @@ const CHAPTER_SIDECAR_KEYS = Object.freeze([
 ]);
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/u;
 const CANONICAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const REVISION_RESOLUTION_KEYS = Object.freeze([
+  'revisionId', 'chapterId', 'chapterUid', 'from', 'to',
+  'baseContentSha256', 'proposedContentSha256', 'acceptedContentSha256',
+  'decisionsSha256', 'logicalRequestId', 'commandKind', 'commandDigest',
+]);
 const NOOP_RESULT = Object.freeze({ state: 'noop' });
 
 function invalid(message) {
@@ -397,6 +402,46 @@ function snapshotTurn(turnContext) {
   });
 }
 
+function snapshotRevisionResolution(value) {
+  const snapshot = snapshotPlainData(value, 'revisionResolution');
+  const descriptors = exactDescriptors(
+    snapshot,
+    REVISION_RESOLUTION_KEYS,
+    'revisionResolution',
+  );
+  for (const key of ['revisionId', 'chapterId']) {
+    const current = descriptorValue(descriptors, key);
+    if (!Number.isSafeInteger(current) || current <= 0 || Object.is(current, -0)) {
+      invalid(`revisionResolution.${key} must be a positive safe integer`);
+    }
+  }
+  assertCanonicalUuid(descriptorValue(descriptors, 'chapterUid'), 'revisionResolution.chapterUid');
+  if (
+    descriptorValue(descriptors, 'from') !== 'pending'
+    || descriptorValue(descriptors, 'to') !== 'accepted'
+  ) invalid('revisionResolution transition is invalid');
+  for (const key of [
+    'baseContentSha256',
+    'proposedContentSha256',
+    'acceptedContentSha256',
+    'decisionsSha256',
+    'commandDigest',
+  ]) canonicalDigest(descriptorValue(descriptors, key), `revisionResolution.${key}`);
+  const commandKind = descriptorValue(descriptors, 'commandKind');
+  if (commandKind !== 'revision.accept' && commandKind !== 'revision.finalize') {
+    invalid('revisionResolution.commandKind is invalid');
+  }
+  const logicalRequestId = descriptorValue(descriptors, 'logicalRequestId');
+  if (
+    typeof logicalRequestId !== 'string'
+    || logicalRequestId.length === 0
+    || logicalRequestId.length > 512
+  ) {
+    invalid('revisionResolution.logicalRequestId must be a non-empty bounded string');
+  }
+  return snapshot;
+}
+
 function requirePort(value, methods, label) {
   if (
     value === null
@@ -406,6 +451,136 @@ function requirePort(value, methods, label) {
     invalid(`${label} is invalid`);
   }
   return value;
+}
+
+function captureDraftConflictIntentAuthority(value) {
+  if (!Object.isFrozen(value)) invalid('draftConflictIntentAuthority must be frozen');
+  const descriptors = exactDescriptors(
+    value,
+    ['assert', 'describe'],
+    'draftConflictIntentAuthority',
+  );
+  for (const key of ['assert', 'describe']) {
+    if (typeof descriptorValue(descriptors, key) !== 'function') {
+      invalid(`draftConflictIntentAuthority.${key} must be a function`);
+    }
+  }
+  return Object.freeze({
+    receiver: value,
+    assert: descriptorValue(descriptors, 'assert'),
+    describe: descriptorValue(descriptors, 'describe'),
+  });
+}
+
+function draftConflictApplyDescriptor(authority, intent) {
+  if (intent === null || typeof intent !== 'object') {
+    invalid('draft conflict apply intent must be opaque');
+  }
+  if (Reflect.apply(authority.assert, authority.receiver, [intent]) !== intent) {
+    invalid('draft conflict intent authority must preserve the original intent');
+  }
+  const value = Reflect.apply(authority.describe, authority.receiver, [intent]);
+  if (!Object.isFrozen(value)) invalid('draft conflict apply descriptor must be frozen');
+  const descriptors = exactDescriptors(value, [
+    'kind',
+    'conflictId',
+    'decisionEpoch',
+    'childJournalId',
+    'externalRawSha256',
+    'baseGeneration',
+    'targetGeneration',
+    'resource',
+  ], 'draft conflict apply descriptor');
+  if (descriptorValue(descriptors, 'kind') !== 'apply') {
+    invalid('draft conflict intent must be apply');
+  }
+  const baseGeneration = descriptorValue(descriptors, 'baseGeneration');
+  const targetGeneration = descriptorValue(descriptors, 'targetGeneration');
+  const decisionEpoch = descriptorValue(descriptors, 'decisionEpoch');
+  if (
+    !Number.isSafeInteger(baseGeneration)
+    || baseGeneration < 0
+    || !Number.isSafeInteger(targetGeneration)
+    || targetGeneration !== baseGeneration + 1
+    || !Number.isSafeInteger(decisionEpoch)
+    || decisionEpoch < 0
+  ) invalid('draft conflict apply generations are invalid');
+  const resourceValue = descriptorValue(descriptors, 'resource');
+  if (!Object.isFrozen(resourceValue)) invalid('draft conflict apply resource must be frozen');
+  const resource = exactDescriptors(
+    resourceValue,
+    ['domain', 'kind', 'uid'],
+    'draft conflict apply resource',
+  );
+  const resourceKind = descriptorValue(resource, 'kind');
+  const domain = descriptorValue(resource, 'domain');
+  if (!['chapter', 'volume', 'manuscript'].includes(resourceKind)) {
+    invalid('draft conflict apply resource kind is invalid');
+  }
+  if (!['body', 'sidecar', 'volume_metadata', 'structure'].includes(domain)) {
+    invalid('draft conflict apply resource domain is invalid');
+  }
+  return Object.freeze({
+    kind: 'apply',
+    conflictId: assertCanonicalUuid(
+      descriptorValue(descriptors, 'conflictId'),
+      'draft conflict_id',
+    ),
+    decisionEpoch,
+    childJournalId: assertCanonicalUuid(
+      descriptorValue(descriptors, 'childJournalId'),
+      'draft conflict child_journal_id',
+    ),
+    externalRawSha256: canonicalDigest(
+      descriptorValue(descriptors, 'externalRawSha256'),
+      'draft conflict externalRawSha256',
+    ),
+    baseGeneration,
+    targetGeneration,
+    resource: Object.freeze({
+      kind: resourceKind,
+      uid: assertCanonicalUuid(descriptorValue(resource, 'uid'), 'draft conflict resource uid'),
+      domain,
+    }),
+  });
+}
+
+function assertDraftConflictCommand(command, descriptor, turn) {
+  if (
+    descriptor.childJournalId !== turn.journalId
+    || descriptor.baseGeneration !== turn.baseGeneration
+    || descriptor.targetGeneration !== turn.targetGeneration
+  ) invalid('draft conflict apply intent does not match its production turn');
+  const resource = descriptor.resource;
+  let matches = false;
+  if (resource.domain === 'body') {
+    matches = (
+      (command.kind === 'chapter.replace_body'
+        && command.bodyRef.chapterUid === resource.uid)
+      || (command.kind === 'chapter.replace_body_and_sidecar'
+        && command.bodyRef.chapterUid === resource.uid)
+    ) && resource.kind === 'chapter';
+  } else if (resource.domain === 'sidecar') {
+    matches = (
+      (command.kind === 'chapter.patch_sidecar'
+        && command.sidecarRef.chapterUid === resource.uid)
+      || (command.kind === 'chapter.replace_body_and_sidecar'
+        && command.sidecarRef.chapterUid === resource.uid)
+    ) && resource.kind === 'chapter';
+  } else if (resource.domain === 'volume_metadata') {
+    matches = command.kind === 'volume.patch_metadata'
+      && resource.kind === 'volume'
+      && command.volumeRef.volumeUid === resource.uid;
+  } else if (resource.domain === 'structure') {
+    if (command.kind === 'chapter.move' || command.kind === 'chapter.delete') {
+      matches = resource.kind === 'chapter' && command.chapterUid === resource.uid;
+    } else if (command.kind === 'volume.delete') {
+      matches = resource.kind === 'volume' && command.volumeUid === resource.uid;
+    } else if (command.kind === 'chapter.reorder' || command.kind === 'volume.reorder') {
+      matches = resource.kind === 'manuscript' && resource.uid === turn.currentProjection.projectUid;
+    }
+  }
+  if (!matches) invalid('saved draft mutation does not match its conflict resource domain');
 }
 
 function recoveryRequired(reason) {
@@ -653,13 +828,20 @@ function reservedIdentityPlan(turn, identityReservation) {
 }
 
 function createL2ManuscriptService(options) {
+  const hasDraftConflictAuthority = Object.hasOwn(options, 'draftConflictIntentAuthority');
   const optionDescriptors = exactDescriptors(options, [
     'manuscriptStore',
     'fileJournal',
     'projectionStore',
     'uidReservation',
     'uidPathProbe',
+    ...(hasDraftConflictAuthority ? ['draftConflictIntentAuthority'] : []),
   ], 'L2 service options');
+  const draftConflictIntentAuthority = hasDraftConflictAuthority
+    ? captureDraftConflictIntentAuthority(
+      descriptorValue(optionDescriptors, 'draftConflictIntentAuthority'),
+    )
+    : null;
   const store = requirePort(
     descriptorValue(optionDescriptors, 'manuscriptStore'),
     ['buildClosure', 'finalizeCandidate'],
@@ -878,6 +1060,74 @@ function createL2ManuscriptService(options) {
     return createResult(finalLookup);
   }
 
+  async function executeNonCreate(
+    safeCommand,
+    turn,
+    revisionResolution = null,
+    parent = null,
+  ) {
+    const buildResult = await store.buildClosure(
+      turn.fileSnapshot,
+      safeCommand,
+      turn.ignoredLedger,
+      null,
+    );
+    if (
+      buildResult === null
+      || typeof buildResult !== 'object'
+      || !Array.isArray(buildResult.closure)
+      || !Object.isFrozen(buildResult.closure)
+    ) {
+      invalid('buildClosure returned an invalid closure result');
+    }
+    if (buildResult.candidateTemplate?.projectUid !== turn.currentProjection.projectUid) {
+      invalid('file snapshot project does not match currentProjection');
+    }
+    if (buildResult.closure.length === 0) {
+      if (revisionResolution !== null) {
+        recoveryRequired('revision resolution did not produce an article publication closure');
+      }
+      return NOOP_RESULT;
+    }
+
+    const staged = await journal.stageAssets({
+      journalId: turn.journalId,
+      logicalRequestId: turn.logicalRequestId,
+      baseGeneration: turn.baseGeneration,
+      targetGeneration: turn.targetGeneration,
+      basisDigest: turn.basisDigest,
+      closure: buildResult.closure,
+      identityReservation: null,
+      parent,
+    });
+    const candidate = store.finalizeCandidate(buildResult, staged.stagedAfterFacts);
+    const targetInput = {
+      candidate,
+      currentProjection: turn.currentProjection,
+      targetGeneration: turn.targetGeneration,
+      projectedAt: turn.projectedAt,
+      ignoredLedger: turn.ignoredLedger,
+      localIdentityPlan: turn.localIdentityPlan,
+      ...(revisionResolution === null ? {} : { revisionResolution }),
+    };
+    const projectionTarget = revisionResolution === null
+      ? projection.buildTarget(targetInput)
+      : (() => {
+        if (typeof projection.buildRevisionTarget !== 'function') {
+          recoveryRequired('revision projection target authority is unavailable');
+        }
+        return projection.buildRevisionTarget(targetInput);
+      })();
+    const bound = await journal.bindTarget({
+      stagedAssets: staged.stagedAssets,
+      projectionTarget,
+    });
+    await journal.prepare({ preparedAssets: bound.preparedAssets });
+    await journal.publishFiles(turn.journalId);
+    await journal.commitProjection(turn.journalId);
+    return journal.complete(turn.journalId);
+  }
+
   const service = Object.freeze({
     bindWriteIntent(command) {
       const safeCommand = snapshotMutation(command);
@@ -895,6 +1145,35 @@ function createL2ManuscriptService(options) {
     writeIntentAuthority() {
       return intentAuthority;
     },
+    async executeRevisionResolution(input, turnContext) {
+      const descriptors = exactDescriptors(
+        input,
+        ['command', 'revisionResolution'],
+        'revision resolution input',
+      );
+      const safeCommand = snapshotMutation(descriptorValue(descriptors, 'command'));
+      if (safeCommand.kind !== 'chapter.replace_body_and_sidecar') {
+        invalid('revision resolution must publish one chapter body and sidecar');
+      }
+      const revisionResolution = snapshotRevisionResolution(
+        descriptorValue(descriptors, 'revisionResolution'),
+      );
+      const turn = snapshotTurn(turnContext);
+      const bodyRef = assertControlledFileRef(safeCommand.bodyRef);
+      const sidecarRef = assertControlledFileRef(safeCommand.sidecarRef);
+      const patch = exactDescriptors(safeCommand.patch, ['status'], 'revision resolution patch');
+      if (
+        bodyRef.role !== 'chapter_body'
+        || sidecarRef.role !== 'chapter_sidecar'
+        || bodyRef.projectUid !== turn.currentProjection.projectUid
+        || sidecarRef.projectUid !== turn.currentProjection.projectUid
+        || bodyRef.chapterUid !== revisionResolution.chapterUid
+        || sidecarRef.chapterUid !== revisionResolution.chapterUid
+        || descriptorValue(patch, 'status') !== 'accepted'
+        || revisionResolution.logicalRequestId !== turn.logicalRequestId
+      ) invalid('revision resolution command does not match its selected chapter');
+      return executeNonCreate(safeCommand, turn, revisionResolution);
+    },
     async execute(writeIntent, turnContext) {
       const intent = ownedIntent.call(intentAuthority, writeIntent);
       const safeCommand = intent.command;
@@ -905,52 +1184,30 @@ function createL2ManuscriptService(options) {
         return executeCreate(safeCommand, intent.descriptor, turn);
       }
 
-      const buildResult = await store.buildClosure(
-        turn.fileSnapshot,
-        safeCommand,
-        turn.ignoredLedger,
-        null,
+      return executeNonCreate(safeCommand, turn);
+    },
+    async executeDraftConflict(writeIntent, turnContext, draftConflictIntent) {
+      if (draftConflictIntentAuthority === null) {
+        invalid('draft conflict L2 authority is unavailable');
+      }
+      const intent = ownedIntent.call(intentAuthority, writeIntent);
+      if (intent.descriptor.family !== 'non_create') {
+        invalid('draft conflict cannot execute a create intent');
+      }
+      const descriptor = draftConflictApplyDescriptor(
+        draftConflictIntentAuthority,
+        draftConflictIntent,
       );
-      if (
-        buildResult === null
-        || typeof buildResult !== 'object'
-        || !Array.isArray(buildResult.closure)
-        || !Object.isFrozen(buildResult.closure)
-      ) {
-        invalid('buildClosure returned an invalid closure result');
-      }
-      if (buildResult.candidateTemplate?.projectUid !== turn.currentProjection.projectUid) {
-        invalid('file snapshot project does not match currentProjection');
-      }
-      if (buildResult.closure.length === 0) return NOOP_RESULT;
-
-      const staged = await journal.stageAssets({
-        journalId: turn.journalId,
-        logicalRequestId: turn.logicalRequestId,
-        baseGeneration: turn.baseGeneration,
-        targetGeneration: turn.targetGeneration,
-        basisDigest: turn.basisDigest,
-        closure: buildResult.closure,
-        identityReservation: null,
-        parent: null,
-      });
-      const candidate = store.finalizeCandidate(buildResult, staged.stagedAfterFacts);
-      const projectionTarget = projection.buildTarget({
-        candidate,
-        currentProjection: turn.currentProjection,
-        targetGeneration: turn.targetGeneration,
-        projectedAt: turn.projectedAt,
-        ignoredLedger: turn.ignoredLedger,
-        localIdentityPlan: turn.localIdentityPlan,
-      });
-      const bound = await journal.bindTarget({
-        stagedAssets: staged.stagedAssets,
-        projectionTarget,
-      });
-      await journal.prepare({ preparedAssets: bound.preparedAssets });
-      await journal.publishFiles(turn.journalId);
-      await journal.commitProjection(turn.journalId);
-      return journal.complete(turn.journalId);
+      const turn = snapshotTurn(turnContext);
+      const safeCommand = intent.command;
+      validateStructuralCommandAgainstBasis(safeCommand, turn);
+      assertDraftConflictCommand(safeCommand, descriptor, turn);
+      return executeNonCreate(
+        safeCommand,
+        turn,
+        null,
+        Object.freeze({ kind: 'draft_conflict', journalId: descriptor.conflictId }),
+      );
     },
   });
   return service;

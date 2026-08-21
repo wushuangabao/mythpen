@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { openControlStore } = require('../control-store');
-const { saveContinuation } = require('../ai-continue-save');
+const { saveContinuation, saveFilesContinuation } = require('../ai-continue-save');
 const { canonicalDatabasePath } = require('../sqljs-atomic-store');
 const { FAULT_POINTS, withFaults } = require('../testing/fault-injection');
 const { withRawManuscriptSetup } = require('./fixtures/raw-manuscript-setup');
@@ -231,4 +231,82 @@ test('continuation saving rejects missing and abnormal model completion reasons 
     );
     assert.equal(opened, false);
   }
+});
+
+test('files continuation replaces the generation-start body through one stable-UID runtime write', async () => {
+  const projectUid = '11111111-1111-4111-8111-111111111111';
+  const chapterUid = '22222222-2222-4222-8222-222222222222';
+  const baseWitness = Object.freeze({
+    expectedDataVersion: 7,
+    generation: 19,
+    rawSha256: bodyHash('Existing'),
+    sidecarRawSha256: bodyHash('{}'),
+  });
+  const writes = [];
+  const runtime = Object.freeze({
+    async write(selector, request) {
+      writes.push({ selector, request });
+      return Object.freeze({ state: 'committed', generation: 20 });
+    },
+  });
+
+  const result = await saveFilesContinuation({
+    runtime,
+    projectUid,
+    chapter: Object.freeze({
+      chapter_uid: chapterUid,
+      content: 'Existing',
+      data_version: 7,
+    }),
+    baseWitness,
+    continuation: 'Continuation',
+    finishReason: 'stop',
+    requestId: 'ai-continue-request-1',
+  });
+
+  assert.deepEqual(writes, [{
+    selector: { projectUid },
+    request: {
+      requestId: 'ai-continue-request-1',
+      baseWitness,
+      command: {
+        kind: 'chapter.replace_body',
+        chapterUid,
+        expected_data_version: 7,
+        content: 'Existing\n\nContinuation',
+      },
+    },
+  }]);
+  assert.deepEqual(result, {
+    chapterUid,
+    content: 'Existing\n\nContinuation',
+    wordCount: 'ExistingContinuation'.length,
+    dataVersion: 8,
+  });
+});
+
+test('files continuation validates completion before invoking runtime write', async () => {
+  let writes = 0;
+  await assert.rejects(
+    saveFilesContinuation({
+      runtime: { async write() { writes += 1; } },
+      projectUid: '11111111-1111-4111-8111-111111111111',
+      chapter: {
+        chapter_uid: '22222222-2222-4222-8222-222222222222',
+        content: 'Existing',
+        data_version: 7,
+      },
+      baseWitness: {
+        expectedDataVersion: 7,
+        generation: 19,
+        rawSha256: bodyHash('Existing'),
+        sidecarRawSha256: bodyHash('{}'),
+      },
+      continuation: 'Partial',
+      finishReason: 'max_tokens',
+      requestId: 'ai-continue-request-2',
+    }),
+    (error) => error.code === 'continuation_output_limit',
+  );
+  assert.equal(writes, 0);
 });

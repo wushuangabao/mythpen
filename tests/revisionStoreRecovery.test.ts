@@ -80,6 +80,36 @@ function json(data: unknown, status = 200) {
   })
 }
 
+test('stale revision history is never exposed as an actionable client mutation', async () => {
+  const originalFetch = globalThis.fetch
+  const project = 'revision-stale-history'
+  const chapter = activateChapter(project)
+  useRevisionStore.setState({
+    revision: { ...revision(chapter.id), status: 'stale' },
+    revisionProject: project,
+    loading: false,
+    saving: false,
+    error: null,
+  })
+  let requests = 0
+  globalThis.fetch = (async () => {
+    requests++
+    throw new Error('stale revision must not call the API')
+  }) as typeof fetch
+
+  try {
+    await useRevisionStore.getState().decide(project, 41, 'change-0', 'accepted')
+    await useRevisionStore.getState().finalize(project, 41)
+    await useRevisionStore.getState().acceptAll(project, 41)
+    await useRevisionStore.getState().rejectAll(project, 41)
+    assert.equal(requests, 0)
+    assert.equal(useRevisionStore.getState().saving, false)
+    assert.equal(useRevisionStore.getState().revision?.status, 'stale')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('active revision is kept until the authoritative chapter reload completes', async () => {
   const originalFetch = globalThis.fetch
   const project = 'revision-disappeared-before-ack'

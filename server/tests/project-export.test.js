@@ -6,6 +6,7 @@ const test = require('node:test');
 const {
   publishGeneratedProjectFile,
   publishOpaqueDiagnosticsExport,
+  publishProjectExport,
 } = require('../project-export');
 
 function deferred() {
@@ -13,6 +14,296 @@ function deferred() {
   const promise = new Promise((complete) => { resolve = complete; });
   return { promise, resolve };
 }
+
+const PROJECT_UID = '70000000-0000-4000-8000-000000000001';
+const VOLUME_UID = '71000000-0000-4000-8000-000000000001';
+const CHAPTER_UID = '72000000-0000-4000-8000-000000000001';
+const UNASSIGNED_CHAPTER_UID = '72000000-0000-4000-8000-000000000002';
+
+function exportChapter(overrides = {}) {
+  return Object.freeze({
+    id: 11,
+    chapter_uid: CHAPTER_UID,
+    data_version: 2,
+    volume_id: 3,
+    num: 1,
+    title: '抵达',
+    outline: '第一章大纲',
+    content: '# 星港\n\n第一段。',
+    summary: '抵达星港',
+    word_count: 7,
+    status: 'accepted',
+    cognitive_frame: '',
+    emotional_anchor: '',
+    world_texture: '',
+    concrete_mystery: '',
+    interpersonal_tension: '',
+    body_raw_sha256: 'a'.repeat(64),
+    sidecar_raw_sha256: 'b'.repeat(64),
+    chapter_position: 1,
+    manuscript_position: 1,
+    ...overrides,
+  });
+}
+
+function exportSnapshot(overrides = {}) {
+  const assigned = exportChapter();
+  const unassigned = exportChapter({
+    id: 12,
+    chapter_uid: UNASSIGNED_CHAPTER_UID,
+    volume_id: null,
+    num: 2,
+    title: '漂流',
+    outline: '',
+    content: '第二段。',
+    summary: '',
+    word_count: 4,
+    chapter_position: 1,
+    manuscript_position: 2,
+  });
+  return Object.freeze({
+    metadata: Object.freeze({
+      name: '星海纪事',
+      author_name: '作者',
+      description: '一段旅程',
+      project_uid: PROJECT_UID,
+      genres: Object.freeze(['sci-fi']),
+    }),
+    volumes: Object.freeze([Object.freeze({
+      id: 3,
+      volume_uid: VOLUME_UID,
+      sort_order: 1,
+      title: '启航',
+      summary: '第一卷',
+      chapters: Object.freeze([assigned]),
+    })]),
+    chapters: Object.freeze([assigned, unassigned]),
+    projectionGeneration: 7,
+    ...overrides,
+  });
+}
+
+test('files export renderer publishes TXT, Markdown, and HTML from one exact frozen snapshot', async (t) => {
+  const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-files-export-'));
+  t.after(() => fs.rmSync(exportRoot, { recursive: true, force: true }));
+  const snapshot = exportSnapshot();
+  const expected = [
+    ['txt', 'text/plain; charset=utf-8'],
+    ['md', 'text/markdown; charset=utf-8'],
+    ['html', 'text/html; charset=utf-8'],
+  ];
+
+  for (const [format, mime] of expected) {
+    const result = await publishProjectExport(Object.freeze({
+      snapshot,
+      exportRoot,
+      exportName: 'files-project',
+      options: Object.freeze({ format }),
+      assertCurrent() {},
+    }));
+    const finalPath = path.join(exportRoot, 'files-project', `files-project.${format}`);
+    assert.equal(result.filePath, finalPath);
+    assert.deepEqual(result.manifest, {
+      format,
+      mime,
+      filename: `files-project.${format}`,
+      wordCount: 11,
+      chapterCount: 2,
+      projectionGeneration: 7,
+    });
+    assert.equal(Object.isFrozen(result), true);
+    assert.equal(Object.isFrozen(result.manifest), true);
+    assert.deepEqual(result.bytes, fs.readFileSync(finalPath));
+    assert.match(result.bytes.toString('utf8'), /星海纪事/);
+    assert.match(result.bytes.toString('utf8'), /第1章 抵达/);
+    assert.match(result.bytes.toString('utf8'), /第2章 漂流/);
+  }
+
+  const txt = fs.readFileSync(path.join(exportRoot, 'files-project', 'files-project.txt'), 'utf8');
+  assert.match(txt, /启航/);
+  assert.match(txt, /未分卷/);
+  assert.doesNotMatch(txt, /^# 星港$/m);
+  const markdown = fs.readFileSync(path.join(exportRoot, 'files-project', 'files-project.md'), 'utf8');
+  assert.match(markdown, /^# 星海纪事$/m);
+  assert.match(markdown, /^## 第1章 抵达$/m);
+  const html = fs.readFileSync(path.join(exportRoot, 'files-project', 'files-project.html'), 'utf8');
+  assert.match(html, /<!DOCTYPE html>/);
+  assert.match(html, /作者 著/);
+  assert.deepEqual(
+    fs.readdirSync(path.join(exportRoot, 'files-project')).sort(),
+    ['files-project.html', 'files-project.md', 'files-project.txt'],
+  );
+});
+
+test('files export rejects non-exact, mutable, accessor, prototype, and sparse snapshots before publication', async (t) => {
+  const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-files-export-invalid-'));
+  t.after(() => fs.rmSync(exportRoot, { recursive: true, force: true }));
+  const valid = exportSnapshot();
+  let getterCalls = 0;
+  const accessorSnapshot = {
+    metadata: valid.metadata,
+    volumes: valid.volumes,
+    chapters: valid.chapters,
+  };
+  Object.defineProperty(accessorSnapshot, 'projectionGeneration', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return 7;
+    },
+  });
+  Object.freeze(accessorSnapshot);
+  const inheritedSnapshot = Object.assign(Object.create({ hidden: true }), valid);
+  Object.freeze(inheritedSnapshot);
+  const sparseVolumes = [];
+  sparseVolumes.length = 1;
+  Object.freeze(sparseVolumes);
+  const sparseSnapshot = Object.freeze({ ...valid, volumes: sparseVolumes });
+  const mutableSnapshot = { ...valid };
+  const extraSnapshot = Object.freeze({ ...valid, controlledPath: 'manuscripts/private/ch.md' });
+  const accessorChapter = { ...valid.chapters[0] };
+  delete accessorChapter.content;
+  Object.defineProperty(accessorChapter, 'content', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return 'secret';
+    },
+  });
+  Object.freeze(accessorChapter);
+  const accessorChapterSnapshot = Object.freeze({
+    ...valid,
+    volumes: Object.freeze([Object.freeze({
+      ...valid.volumes[0],
+      chapters: Object.freeze([accessorChapter]),
+    })]),
+    chapters: Object.freeze([accessorChapter, valid.chapters[1]]),
+  });
+  const inheritedChapter = Object.assign(Object.create({ inherited: true }), valid.chapters[0]);
+  Object.freeze(inheritedChapter);
+  const inheritedChapterSnapshot = Object.freeze({
+    ...valid,
+    volumes: Object.freeze([Object.freeze({
+      ...valid.volumes[0],
+      chapters: Object.freeze([inheritedChapter]),
+    })]),
+    chapters: Object.freeze([inheritedChapter, valid.chapters[1]]),
+  });
+
+  for (const snapshot of [
+    accessorSnapshot,
+    inheritedSnapshot,
+    accessorChapterSnapshot,
+    inheritedChapterSnapshot,
+    sparseSnapshot,
+    mutableSnapshot,
+    extraSnapshot,
+  ]) {
+    await assert.rejects(
+      publishProjectExport({
+        snapshot,
+        exportRoot,
+        exportName: 'invalid',
+        options: Object.freeze({ format: 'txt' }),
+        assertCurrent() {},
+      }),
+      (error) => error?.code === 'INVALID_EXPORT_SNAPSHOT',
+    );
+  }
+
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(fs.readdirSync(exportRoot), []);
+});
+
+test('files export derives its path and rejects caller path injection or unsupported options', async (t) => {
+  const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-files-export-path-'));
+  t.after(() => fs.rmSync(exportRoot, { recursive: true, force: true }));
+  const base = {
+    snapshot: exportSnapshot(),
+    exportRoot,
+    exportName: 'safe-name',
+    options: Object.freeze({ format: 'txt' }),
+    assertCurrent() {},
+  };
+  let getterCalls = 0;
+  const injected = { ...base };
+  Object.defineProperty(injected, 'finalPath', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return path.join(exportRoot, 'manuscripts', 'private.md');
+    },
+  });
+
+  const invalidRequests = [
+    injected,
+    { ...base, exportName: '../manuscripts/private' },
+    { ...base, exportName: 'safe:manuscript' },
+    { ...base, exportName: 'CON' },
+    { ...base, exportRoot: 'relative/exports' },
+    { ...base, assertCurrent: true },
+    { ...base, assertCurrent: path.join(exportRoot, 'current.json') },
+    { ...base, options: Object.freeze({ format: 'epub' }) },
+    {
+      ...base,
+      options: Object.freeze({
+        format: 'txt',
+        controlledPath: path.join(exportRoot, 'manuscripts', 'private.md'),
+      }),
+    },
+  ];
+  for (const request of invalidRequests) {
+    await assert.rejects(
+      publishProjectExport(request),
+      (error) => error?.code === 'INVALID_EXPORT_REQUEST',
+    );
+  }
+
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(fs.readdirSync(exportRoot), []);
+});
+
+test('files export rechecks project instance and generation after generation and before final publication', async (t) => {
+  const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-files-export-race-'));
+  t.after(() => fs.rmSync(exportRoot, { recursive: true, force: true }));
+  const exportDirectory = path.join(exportRoot, 'race-project');
+  const finalPath = path.join(exportDirectory, 'race-project.txt');
+  fs.mkdirSync(exportDirectory, { recursive: true });
+  fs.writeFileSync(finalPath, 'existing-current-export');
+  let currentInstance = 'instance-a';
+  let currentGeneration = 7;
+  const assertionStarted = deferred();
+  const finishAssertion = deferred();
+  const stale = Object.assign(new Error('export snapshot became stale'), {
+    code: 'EXPORT_SNAPSHOT_STALE',
+  });
+  let assertionInput;
+
+  const publication = publishProjectExport({
+    snapshot: exportSnapshot(),
+    exportRoot,
+    exportName: 'race-project',
+    options: Object.freeze({ format: 'txt' }),
+    async assertCurrent(input) {
+      assertionInput = input;
+      assertionStarted.resolve();
+      await finishAssertion.promise;
+      if (currentInstance !== 'instance-a' || currentGeneration !== input.projectionGeneration) {
+        throw stale;
+      }
+    },
+  });
+  await assertionStarted.promise;
+  currentInstance = 'instance-b';
+  currentGeneration = 8;
+  finishAssertion.resolve();
+
+  await assert.rejects(publication, (error) => error === stale);
+  assert.deepEqual(assertionInput, { projectionGeneration: 7 });
+  assert.equal(Object.isFrozen(assertionInput), true);
+  assert.equal(fs.readFileSync(finalPath, 'utf8'), 'existing-current-export');
+  assert.deepEqual(fs.readdirSync(exportDirectory), ['race-project.txt']);
+});
 
 test('generated exports publish only while their starting project incarnation is current', async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mythpen-project-export-'));

@@ -89,6 +89,7 @@ function harness({
     createOwner: 0,
     freshnessAdmit: 0,
     freshnessClose: 0,
+    freshnessOrphanStart: 0,
     freshnessStart: 0,
     operation: 0,
     registry: 0,
@@ -152,6 +153,16 @@ function harness({
     async start(owner, exactIdentity) {
       calls.freshnessStart += 1;
       events.push('start');
+      const ownerRecord = defaultOwnerRecords.get(owner);
+      assert.ok(ownerRecord);
+      assert.equal(ownerRecord.identity, exactIdentity);
+      assert.equal(ownerRecord.state, 'inert');
+      await start?.(owner, exactIdentity);
+      ownerRecord.state = 'active';
+    },
+    async startOrphan(owner, exactIdentity) {
+      calls.freshnessOrphanStart += 1;
+      events.push('start:orphan');
       const ownerRecord = defaultOwnerRecords.get(owner);
       assert.ok(ownerRecord);
       assert.equal(ownerRecord.identity, exactIdentity);
@@ -246,6 +257,7 @@ test('constructor and selector validation fail before registry, lease, verifier,
     freshnessLifecycle: {
       createOwner() {},
       start() {},
+      startOrphan() {},
       assertSameBinding() {},
       admit() {},
       close() {},
@@ -288,6 +300,7 @@ test('constructor and selector validation fail before registry, lease, verifier,
     createOwner: 0,
     freshnessAdmit: 0,
     freshnessClose: 0,
+    freshnessOrphanStart: 0,
     freshnessStart: 0,
     operation: 0,
     registry: 0,
@@ -295,6 +308,69 @@ test('constructor and selector validation fail before registry, lease, verifier,
     verify: 0,
     verifiedIdentities: [],
   });
+});
+
+test('orphan session uses the same registry, shared lease, and route verification but the orphan freshness start', async () => {
+  const { calls, controller, events, identity } = harness();
+
+  const session = await controller.openOrphanSession(projectSelector());
+
+  assert.deepEqual(events, [
+    'config enter',
+    'identity',
+    'shared',
+    'verify',
+    'owner',
+    'config exit',
+    'start:orphan',
+  ]);
+  assert.equal(calls.acquireShared, 1);
+  assert.equal(calls.verify, 1);
+  assert.equal(calls.freshnessStart, 0);
+  assert.equal(calls.freshnessOrphanStart, 1);
+  assert.equal(calls.acquireIdentities[0], identity.lifecyclePlatformIdentity);
+  assert.equal(calls.verifiedIdentities[0], identity);
+
+  await controller.admit(session, async (admission) => {
+    assert.equal(Object.isFrozen(admission), true);
+    assert.deepEqual(Reflect.ownKeys(admission), []);
+  });
+  await controller.close(session);
+});
+
+test('a known normal startup failure releases its lease so a later orphan session can retry specially', async () => {
+  const expected = new Error('ordinary startup FULL rejected the orphan');
+  let starts = 0;
+  const { calls, controller } = harness({
+    start() {
+      starts += 1;
+      if (starts === 1) throw expected;
+    },
+  });
+
+  await assert.rejects(controller.openSession(projectSelector()), (error) => error === expected);
+  assert.throws(
+    () => controller.openOrphanSessionAfterKnownFailure(
+      projectSelector(),
+      new Error('foreign failure'),
+    ),
+    TypeError,
+  );
+  const session = await controller.openOrphanSessionAfterKnownFailure(
+    projectSelector(),
+    expected,
+  );
+  assert.throws(
+    () => controller.openOrphanSessionAfterKnownFailure(projectSelector(), expected),
+    TypeError,
+  );
+
+  assert.equal(calls.freshnessStart, 1);
+  assert.equal(calls.freshnessOrphanStart, 1);
+  assert.equal(calls.acquireShared, 2);
+  assert.equal(calls.release, 1);
+  await controller.close(session);
+  assert.equal(calls.release, 2);
 });
 
 test('open, admit, and close follow the fixed order and return only an opaque session', async () => {
@@ -766,7 +842,7 @@ test('all verifier rejections release the new handle once and permit a clean lat
 
 test('unknown release while rolling back preserves the verifier error and permanently fences reopen', async () => {
   const verifyError = new Error('route rejected', { cause: new Error('journal mismatch') });
-  verifyError.code = 'RECOVERY_REQUIRED';
+  verifyError.code = 'EXTERNAL_RESOURCE_CREATION_UNSUPPORTED';
   const releaseError = lifecycleError();
   let releaseCalls = 0;
   const lease = makeLease({
@@ -783,6 +859,13 @@ test('unknown release while rolling back preserves the verifier error and perman
   await rejectsSame(fixture.controller.openSession(projectSelector()), verifyError);
   assert.equal(releaseCalls, 1);
   assert.equal(fixture.calls.registry, 1);
+  await assert.rejects(
+    async () => fixture.controller.openOrphanSessionAfterKnownFailure(
+      projectSelector('must-not-special-retry'),
+      verifyError,
+    ),
+    (error) => isCanonicalLifecycleError(error, releaseError),
+  );
   await assert.rejects(
     fixture.controller.openSession(projectSelector('must-not-reopen')),
     (error) => isCanonicalLifecycleError(error, releaseError),

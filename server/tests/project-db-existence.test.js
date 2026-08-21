@@ -115,7 +115,7 @@ test('ordinary project access never recreates a missing or deleted database', as
   assert.equal(fs.existsSync(projectPath), false);
 
   const missingResponse = await fetch(`${baseUrl}/${project}/chapters`);
-  assert.equal(missingResponse.status, 404);
+  assert.equal(missingResponse.status, 404, await missingResponse.clone().text());
   assert.deepEqual(await missingResponse.json(), {
     error: { code: 'PROJECT_NOT_FOUND', message: '项目不存在', recoverable: true },
   });

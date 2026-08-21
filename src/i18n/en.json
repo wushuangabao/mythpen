@@ -263,6 +263,20 @@
       "generic": "The operation failed and the evidence was preserved. Refresh diagnostics or export a diagnostics bundle."
     }
   },
+  "manuscriptRecovery": {
+    "conflictUnavailable": "There is no draft conflict ready for a decision. Refresh and try again.",
+    "conflictTitle": "External manuscript change detected",
+    "conflictDescription": "The on-disk manuscript conflicts with a saved local draft. Keep the external version or reapply the durable local draft to the project.",
+    "refresh": "Refresh conflict status",
+    "copyBackup": "Copy draft backup",
+    "acceptExternal": "Accept external version",
+    "applySavedDraft": "Apply saved draft",
+    "orphanTitle": "Resolve unassigned manuscript",
+    "reactivateOrphan": "Return to pending",
+    "keepOrphan": "Keep and ignore",
+    "retiredTitle": "Retired files projects",
+    "retiredDescription": "These projects remain on disk but are excluded from the normal project list. This version reports their status and never reactivates them implicitly."
+  },
   "settings": {
     "title": "Settings",
     "uiLanguage": "UI Language",

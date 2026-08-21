@@ -112,6 +112,41 @@ test('tool-call batch yields for cancellation and skips the announced tool plus 
   assert.deepEqual(completed, ['first']);
 });
 
+test('tool-call batch awaits async tool results before callbacks and later calls', async () => {
+  const trace = [];
+  const callbackResults = [];
+  const finished = await executeToolCallsWithAbort(
+    [
+      { id: 'first', name: 'get_stats', args: {} },
+      { id: 'second', name: 'get_project_meta', args: {} },
+    ],
+    { isDisconnected: () => false },
+    async (toolCall) => {
+      trace.push(`start:${toolCall.id}`);
+      await new Promise((resolve) => setImmediate(resolve));
+      trace.push(`finish:${toolCall.id}`);
+      return { id: toolCall.id };
+    },
+    {
+      onToolExecuted: (toolCall, result) => {
+        trace.push(`callback:${toolCall.id}`);
+        callbackResults.push(result);
+      },
+    },
+  );
+
+  assert.equal(finished, true);
+  assert.deepEqual(trace, [
+    'start:first',
+    'finish:first',
+    'callback:first',
+    'start:second',
+    'finish:second',
+    'callback:second',
+  ]);
+  assert.deepEqual(callbackResults, [{ id: 'first' }, { id: 'second' }]);
+});
+
 test('a marked manuscript persistence failure aborts the provider tool batch before later writes', async (t) => {
   withIsolatedDataDir(t);
   const database = require('../db');
@@ -154,7 +189,7 @@ test('a marked manuscript persistence failure aborts the provider tool batch bef
         },
       ],
       { isDisconnected: () => false },
-      (toolCall) => {
+      async (toolCall) => {
         executed.push(toolCall.id);
         return executeTool(projectName, toolCall.name, toolCall.args);
       },

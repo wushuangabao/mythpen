@@ -6,6 +6,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const {
+  assertDataRootMigrationSupported,
   atomicMoveDirectoryNoReplace,
   copyAndVerifyDirectory,
   fileManifest,
@@ -35,6 +36,51 @@ function decodedMovePaths(arguments_) {
     target: Buffer.from(arguments_[5], 'base64').toString('utf16le'),
   };
 }
+
+test('Task14 policy rejection happens before the legacy SQLite root inspector', async () => {
+  const source = tempDir('task14-policy-before-scan');
+  const target = path.resolve(tempDir('task14-policy-target'), 'new-data-root');
+  const unsupported = Object.assign(new Error('files authority is present'), {
+    code: 'NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED',
+  });
+  let policyCalls = 0;
+  let fsTouches = 0;
+  const policyAuthority = Object.freeze({
+    assertChangeAllowed(request) {
+      policyCalls += 1;
+      assert.equal(Object.isFrozen(request), true);
+      assert.deepEqual(request, {
+        sourceRoot: path.resolve(source),
+        targetRoot: target,
+        migrate: true,
+      });
+      throw unsupported;
+    },
+  });
+  const fsApi = new Proxy(fs, {
+    get(realFs, property) {
+      if (['existsSync', 'lstatSync', 'readFileSync', 'readdirSync', 'realpathSync'].includes(property)) {
+        return (...arguments_) => {
+          fsTouches += 1;
+          return Reflect.apply(realFs[property], realFs, arguments_);
+        };
+      }
+      return Reflect.get(realFs, property);
+    },
+  });
+
+  await assert.rejects(
+    assertDataRootMigrationSupported(source, {
+      fsApi,
+      migrate: true,
+      policyAuthority,
+      targetRoot: target,
+    }),
+    (error) => error === unsupported,
+  );
+  assert.equal(policyCalls, 1);
+  assert.equal(fsTouches, 0);
+});
 
 test('copies nested and Unicode-named files, verifies them, and retains source', async () => {
   const source = tempDir('source');

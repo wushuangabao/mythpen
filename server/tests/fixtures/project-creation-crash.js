@@ -88,7 +88,7 @@ function emptyDirectoryPlan(
   return deepFreeze({
     digest: DIGEST_A,
     finalDatabasePath,
-    lifecycleLockPath: `${finalDatabasePath}.lifecycle.lock`,
+    lifecycleLockDerivation: 'canonical-real-control-directory-sibling-sha256-v1',
     projectControlRoot: path.join(dataRoot, 'control', 'manuscripts', projectUid, projectInstanceId),
     articleRoot: path.join(dataRoot, 'manuscripts', projectUid),
     fileAssetsRoot: path.join(
@@ -99,6 +99,42 @@ function emptyDirectoryPlan(
       projectInstanceId,
       'file-assets',
     ),
+  });
+}
+
+function lifecycleLockReceipt(
+  dataRoot,
+  projectUid = PROJECT_UID,
+  projectInstanceId = PROJECT_INSTANCE_ID,
+) {
+  const controlParentDirectoryIdentity = Object.freeze({ dev: '7', ino: '700' });
+  const lifecycleLockIdentity = Object.freeze({ dev: '7', ino: '701' });
+  return deepFreeze({
+    version: 1,
+    lifecycleLockBefore: {
+      disposition: 'absent',
+      parentIdentity: controlParentDirectoryIdentity,
+    },
+    lifecycleLockAfter: {
+      byteSize: 0,
+      fileFsync: true,
+      identity: lifecycleLockIdentity,
+      parentFsync: true,
+      parentIdentity: controlParentDirectoryIdentity,
+      sha256: createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+    },
+    lifecyclePlatformIdentity: {
+      canonicalRealControlDirectory: path.join(
+        dataRoot,
+        'control',
+        'manuscripts',
+        projectUid,
+        projectInstanceId,
+      ),
+      controlDirectoryIdentity: { dev: '7', ino: '702' },
+      controlParentDirectoryIdentity,
+      lifecycleLockIdentity,
+    },
   });
 }
 
@@ -207,6 +243,7 @@ module.exports = {
   creationJournalAuthority,
   deepFreeze,
   emptyDirectoryPlan,
+  lifecycleLockReceipt,
   physicalIdentity,
   sha256File,
 };

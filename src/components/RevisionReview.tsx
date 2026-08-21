@@ -58,7 +58,15 @@ export function RevisionReview() {
     : undefined
   const selectedDecision = selectedPart && revision ? revision.decisions[selectedPart.id] : undefined
 
-  if (!chapter || !project || !revision || !revisionMatchesProject || revision.chapterId !== chapter.id) return null
+  if (
+    !chapter ||
+    !project ||
+    !revision ||
+    revision.status !== 'pending' ||
+    !revisionMatchesProject ||
+    revision.chapterId !== chapter.id
+  )
+    return null
 
   const selectRevision = (event: MouseEvent<HTMLElement>, id: string) => {
     const rect = event.currentTarget.getBoundingClientRect()

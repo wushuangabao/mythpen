@@ -5,7 +5,19 @@ const path = require('node:path');
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH_PATTERN = /^[0-9a-f]{64}$/u;
-const READ_KINDS = new Set(['project', 'chapters', 'chapter', 'volumes', 'volume']);
+const READ_KINDS = new Set([
+  'project',
+  'chapters',
+  'chapter',
+  'volumes',
+  'volume',
+  'prompt_context',
+  'product_view',
+  'stats',
+  'export_snapshot',
+  'character_associations',
+  'revision_snapshot',
+]);
 const WRITE_KINDS = new Set([
   'chapter.replace_body',
   'chapter.patch_sidecar',
@@ -18,6 +30,13 @@ const WRITE_KINDS = new Set([
   'volume.create',
   'volume.delete',
   'volume.reorder',
+  'ignored.preserve_move_to_unassigned',
+  'ignored.detach_reference',
+  'revision.create',
+  'revision.update_decisions',
+  'revision.reject',
+  'revision.accept',
+  'revision.finalize',
 ]);
 let installedRuntime = null;
 
@@ -68,12 +87,30 @@ function snapshotPlain(value, label, active = new WeakSet()) {
         throw new TypeError(`${label} must contain plain arrays`);
       }
       const descriptors = Object.getOwnPropertyDescriptors(value);
-      if (Reflect.ownKeys(descriptors).length !== value.length + 1) {
-        throw new TypeError(`${label} must contain dense arrays`);
+      const lengthDescriptor = descriptors.length;
+      const length = lengthDescriptor?.value;
+      if (!Number.isSafeInteger(length) || length < 0) {
+        throw new TypeError(`${label} must contain canonical arrays`);
       }
-      return Object.freeze(value.map((entry, index) => (
-        snapshotPlain(entry, `${label}[${index}]`, active)
-      )));
+      const result = [];
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (
+          descriptor === undefined
+          || descriptor.enumerable !== true
+          || !Object.hasOwn(descriptor, 'value')
+        ) throw new TypeError(`${label} must contain dense data arrays`);
+        result.push(snapshotPlain(descriptor.value, `${label}[${index}]`, active));
+      }
+      for (const key of Reflect.ownKeys(descriptors)) {
+        if (key === 'length') continue;
+        if (
+          typeof key !== 'string'
+          || !/^(0|[1-9][0-9]*)$/u.test(key)
+          || Number(key) >= length
+        ) throw new TypeError(`${label} has an invalid array property`);
+      }
+      return Object.freeze(result);
     }
     if (!isPlainObject(value)) throw new TypeError(`${label} must contain plain objects`);
     const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -97,11 +134,24 @@ function snapshotPlain(value, label, active = new WeakSet()) {
 }
 
 function capturePort(value, methods, label) {
-  if (value === null || typeof value !== 'object') throw new TypeError(`${label} is required`);
-  return Object.freeze(Object.fromEntries(methods.map((method) => {
-    if (typeof value[method] !== 'function') throw new TypeError(`${label}.${method} is required`);
-    return [method, value[method].bind(value)];
-  })));
+  if (
+    value === null
+    || (typeof value !== 'object' && typeof value !== 'function')
+  ) throw new TypeError(`${label} is required`);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const captured = {};
+  for (const method of methods) {
+    const descriptor = descriptors[method];
+    if (
+      descriptor === undefined
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')
+      || typeof descriptor.value !== 'function'
+    ) throw new TypeError(`${label}.${method} must be an own enumerable data method`);
+    const implementation = descriptor.value;
+    captured[method] = (...args) => Reflect.apply(implementation, value, args);
+  }
+  return Object.freeze(captured);
 }
 
 function nonEmpty(value, label) {
@@ -127,7 +177,17 @@ function selector(value) {
   if (Number.isSafeInteger(value) && value > 0) return value;
   if (isPlainObject(value) && Object.hasOwn(value, 'projectName')) {
     const input = exactData(value, ['projectName'], 'projectSelector');
-    return Object.freeze({ projectName: nonEmpty(input.projectName, 'projectSelector.projectName') });
+    const projectName = nonEmpty(input.projectName, 'projectSelector.projectName');
+    if (
+      projectName === '.'
+      || projectName === '..'
+      || projectName.trim() !== projectName
+      || path.posix.basename(projectName) !== projectName
+      || path.win32.basename(projectName) !== projectName
+      || path.posix.extname(projectName) !== ''
+      || path.win32.extname(projectName) !== ''
+    ) throw new TypeError('projectSelector.projectName must be one canonical file stem');
+    return Object.freeze({ projectName });
   }
   const input = exactData(value, ['projectUid'], 'projectSelector');
   return Object.freeze({ projectUid: canonicalUuid(input.projectUid, 'projectSelector.projectUid') });
@@ -151,13 +211,6 @@ function witness(value, label = 'baseWitness') {
     rawSha256: input.rawSha256,
     sidecarRawSha256: input.sidecarRawSha256,
   });
-}
-
-function sameWitness(left, right) {
-  return left.expectedDataVersion === right.expectedDataVersion
-    && left.generation === right.generation
-    && left.rawSha256 === right.rawSha256
-    && left.sidecarRawSha256 === right.sidecarRawSha256;
 }
 
 function verifyActivatedSchema12Admission(value) {
@@ -349,12 +402,16 @@ function projectMetadata(value) {
   nonEmpty(input.name, 'projectMetadata.name');
   nonEmpty(input.mode, 'projectMetadata.mode');
   nonEmpty(input.language, 'projectMetadata.language');
-  if (!Array.isArray(input.genres) || input.genres.length === 0) {
+  if (!Array.isArray(input.genres)) {
     throw new TypeError('projectMetadata.genres must be a non-empty array');
   }
-  const genres = input.genres.map((entry, index) => (
-    nonEmpty(entry, `projectMetadata.genres[${index}]`)
-  ));
+  const genres = snapshotPlain(input.genres, 'projectMetadata.genres');
+  if (genres.length === 0) {
+    throw new TypeError('projectMetadata.genres must be a non-empty array');
+  }
+  for (let index = 0; index < genres.length; index += 1) {
+    nonEmpty(genres[index], `projectMetadata.genres[${index}]`);
+  }
   return Object.freeze({
     name: input.name,
     mode: input.mode,
@@ -366,7 +423,98 @@ function projectMetadata(value) {
 function readRequest(value) {
   const safe = snapshotPlain(value, 'read request');
   if (!READ_KINDS.has(safe.kind)) throw new TypeError('read request kind is unsupported');
+  if (safe.kind === 'revision_snapshot') {
+    if (
+      Object.keys(safe).sort().join(',') !== 'chapterUid,kind'
+      || canonicalUuid(safe.chapterUid, 'revision_snapshot.chapterUid') !== safe.chapterUid
+    ) throw new TypeError('revision_snapshot requires one canonical chapterUid');
+  }
+  if (
+    safe.kind === 'character_associations'
+    && Object.keys(safe).join(',') !== 'kind'
+  ) throw new TypeError('character_associations accepts no selectors');
   return safe;
+}
+
+function exactSnapshotKeys(value, expected, label) {
+  if (!isPlainObject(value)) throw new TypeError(`${label} must be a plain object`);
+  const actual = Object.keys(value).sort();
+  const keys = [...expected].sort();
+  if (
+    actual.length !== keys.length
+    || actual.some((key, index) => key !== keys[index])
+  ) throw new TypeError(`${label} has an invalid shape`);
+  return value;
+}
+
+function positiveRevisionId(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0 || Object.is(value, -0)) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function revisionText(value, label) {
+  if (typeof value !== 'string') throw new TypeError(`${label} must be a string`);
+  return value;
+}
+
+function revisionDecisions(value, label) {
+  if (!isPlainObject(value)) throw new TypeError(`${label} must be a plain object`);
+  for (const [changeId, decision] of Object.entries(value)) {
+    if (!changeId || (decision !== 'accepted' && decision !== 'rejected')) {
+      throw new TypeError(`${label} contains an invalid decision`);
+    }
+  }
+  return value;
+}
+
+function normalizeRevisionCommand(command) {
+  if (command.kind === 'revision.create') {
+    exactSnapshotKeys(
+      command,
+      ['kind', 'chapterUid', 'baseContent', 'proposedContent'],
+      'revision.create command',
+    );
+    canonicalUuid(command.chapterUid, 'revision.create chapterUid');
+    revisionText(command.baseContent, 'revision.create baseContent');
+    revisionText(command.proposedContent, 'revision.create proposedContent');
+    return command;
+  }
+  if (command.kind === 'revision.update_decisions') {
+    exactSnapshotKeys(
+      command,
+      ['kind', 'revisionId', 'decisions', 'expectedBaseContent'],
+      'revision.update_decisions command',
+    );
+    positiveRevisionId(command.revisionId, 'revision.update_decisions revisionId');
+    revisionDecisions(command.decisions, 'revision.update_decisions decisions');
+    revisionText(command.expectedBaseContent, 'revision.update_decisions expectedBaseContent');
+    return command;
+  }
+  if (command.kind === 'revision.reject' || command.kind === 'revision.accept') {
+    exactSnapshotKeys(
+      command,
+      ['kind', 'revisionId', 'expectedBaseContent'],
+      `${command.kind} command`,
+    );
+    positiveRevisionId(command.revisionId, `${command.kind} revisionId`);
+    revisionText(command.expectedBaseContent, `${command.kind} expectedBaseContent`);
+    return command;
+  }
+  if (command.kind === 'revision.finalize') {
+    exactSnapshotKeys(
+      command,
+      ['kind', 'revisionId', 'content', 'expectedBaseContent', 'expectedDecisions'],
+      'revision.finalize command',
+    );
+    positiveRevisionId(command.revisionId, 'revision.finalize revisionId');
+    revisionText(command.content, 'revision.finalize content');
+    revisionText(command.expectedBaseContent, 'revision.finalize expectedBaseContent');
+    revisionDecisions(command.expectedDecisions, 'revision.finalize expectedDecisions');
+    return command;
+  }
+  return command;
 }
 
 function writeRequest(value) {
@@ -381,10 +529,79 @@ function writeRequest(value) {
     }
     throw new TypeError('command kind is unsupported');
   }
+  normalizeRevisionCommand(command);
   return Object.freeze({
     requestId: nonEmpty(input.requestId, 'requestId'),
     baseWitness: input.baseWitness === null ? null : witness(input.baseWitness),
     command,
+  });
+}
+
+function orphanRequest(value, label) {
+  const input = exactData(value, ['kind', 'requestId', 'uid'], label);
+  if (input.kind !== 'chapter' && input.kind !== 'volume') {
+    throw new TypeError(`${label}.kind must be chapter or volume`);
+  }
+  return Object.freeze({
+    requestId: nonEmpty(input.requestId, `${label}.requestId`),
+    kind: input.kind,
+    uid: canonicalUuid(input.uid, `${label}.uid`),
+  });
+}
+
+function draftConflictCopyRequest(value) {
+  const input = exactData(value, ['conflictId', 'requestId'], 'draft conflict copy request');
+  return Object.freeze({
+    conflictId: canonicalUuid(input.conflictId, 'draft conflict copy conflictId'),
+    requestId: nonEmpty(input.requestId, 'draft conflict copy requestId'),
+  });
+}
+
+function draftConflictResolutionRequest(value) {
+  const input = exactData(
+    value,
+    ['action', 'conflictId', 'decisionEpoch', 'requestId'],
+    'draft conflict resolution request',
+  );
+  if (input.action !== 'accept_external' && input.action !== 'apply_saved_draft') {
+    throw new TypeError('draft conflict resolution action is unsupported');
+  }
+  return Object.freeze({
+    action: input.action,
+    conflictId: canonicalUuid(input.conflictId, 'draft conflict resolution conflictId'),
+    decisionEpoch: generation(input.decisionEpoch, 'draft conflict resolution decisionEpoch'),
+    requestId: nonEmpty(input.requestId, 'draft conflict resolution requestId'),
+  });
+}
+
+function captureFilesPort(value) {
+  const baseMethods = ['close', 'ignoreInPlace', 'read', 'recover', 'revokeIgnore', 'write'];
+  const conflictMethods = [
+    'copyDraftConflictBackup',
+    'listDraftConflicts',
+    'resolveDraftConflict',
+  ];
+  const descriptors = value === null || typeof value !== 'object'
+    ? Object.create(null)
+    : Object.getOwnPropertyDescriptors(value);
+  const installed = conflictMethods.filter((method) => descriptors[method] !== undefined);
+  if (installed.length !== 0 && installed.length !== conflictMethods.length) {
+    throw new TypeError('files draft conflict port must be installed atomically');
+  }
+  const methods = installed.length === conflictMethods.length
+    ? [...baseMethods, ...conflictMethods]
+    : baseMethods;
+  exactData(value, methods, 'files');
+  const captured = capturePort(value, methods, 'files');
+  if (installed.length === conflictMethods.length) return captured;
+  const unavailable = () => {
+    throw runtimeError('RECOVERY_REQUIRED', 'Draft conflict recovery is unavailable');
+  };
+  return Object.freeze({
+    ...captured,
+    copyDraftConflictBackup: unavailable,
+    listDraftConflicts: unavailable,
+    resolveDraftConflict: unavailable,
   });
 }
 
@@ -396,17 +613,37 @@ function createManuscriptRuntime(options) {
   );
   const routeResolver = capturePort(input.routeResolver, ['admit'], 'routeResolver');
   const sqlite = capturePort(input.sqlite, ['close', 'read', 'recover', 'write'], 'sqlite');
-  const files = capturePort(
-    input.files,
-    ['close', 'read', 'recover', 'resolveCommand', 'snapshotWitness', 'write'],
-    'files',
-  );
+  const files = captureFilesPort(input.files);
   const creation = capturePort(input.creation, ['create'], 'creation');
   const migration = capturePort(input.migration, ['migrate', 'recover'], 'migration');
   let closed = false;
+  let closePromise = null;
+  let activeOperations = 0;
+  let drainPromise = Promise.resolve();
+  let resolveDrain = null;
 
   function assertOpen() {
     if (closed) throw runtimeError('RECOVERY_REQUIRED', 'Manuscript runtime is closed');
+  }
+
+  function withActiveOperation(operation) {
+    assertOpen();
+    activeOperations += 1;
+    if (activeOperations === 1) {
+      drainPromise = new Promise((resolve) => { resolveDrain = resolve; });
+    }
+    return (async () => {
+      try {
+        return await operation();
+      } finally {
+        activeOperations -= 1;
+        if (activeOperations === 0) {
+          const resolve = resolveDrain;
+          resolveDrain = null;
+          resolve();
+        }
+      }
+    })();
   }
 
   async function admit(projectSelector) {
@@ -416,9 +653,36 @@ function createManuscriptRuntime(options) {
     return admitted;
   }
 
+
+  async function resolveOrphan(method, projectSelector, requestValue) {
+    assertOpen();
+    const safeSelector = selector(projectSelector);
+    const request = orphanRequest(requestValue, method);
+    const admission = await admit(safeSelector);
+    if (admission.route === 'sqlite') {
+      throw runtimeError(
+        'SQLITE_RUNTIME_ROUTE_UNSUPPORTED',
+        'Orphan resolution is only available for files-authority projects',
+      );
+    }
+    return files[method](admission, request);
+  }
+
+  async function admitFilesOnly(projectSelector, feature) {
+    const safeSelector = selector(projectSelector);
+    const admission = await admit(safeSelector);
+    if (admission.route === 'sqlite') {
+      throw runtimeError(
+        'SQLITE_RUNTIME_ROUTE_UNSUPPORTED',
+        `${feature} is only available for files-authority projects`,
+      );
+    }
+    return Object.freeze({ admission, safeSelector });
+  }
+
   return Object.freeze({
-    async createProject(value) {
-      assertOpen();
+    createProject(value) {
+      return withActiveOperation(async () => {
       const request = exactData(
         value,
         ['genres', 'language', 'mode', 'name', 'requestId'],
@@ -439,69 +703,99 @@ function createManuscriptRuntime(options) {
       }
       canonicalUuid(result.projectUid, 'creation result.projectUid');
       return result;
+      });
     },
-    async migrateProject(value) {
-      assertOpen();
+    migrateProject(value) {
+      return withActiveOperation(() => {
       const request = exactData(value, ['projectSelector', 'requestId'], 'migrateProject request');
       return migration.migrate(Object.freeze({
         projectSelector: selector(request.projectSelector),
         requestId: nonEmpty(request.requestId, 'requestId'),
       }));
+      });
     },
-    async read(projectSelector, requestValue) {
-      assertOpen();
+    ignoreInPlace(projectSelector, requestValue) {
+      return withActiveOperation(() => (
+        resolveOrphan('ignoreInPlace', projectSelector, requestValue)
+      ));
+    },
+    listDraftConflicts(projectSelector) {
+      return withActiveOperation(async () => {
+        const { admission } = await admitFilesOnly(projectSelector, 'Draft conflict recovery');
+        return files.listDraftConflicts(admission);
+      });
+    },
+    copyDraftConflictBackup(projectSelector, requestValue) {
+      return withActiveOperation(async () => {
+        const request = draftConflictCopyRequest(requestValue);
+        const { admission } = await admitFilesOnly(projectSelector, 'Draft conflict backup copy');
+        return files.copyDraftConflictBackup(admission, request);
+      });
+    },
+    resolveDraftConflict(projectSelector, requestValue) {
+      return withActiveOperation(async () => {
+        const request = draftConflictResolutionRequest(requestValue);
+        const { admission } = await admitFilesOnly(projectSelector, 'Draft conflict resolution');
+        return files.resolveDraftConflict(admission, request);
+      });
+    },
+    read(projectSelector, requestValue) {
+      return withActiveOperation(async () => {
       const safeSelector = selector(projectSelector);
       const request = readRequest(requestValue);
       const admission = await admit(safeSelector);
       if (admission.route === 'sqlite') return sqlite.read(safeSelector, request);
-      const value = await files.read(admission, request);
-      const baseWitness = witness(
-        await files.snapshotWitness(admission, request),
-        'server baseWitness',
-      );
-      return Object.freeze({ value, baseWitness });
+      const result = exactData(await files.read(admission, request), [
+        'baseWitness',
+        'value',
+      ], 'files read result');
+      return Object.freeze({
+        value: result.value,
+        baseWitness: witness(result.baseWitness, 'server baseWitness'),
+      });
+      });
     },
-    async write(projectSelector, requestValue) {
-      assertOpen();
+    write(projectSelector, requestValue) {
+      return withActiveOperation(async () => {
       const safeSelector = selector(projectSelector);
       const request = writeRequest(requestValue);
       const admission = await admit(safeSelector);
       if (admission.route === 'sqlite') return sqlite.write(safeSelector, request);
       const expected = witness(request.baseWitness);
-      const current = witness(
-        await files.snapshotWitness(admission, request.command),
-        'server currentWitness',
-      );
-      const commandDataVersion = request.command.expected_data_version;
-      if (
-        !sameWitness(expected, current)
-        || (commandDataVersion !== undefined
-          && commandDataVersion !== current.expectedDataVersion)
-      ) throw runtimeError(
-        'EXTERNAL_DRAFT_CONFLICT',
-        'The durable manuscript resource changed after this draft was based on it',
-      );
-      const command = await files.resolveCommand(admission, request.command);
       return files.write(admission, Object.freeze({
         requestId: request.requestId,
         baseWitness: expected,
-        command,
+        command: request.command,
         witnessCommand: request.command,
       }));
+      });
     },
-    async recover(projectSelector) {
-      assertOpen();
+    recover(projectSelector) {
+      return withActiveOperation(async () => {
       const safeSelector = selector(projectSelector);
       const admission = await admit(safeSelector);
       return admission.route === 'sqlite'
         ? sqlite.recover(safeSelector)
         : files.recover(admission);
+      });
+    },
+    revokeIgnore(projectSelector, requestValue) {
+      return withActiveOperation(() => (
+        resolveOrphan('revokeIgnore', projectSelector, requestValue)
+      ));
     },
     close() {
-      if (closed) return;
+      if (closePromise !== null) return closePromise;
       closed = true;
-      files.close();
-      sqlite.close();
+      closePromise = (async () => {
+        await drainPromise;
+        try {
+          await files.close();
+        } finally {
+          await sqlite.close();
+        }
+      })();
+      return closePromise;
     },
   });
 }
@@ -510,9 +804,31 @@ function installManuscriptRuntime(runtime) {
   if (installedRuntime !== null) {
     throw new TypeError('manuscript runtime is already installed');
   }
+  const baseMethods = [
+    'close',
+    'createProject',
+    'ignoreInPlace',
+    'migrateProject',
+    'read',
+    'recover',
+    'revokeIgnore',
+    'write',
+  ];
+  const conflictMethods = [
+    'copyDraftConflictBackup',
+    'listDraftConflicts',
+    'resolveDraftConflict',
+  ];
+  const descriptors = runtime === null || typeof runtime !== 'object'
+    ? Object.create(null)
+    : Object.getOwnPropertyDescriptors(runtime);
+  const conflictCount = conflictMethods.filter((method) => descriptors[method] !== undefined).length;
+  if (conflictCount !== 0 && conflictCount !== conflictMethods.length) {
+    throw new TypeError('manuscript runtime draft conflict methods must be installed atomically');
+  }
   installedRuntime = capturePort(
     runtime,
-    ['close', 'createProject', 'migrateProject', 'read', 'recover', 'write'],
+    conflictCount === conflictMethods.length ? [...baseMethods, ...conflictMethods] : baseMethods,
     'manuscript runtime',
   );
   return installedRuntime;

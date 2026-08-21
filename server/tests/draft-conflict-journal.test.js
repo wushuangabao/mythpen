@@ -440,6 +440,69 @@ test('accept transition requires journal-owned intent and constructor-bound afte
   );
 });
 
+test('stable intent authority describes only original journal decision intents without backup data', async () => {
+  const acceptScene = await readyScene();
+  const authority = acceptScene.journal.intentAuthority();
+  assert.equal(authority, acceptScene.journal.intentAuthority());
+  assert.deepEqual(Reflect.ownKeys(authority).sort(), ['assert', 'describe']);
+  assert.equal(Object.isFrozen(authority), true);
+
+  const acceptIntent = await acceptScene.journal.beginAccept({
+    conflictId: CONFLICT_ID,
+    decisionEpoch: 0,
+    acceptedRawSha256: sha256(Buffer.from('external bytes')),
+    baseGeneration: 7,
+    targetGeneration: 8,
+  });
+  assert.equal(authority.assert(acceptIntent), acceptIntent);
+  const acceptDescriptor = authority.describe(acceptIntent);
+  assert.deepEqual(acceptDescriptor, {
+    kind: 'accept',
+    conflictId: CONFLICT_ID,
+    decisionEpoch: 0,
+    acceptedRawSha256: sha256(Buffer.from('external bytes')),
+    baseGeneration: 7,
+    targetGeneration: 8,
+    resource: { kind: 'chapter', uid: CHAPTER_UID, domain: 'body' },
+  });
+  assert.equal(Object.isFrozen(acceptDescriptor), true);
+  assert.equal(Object.isFrozen(acceptDescriptor.resource), true);
+  assert.equal(canonicalJson(acceptDescriptor).includes('backupRootPath'), false);
+  assert.equal(canonicalJson(acceptDescriptor).includes('draft.bin'), false);
+  assert.equal(canonicalJson(acceptDescriptor).includes('local draft'), false);
+
+  const applyScene = await readyScene();
+  const applyIntent = await applyScene.journal.beginApply({
+    conflictId: CONFLICT_ID,
+    decisionEpoch: 0,
+    childJournalId: CHILD_ID,
+    externalRawSha256: sha256(Buffer.from('external bytes')),
+    baseGeneration: 7,
+    targetGeneration: 8,
+  });
+  assert.deepEqual(applyScene.journal.intentAuthority().describe(applyIntent), {
+    kind: 'apply',
+    conflictId: CONFLICT_ID,
+    decisionEpoch: 0,
+    childJournalId: CHILD_ID,
+    externalRawSha256: sha256(Buffer.from('external bytes')),
+    baseGeneration: 7,
+    targetGeneration: 8,
+    resource: { kind: 'chapter', uid: CHAPTER_UID, domain: 'body' },
+  });
+
+  for (const foreign of [Object.freeze({}), { ...acceptIntent }, applyIntent]) {
+    assert.throws(
+      () => authority.describe(foreign),
+      (error) => error.code === 'RECOVERY_REQUIRED',
+    );
+  }
+  assert.throws(
+    () => authority.describe.call(Object.freeze({}), acceptIntent),
+    (error) => error.code === 'RECOVERY_REQUIRED',
+  );
+});
+
 test('apply transition resolves after or aborts before and permanently advances epoch', async () => {
   const scene = await readyScene();
   const intent = await scene.journal.beginApply({

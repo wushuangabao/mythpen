@@ -7,6 +7,7 @@ import {
   markManuscriptResourceSaving,
   settleManuscriptResource,
 } from './manuscriptDirtyResources.ts'
+import { assertManuscriptSaveAdmission } from './manuscriptHostSaveAdmission.ts'
 import { isolateProjectDraft } from './projectDraftRecovery.ts'
 
 export interface EditorSaveEntry {
@@ -37,6 +38,16 @@ const confirmedDataVersions = new Map<string, number>()
 const tombstoneGenerations = new Map<string, number>()
 const projectEpochs = new Map<string, number>()
 const listeners = new Set<() => void>()
+type EditorHostDrainEntry = Readonly<{
+  chapterId: number
+  disposition: 'persisted' | 'unresolved'
+  resourceUid: string
+  revision: number
+}>
+
+const hostDrainEntries = new Map<string, EditorHostDrainEntry>()
+const frozenHostEntries = new Map<string, ReadonlyMap<string, Omit<EditorHostDrainEntry, 'disposition'>>>()
+const persistedVersions = new Map<string, number>()
 let nextSaveVersion = 0
 let snapshot: EditorSaveQueueSnapshot = { drafts: {}, errors: {} }
 
@@ -117,6 +128,154 @@ export function getEditorSaveFailure(
   return Object.freeze({ message, code: failedSaveCodes.get(saveKey) ?? null })
 }
 
+export function getEditorHostMigrationState(project: string) {
+  const resources: Array<
+    Readonly<{
+      domain: 'body'
+      loaded: false
+      resourceKind: 'chapter'
+      resourceUid: string
+      revision: number
+    }>
+  > = []
+  const queues: Array<
+    Readonly<{
+      domain: 'body'
+      loaded: false
+      queueId: string
+      revision: number
+      state: 'active' | 'cancelled_and_drained'
+    }>
+  > = []
+  const entries = new Map<
+    string,
+    Readonly<{
+      chapterId: number
+      resourceUid: string
+      revision: number
+      state: 'active' | 'cancelled_and_drained'
+    }>
+  >()
+  const frozen = frozenHostEntries.get(project)
+  if (frozen) {
+    for (const [saveKey, entry] of frozen) {
+      entries.set(
+        saveKey,
+        Object.freeze({
+          ...entry,
+          state:
+            hostDrainEntries.get(saveKey)?.revision === entry.revision
+              ? ('cancelled_and_drained' as const)
+              : ('active' as const),
+        }),
+      )
+    }
+  } else {
+    for (const [saveKey, entry] of hostDrainEntries) {
+      if (!saveKeyBelongsToProject(saveKey, project)) continue
+      entries.set(saveKey, Object.freeze({ ...entry, state: 'cancelled_and_drained' as const }))
+    }
+  }
+  for (const [saveKey, entry] of visibleDrafts) {
+    if (!saveKeyBelongsToProject(saveKey, project)) continue
+    const drained = hostDrainEntries.get(saveKey)
+    if (drained?.revision === entry.version) continue
+    entries.set(
+      saveKey,
+      Object.freeze({
+        chapterId: entry.chapterId,
+        resourceUid: entry.dirtyBinding?.identity.resourceUid ?? `sqlite-chapter-${entry.chapterId}`,
+        revision: entry.version,
+        state: 'active' as const,
+      }),
+    )
+  }
+  for (const entry of entries.values()) {
+    resources.push(
+      Object.freeze({
+        domain: 'body',
+        loaded: false,
+        resourceKind: 'chapter',
+        resourceUid: entry.resourceUid,
+        revision: entry.revision,
+      }),
+    )
+    queues.push(
+      Object.freeze({
+        domain: 'body',
+        loaded: false,
+        queueId: `editor:${entry.chapterId}`,
+        revision: entry.revision,
+        state: entry.state,
+      }),
+    )
+  }
+  resources.sort((left, right) => left.resourceUid.localeCompare(right.resourceUid))
+  queues.sort((left, right) => left.queueId.localeCompare(right.queueId))
+  return Object.freeze({ resources: Object.freeze(resources), queues: Object.freeze(queues) })
+}
+
+export function freezeEditorHostMigrationState(project: string): void {
+  if (frozenHostEntries.has(project)) throw new TypeError('editor host migration state is already frozen')
+  const captured = new Map<string, Omit<EditorHostDrainEntry, 'disposition'>>()
+  for (const [saveKey, entry] of visibleDrafts) {
+    if (!saveKeyBelongsToProject(saveKey, project)) continue
+    captured.set(
+      saveKey,
+      Object.freeze({
+        chapterId: entry.chapterId,
+        resourceUid: entry.dirtyBinding?.identity.resourceUid ?? `sqlite-chapter-${entry.chapterId}`,
+        revision: entry.version,
+      }),
+    )
+  }
+  frozenHostEntries.set(project, captured)
+}
+
+export async function cancelAndDrainEditorHostQueues(project: string) {
+  if (!frozenHostEntries.has(project)) freezeEditorHostMigrationState(project)
+  const captured = frozenHostEntries.get(project) as ReadonlyMap<string, Omit<EditorHostDrainEntry, 'disposition'>>
+  const operations = [...saveQueues.entries()]
+    .filter(([saveKey]) => saveKeyBelongsToProject(saveKey, project))
+    .map(([, operation]) => operation)
+  await Promise.allSettled(operations)
+  const resolutions: Array<
+    Readonly<{
+      resourceUid: string
+      domain: 'body'
+      disposition: 'persisted' | 'unresolved'
+    }>
+  > = []
+  for (const [saveKey, entry] of captured) {
+    const resourceUid = entry.resourceUid
+    const disposition = persistedVersions.get(saveKey) === entry.revision ? 'persisted' : 'unresolved'
+    hostDrainEntries.set(
+      saveKey,
+      Object.freeze({
+        chapterId: entry.chapterId,
+        disposition,
+        resourceUid,
+        revision: entry.revision,
+      }),
+    )
+    resolutions.push(
+      Object.freeze({
+        resourceUid,
+        domain: 'body',
+        disposition,
+      }),
+    )
+  }
+  return Object.freeze(resolutions)
+}
+
+export function releaseEditorHostQueueDrain(project: string): void {
+  for (const saveKey of [...hostDrainEntries.keys()]) {
+    if (saveKeyBelongsToProject(saveKey, project)) hostDrainEntries.delete(saveKey)
+  }
+  frozenHostEntries.delete(project)
+}
+
 function clearProjectEditorSaves(project: string): void {
   projectEpochs.set(project, projectEpoch(project) + 1)
   for (const [saveKey, entry] of visibleDrafts) {
@@ -145,6 +304,13 @@ function clearProjectEditorSaves(project: string): void {
   for (const saveKey of [...saveQueues.keys()]) {
     if (saveKeyBelongsToProject(saveKey, project)) saveQueues.delete(saveKey)
   }
+  for (const saveKey of [...hostDrainEntries.keys()]) {
+    if (saveKeyBelongsToProject(saveKey, project)) hostDrainEntries.delete(saveKey)
+  }
+  for (const saveKey of [...persistedVersions.keys()]) {
+    if (saveKeyBelongsToProject(saveKey, project)) persistedVersions.delete(saveKey)
+  }
+  frozenHostEntries.delete(project)
   publishSnapshot()
 }
 
@@ -235,6 +401,8 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
   const saveKey = editorSaveKey(project, chapterId)
   const pending = pendingSaves.get(saveKey)
   if (!pending) return saveQueues.get(saveKey) ?? Promise.resolve()
+  assertManuscriptSaveAdmission(project)
+  hostDrainEntries.delete(saveKey)
   pendingSaves.delete(saveKey)
   const requestEpoch = projectEpoch(project)
   const requestId = `editor-save-${pending.version}`
@@ -261,6 +429,7 @@ export function flushEditorSave(project: string, chapterId: number, writer: Edit
       (persistedDataVersion) => {
         if (projectEpoch(project) !== requestEpoch) return
         if ((tombstoneGenerations.get(saveKey) ?? 0) !== pending.tombstoneGeneration) return
+        persistedVersions.set(saveKey, pending.version)
         if (
           Number.isSafeInteger(persistedDataVersion) &&
           (persistedDataVersion as number) >= 0 &&

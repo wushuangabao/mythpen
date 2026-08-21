@@ -4,7 +4,7 @@ const { createHash } = require('node:crypto');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
-const { installManuscriptRuntime } = require('./manuscript/runtime');
+const { getManuscriptRuntime, installManuscriptRuntime } = require('./manuscript/runtime');
 const { createProductionManuscriptRuntime } = require('./manuscript/production-runtime');
 const apiRoutes = require('./routes/api');
 const { TOOLS, executeTool } = require('./tools');
@@ -22,7 +22,7 @@ const {
   getContinuationStreamOverrides,
   getPolishStreamOverrides,
 } = require('./ai-polish-request');
-const { saveContinuation } = require('./ai-continue-save');
+const { saveContinuation, saveFilesContinuation } = require('./ai-continue-save');
 const { bindAiProjectInstance } = require('./project-instance-middleware');
 const {
   jsonErrorMiddleware,
@@ -40,6 +40,21 @@ const {
 const app = express();
 let activeInstanceNonceMiddleware = null;
 let activeLifecycleAdmissionMiddleware = null;
+const AI_MANUSCRIPT_ADMISSION = Symbol('AI_MANUSCRIPT_ADMISSION');
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const FILES_AI_RUNTIME_TOOLS = new Set([
+  'list_chapters',
+  'get_chapter',
+  'create_chapter',
+  'update_chapter',
+  'delete_chapter',
+  'list_volumes',
+  'create_volume',
+  'update_volume',
+  'delete_volume',
+  'get_stats',
+  'get_project_meta',
+]);
 
 // ─── Middleware ───
 app.use(cors());
@@ -65,7 +80,7 @@ app.use((req, res, next) => {
 });
 
 // ─── API Routes ───
-app.use('/api/ai', bindAiProjectInstance);
+app.use('/api/ai', bindAiManuscriptProjectInstance);
 app.use('/api', apiRoutes);
 
 // ═══════════════════════════════════════════
@@ -114,6 +129,93 @@ function safeSseError(error) {
   };
 }
 
+function aiRouteError(route) {
+  const error = new Error(`Project manuscript route is unavailable: ${route}`);
+  error.code = route === 'migrating' ? 'PROJECT_MIGRATION_BUSY' : 'RECOVERY_REQUIRED';
+  return error;
+}
+
+function aiInstanceMismatchError() {
+  const error = new Error('Project instance changed while the AI request was starting');
+  error.code = 'PROJECT_INSTANCE_MISMATCH';
+  return error;
+}
+
+function bindAiManuscriptProjectInstance(req, res, next) {
+  const project = req.body?.project;
+  if (typeof project !== 'string' || !project) return next();
+  try {
+    const admission = db.inspectProjectManuscriptRoute(project);
+    req[AI_MANUSCRIPT_ADMISSION] = Object.freeze({ project, admission });
+    if (admission.route !== 'files') return bindAiProjectInstance(req, res, next);
+    const instanceId = admission.databaseFacts?.projectInstanceId;
+    const expectedInstanceId = req.get('X-Mythpen-Project-Instance') || '';
+    if (
+      typeof instanceId !== 'string'
+      || !UUID_PATTERN.test(instanceId)
+      || (expectedInstanceId && expectedInstanceId !== instanceId)
+    ) throw aiInstanceMismatchError();
+    return db.runWithProjectInstance(project, instanceId, next);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+function aiAdmission(req, project) {
+  const captured = req[AI_MANUSCRIPT_ADMISSION];
+  const admission = captured?.project === project
+    ? captured.admission
+    : db.inspectProjectManuscriptRoute(project);
+  if (admission.route !== 'files' && admission.route !== 'sqlite') {
+    throw aiRouteError(admission.route);
+  }
+  return admission;
+}
+
+function filesProjectUid(admission) {
+  const projectUid = admission.databaseFacts?.projectUid;
+  if (!UUID_PATTERN.test(projectUid)) throw aiRouteError(admission.route);
+  return projectUid;
+}
+
+function recordAiTokenUsageBestEffort(admission, write) {
+  if (admission.route === 'files') return false;
+  return recordTokenUsageBestEffort(write);
+}
+
+async function readAiChapter(req, { project, chapterId, chapterUid }) {
+  const admission = aiAdmission(req, project);
+  if (admission.route === 'files') {
+    if (chapterId !== undefined || !UUID_PATTERN.test(chapterUid)) {
+      const error = new Error('Files-authority AI requests require one stable chapter UID');
+      error.code = 'INVALID_PARAMS';
+      throw error;
+    }
+    const projectUid = filesProjectUid(admission);
+    const generationStart = await getManuscriptRuntime().read(
+      Object.freeze({ projectUid }),
+      Object.freeze({ kind: 'chapter', chapterUid }),
+    );
+    return Object.freeze({
+      admission,
+      baseWitness: generationStart.baseWitness,
+      chapter: generationStart.value,
+      projectUid,
+    });
+  }
+  if (!Number.isInteger(chapterId) || chapterId < 1 || chapterUid !== undefined) {
+    const error = new Error('SQLite AI requests require one numeric chapter ID');
+    error.code = 'INVALID_PARAMS';
+    throw error;
+  }
+  return Object.freeze({
+    admission,
+    baseWitness: null,
+    chapter: db.projectGet(project, 'SELECT * FROM chapters WHERE id = ?', [chapterId]),
+    projectUid: null,
+  });
+}
+
 
 // ─── AI Chat Completion (non-streaming) ───
 app.post('/api/ai/chat', async (req, res, next) => {
@@ -122,6 +224,7 @@ app.post('/api/ai/chat', async (req, res, next) => {
     if (!messages || !Array.isArray(messages)) {
       return sendJsonError(res, 'INVALID_PARAMS', 'messages is required');
     }
+    const manuscriptAdmission = aiAdmission(req, project);
 
     const aiConfig = getAiConfig();
     // 测试连接时允许前端传入 API key/baseUrl/model 覆盖数据库配置
@@ -135,13 +238,16 @@ app.post('/api/ai/chat', async (req, res, next) => {
       aiConfig.apiModel = req.body.apiModel;
     }
     const adapter = createAIAdapter(aiConfig.apiModel, aiConfig, aiConfig.apiType);
-    const systemPrompt = buildWritingPrompt(project);
+    const systemPrompt = await buildWritingPrompt(
+      project,
+      req.get('X-Mythpen-Project-Instance') || '',
+    );
 
     const result = await adapter.complete(systemPrompt, messages, null, temperature);
 
     // Record token usage
     if (result.usage.inputTokens || result.usage.outputTokens) {
-      recordTokenUsageBestEffort(() => {
+      recordAiTokenUsageBestEffort(manuscriptAdmission, () => {
         const db = require('./db');
         db.projectExecute(project,
           'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
@@ -169,10 +275,14 @@ app.post('/api/ai/chat/stream', async (req, res, next) => {
     if (!messages || !Array.isArray(messages)) {
       return sendJsonError(res, 'INVALID_PARAMS', 'messages is required');
     }
+    const manuscriptAdmission = aiAdmission(req, project);
 
     const aiConfig = getAiConfig();
     const adapter = createAIAdapter(aiConfig.apiModel, aiConfig, aiConfig.apiType);
-    const systemPrompt = mode === 'collab' ? buildCollabPrompt(project) : buildWritingPrompt(project);
+    const expectedInstanceId = req.get('X-Mythpen-Project-Instance') || '';
+    const systemPrompt = mode === 'collab'
+      ? await buildCollabPrompt(project, expectedInstanceId)
+      : await buildWritingPrompt(project, expectedInstanceId);
     streamContext = createStreamAbortContext(req, res);
     if (streamContext.isDisconnected()) return;
 
@@ -220,7 +330,7 @@ app.post('/api/ai/chat/stream', async (req, res, next) => {
       inputTokens += result.usage.inputTokens;
       outputTokens += result.usage.outputTokens;
       if (result.usage.inputTokens || result.usage.outputTokens) {
-        recordTokenUsageBestEffort(() => {
+        recordAiTokenUsageBestEffort(manuscriptAdmission, () => {
           db.projectExecute(
             project,
             'INSERT INTO token_usage (task_name, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?)',
@@ -239,6 +349,11 @@ app.post('/api/ai/chat/stream', async (req, res, next) => {
         hasToolCalls: result.toolCalls.length > 0,
         toolCallNames: result.toolCalls.map(tc => tc.name) || [],
       });
+
+      if (
+        manuscriptAdmission.route === 'files'
+        && result.toolCalls.some((toolCall) => !FILES_AI_RUNTIME_TOOLS.has(toolCall.name))
+      ) throw aiRouteError('files-ai-auxiliary-write-unavailable');
 
       if (result.toolCalls.length > 0) {
         // Add assistant message with tool calls to conversation
@@ -323,13 +438,15 @@ function normalizePolishedContent(content) {
 app.post('/api/ai/polish', async (req, res, next) => {
   let streamContext = null;
   try {
-    const { chapterId, project } = req.body || {};
-    if (!project || !Number.isInteger(chapterId) || chapterId < 1) {
-      return sendJsonError(res, 'INVALID_PARAMS', 'project and chapterId are required');
+    const { chapterId, chapterUid, project } = req.body || {};
+    if (!project) return sendJsonError(res, 'INVALID_PARAMS', 'project is required');
+    const admittedRoute = aiAdmission(req, project);
+    const requestId = req.get('X-Mythpen-Request-Id') || '';
+    if (admittedRoute.route === 'files' && !requestId) {
+      return sendJsonError(res, 'INVALID_PARAMS', 'X-Mythpen-Request-Id is required');
     }
-
-    const db = require('./db');
-    const chapter = db.projectGet(project, 'SELECT id, num, title, content FROM chapters WHERE id = ?', [chapterId]);
+    const generationStart = await readAiChapter(req, { project, chapterId, chapterUid });
+    const { admission, baseWitness, chapter, projectUid } = generationStart;
     if (!chapter) return sendJsonError(res, 'DB_NOT_FOUND', 'Chapter not found');
     if (!chapter.content?.trim()) return sendJsonError(res, 'INVALID_PARAMS', 'Chapter content is empty');
 
@@ -359,7 +476,7 @@ app.post('/api/ai/polish', async (req, res, next) => {
     let reasoningCharacters = 0;
     const recordPolishUsage = () => {
       if (!inputTokens && !outputTokens) return;
-      recordTokenUsageBestEffort(() => {
+      recordAiTokenUsageBestEffort(admission, () => {
         db.projectExecute(project,
           'INSERT INTO token_usage (task_name, chapter_num, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?)',
           ['polish', chapter.num, inputTokens, outputTokens, aiConfig.apiModel],
@@ -425,14 +542,52 @@ app.post('/api/ai/polish', async (req, res, next) => {
     // section. Once it passes, creating the revision is atomic with respect to
     // the Node event loop.
     if (streamContext.isDisconnected()) return;
-    const result = createPendingRevision(project, chapterId, baseContent, proposedContent);
+    const result = admission.route === 'files'
+      ? await getManuscriptRuntime().write(
+        Object.freeze({ projectUid }),
+        Object.freeze({
+          requestId,
+          baseWitness,
+          command: Object.freeze({
+            kind: 'revision.create',
+            chapterUid,
+            baseContent,
+            proposedContent,
+          }),
+        }),
+      )
+      : createPendingRevision(project, chapterId, baseContent, proposedContent);
     if (!streamContext.canWrite()) return;
-    if (result.missing) {
+    if (
+      admission.route === 'files'
+      && (result.state === 'conflict' || result.state === 'stale')
+    ) {
+      res.write(`event: error\ndata: ${JSON.stringify(safeSseError(Object.assign(
+        new Error('Chapter revision generation became stale'),
+        { code: 'EXTERNAL_DRAFT_CONFLICT' },
+      )))}\n\n`);
+    } else if (result.missing) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Chapter no longer exists' })}\n\n`);
-    } else if (result.unchanged) {
-      res.write(`event: done\ndata: ${JSON.stringify({ success: true, unchanged: true, rebased: result.rebased })}\n\n`);
+    } else if (result.unchanged || result.state === 'unchanged') {
+      res.write(`event: done\ndata: ${JSON.stringify({
+        success: true,
+        unchanged: true,
+        rebased: admission.route === 'files' ? false : result.rebased,
+      })}\n\n`);
+    } else if (
+      admission.route === 'files'
+      && result.state !== 'created'
+    ) {
+      res.write(`event: error\ndata: ${JSON.stringify(safeSseError(Object.assign(
+        new Error('Revision creation returned an invalid state'),
+        { code: 'RECOVERY_REQUIRED' },
+      )))}\n\n`);
     } else {
-      res.write(`event: done\ndata: ${JSON.stringify({ success: true, revision: result.revision, rebased: result.rebased })}\n\n`);
+      res.write(`event: done\ndata: ${JSON.stringify({
+        success: true,
+        revision: result.revision,
+        rebased: admission.route === 'files' ? false : result.rebased,
+      })}\n\n`);
     }
     res.end();
   } catch (err) {
@@ -453,17 +608,19 @@ app.post('/api/ai/polish', async (req, res, next) => {
 app.post('/api/ai/continue', async (req, res, next) => {
   let streamContext = null;
   try {
-    const { chapterId, context, style = '悬疑', project } = req.body || {};
-    if (!project || !Number.isInteger(chapterId) || chapterId < 1) {
-      return sendJsonError(res, 'INVALID_PARAMS', 'project and chapterId are required');
+    const { chapterId, chapterUid, context, style = '悬疑', project } = req.body || {};
+    if (!project) return sendJsonError(res, 'INVALID_PARAMS', 'project is required');
+    const admittedRoute = aiAdmission(req, project);
+    const requestId = req.get('X-Mythpen-Request-Id') || '';
+    if (admittedRoute.route === 'files' && !requestId) {
+      return sendJsonError(res, 'INVALID_PARAMS', 'X-Mythpen-Request-Id is required');
     }
-
-    const db = require('./db');
-    const chapter = db.projectGet(project, 'SELECT * FROM chapters WHERE id = ?', [chapterId]);
+    const generationStart = await readAiChapter(req, { project, chapterId, chapterUid });
+    const { admission, baseWitness, chapter, projectUid } = generationStart;
     if (!chapter) return sendJsonError(res, 'DB_NOT_FOUND', 'Chapter not found');
-    const continuationBaseBodyHash = createHash('sha256')
-      .update(chapter.content ?? '')
-      .digest('hex');
+    const continuationBaseBodyHash = admission.route === 'sqlite'
+      ? createHash('sha256').update(chapter.content ?? '').digest('hex')
+      : null;
 
     const messages = [
       { role: 'user', content: `请续写以下小说的第${chapter.num}章「${chapter?.title || '未知'}」。保持${style}氛围，延续已有的文风和叙事视角。\n\n## 当前内容\n\n${chapter?.content?.slice(-1500) || '（新章节开头）'}\n\n## 用户额外要求\n${context || '请自然续写，保持文学质感。'}\n\n请直接开始续写，不要加任何前缀说明。` }
@@ -472,7 +629,10 @@ app.post('/api/ai/continue', async (req, res, next) => {
     const aiConfig = getAiConfig();
     const provider = detectProvider(aiConfig.apiModel, aiConfig.apiType);
     const adapter = createAIAdapter(aiConfig.apiModel, aiConfig, aiConfig.apiType);
-    const systemPrompt = buildWritingPrompt(project);
+    const systemPrompt = await buildWritingPrompt(
+      project,
+      req.get('X-Mythpen-Project-Instance') || '',
+    );
 
     streamContext = createStreamAbortContext(req, res);
     if (streamContext.isDisconnected()) return;
@@ -490,7 +650,7 @@ app.post('/api/ai/continue', async (req, res, next) => {
     let finishReason = null;
     const recordContinuationUsage = () => {
       if (!inputTokens && !outputTokens) return;
-      recordTokenUsageBestEffort(() => {
+      recordAiTokenUsageBestEffort(admission, () => {
         db.projectExecute(project,
           'INSERT INTO token_usage (task_name, chapter_num, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?)',
           ['continue', chapter.num, inputTokens, outputTokens, aiConfig.apiModel],
@@ -536,14 +696,24 @@ app.post('/api/ai/continue', async (req, res, next) => {
     let saveError = null;
     let savedChapter = null;
     try {
-      savedChapter = saveContinuation(
-        db,
-        project,
-        chapterId,
-        fullContent,
-        finishReason,
-        continuationBaseBodyHash,
-      );
+      savedChapter = admission.route === 'files'
+        ? await saveFilesContinuation({
+          runtime: getManuscriptRuntime(),
+          projectUid,
+          chapter,
+          baseWitness,
+          continuation: fullContent,
+          finishReason,
+          requestId,
+        })
+        : saveContinuation(
+          db,
+          project,
+          chapterId,
+          fullContent,
+          finishReason,
+          continuationBaseBodyHash,
+        );
     } catch (error) {
       saveError = error;
       console.error('Continue save error:', error);
@@ -563,7 +733,9 @@ app.post('/api/ai/continue', async (req, res, next) => {
     res.write(`event: done\ndata: ${JSON.stringify({
       success: true,
       content: fullContent,
-      chapterId: savedChapter.chapterId,
+      ...(admission.route === 'files'
+        ? { chapterUid: savedChapter.chapterUid }
+        : { chapterId: savedChapter.chapterId }),
       chapterContent: savedChapter.content,
       wordCount: savedChapter.wordCount,
       dataVersion: savedChapter.dataVersion,
@@ -621,7 +793,7 @@ async function startMainServer() {
   let manuscriptRuntime = null;
   const closeProductionDatabases = async () => {
     try {
-      manuscriptRuntime?.close();
+      await manuscriptRuntime?.close();
     } finally {
       await db.closeAllDatabases();
     }

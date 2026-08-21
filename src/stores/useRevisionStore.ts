@@ -42,6 +42,10 @@ function isCurrentRevision(state: RevisionState, project: string, revisionId: nu
   return state.revisionProject === project && state.revision?.id === revisionId
 }
 
+function actionableRevision(revision: ChapterRevision | null | undefined): ChapterRevision | null {
+  return revision?.status === 'pending' ? revision : null
+}
+
 function findEditorLock(locks: readonly EditorLock[], project: string, chapterId: number): EditorLock | null {
   return locks.find((lock) => lock.project === project && lock.chapterId === chapterId) || null
 }
@@ -180,6 +184,7 @@ async function completeRevision(
   set: (partial: Partial<RevisionState>) => void,
   get: () => RevisionState,
 ) {
+  if (revision.status !== 'pending') return
   const parts = buildRevisionParts(revision.baseContent, revision.proposedContent)
   if (countPendingRevisions(parts, revision.decisions) > 0) {
     if (isCurrentRevision(get(), project, revision.id)) {
@@ -279,8 +284,9 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
     const projectInstanceId = getProjectInstanceId(project)
     if (!stillViewingInstance(project, chapterId, projectInstanceId)) return
     const current = get()
-    const knownRevision =
-      current.revisionProject === project && current.revision?.chapterId === chapterId ? current.revision : null
+    const knownRevision = actionableRevision(
+      current.revisionProject === project && current.revision?.chapterId === chapterId ? current.revision : null,
+    )
     // Focus/data-change refreshes can fire while a decision or bulk action is
     // in flight. A read for that same revision must not clear `saving`, reopen
     // the buttons, or remove the revision before the mutation response applies.
@@ -308,7 +314,11 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
     })
 
     try {
-      let { revision, rebased, chapterDataVersion } = await chapterRevisionsApi.getActive(project, chapterId)
+      const currentChapter = useChapterStore.getState().currentChapter
+      const chapterIdentity =
+        currentChapter?.id === chapterId && currentChapter.chapterUid ? currentChapter.chapterUid : chapterId
+      let { revision, rebased, chapterDataVersion } = await chapterRevisionsApi.getActive(project, chapterIdentity)
+      revision = actionableRevision(revision)
       if (!stillViewingInstance(project, chapterId, projectInstanceId) || !revisionLoadEpoch.isCurrent(requestSequence))
         return
       let protectedRevision = knownRevision
@@ -337,7 +347,7 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
         // The lookup may have completed while the reader was typing. Fetch once
         // more after the flush so the server can rebase against the just-saved
         // content instead of rendering an obsolete base snapshot.
-        const refreshed = await chapterRevisionsApi.getActive(project, chapterId)
+        const refreshed = await chapterRevisionsApi.getActive(project, chapterIdentity)
         if (
           !stillViewingInstance(project, chapterId, projectInstanceId) ||
           !revisionLoadEpoch.isCurrent(requestSequence)
@@ -345,7 +355,7 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
           releaseLoadLock()
           return
         }
-        revision = refreshed.revision
+        revision = actionableRevision(refreshed.revision)
         rebased ||= refreshed.rebased
         chapterDataVersion = refreshed.chapterDataVersion ?? chapterDataVersion
       }
@@ -421,10 +431,11 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
 
   setRevision: (project, revision) => {
     if (revision && !stillViewing(project, revision.chapterId)) return
+    const pendingRevision = actionableRevision(revision)
     revisionLoadEpoch.invalidate()
     set({
-      revision,
-      revisionProject: revision ? project : null,
+      revision: pendingRevision,
+      revisionProject: pendingRevision ? project : null,
       loading: false,
       saving: false,
       error: null,
@@ -479,7 +490,8 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
 
   decide: async (project, revisionId, changeId, decision) => {
     const revision = get().revision
-    if (!revision || !isCurrentRevision(get(), project, revisionId) || get().saving) return
+    if (!revision || revision.status !== 'pending' || !isCurrentRevision(get(), project, revisionId) || get().saving)
+      return
 
     // PATCH only the decision the user changed. Sending this window's whole
     // snapshot could replay stale values for other hunks over a newer writer.
@@ -549,7 +561,8 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
 
   finalize: async (project, revisionId) => {
     const revision = get().revision
-    if (!revision || !isCurrentRevision(get(), project, revisionId) || get().saving) return
+    if (!revision || revision.status !== 'pending' || !isCurrentRevision(get(), project, revisionId) || get().saving)
+      return
 
     const parts = buildRevisionParts(revision.baseContent, revision.proposedContent)
     if (countPendingRevisions(parts, revision.decisions) > 0) return
@@ -561,7 +574,8 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
 
   acceptAll: async (project, revisionId) => {
     const revision = get().revision
-    if (!revision || !isCurrentRevision(get(), project, revisionId) || get().saving) return
+    if (!revision || revision.status !== 'pending' || !isCurrentRevision(get(), project, revisionId) || get().saving)
+      return
 
     revisionLoadEpoch.invalidate()
     set({ loading: false, saving: true, error: null })
@@ -627,7 +641,8 @@ export const useRevisionStore = create<RevisionState>((set, get) => ({
 
   rejectAll: async (project, revisionId) => {
     const revision = get().revision
-    if (!revision || !isCurrentRevision(get(), project, revisionId) || get().saving) return
+    if (!revision || revision.status !== 'pending' || !isCurrentRevision(get(), project, revisionId) || get().saving)
+      return
 
     revisionLoadEpoch.invalidate()
     set({ loading: false, saving: true, error: null })

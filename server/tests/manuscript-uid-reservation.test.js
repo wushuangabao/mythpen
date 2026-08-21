@@ -16,7 +16,9 @@ const {
   ManuscriptUidReservation,
   canonicalCreateLogicalInputDigest,
   validateIdentityReservationManifest,
+  validateMigrationReservationManifest,
 } = require('../manuscript/uid-reservation');
+const { deriveManuscriptLifecycleLockPath } = require('../manuscript/lifecycle-lock');
 const {
   createUidReservationSources,
 } = require('../manuscript/uid-reservation-sources');
@@ -526,6 +528,63 @@ function migrationJournalHarness(seed, suffix) {
   };
 }
 
+test('migration UID reservation durably binds the selected lifecycle-lock preflight', async () => {
+  const journalAuthority = migrationJournalHarness([], 'lifecycle-preflight').journal.authority();
+  const queue = [uuid(301), uuid(302), uuid(303)];
+  const plannedControlDirectory = path.resolve(os.tmpdir(), 'mythpen-lifecycle-preflight-control');
+  const lifecycleLockPreflight = deepFreeze({
+    version: 1,
+    disposition: 'absent',
+    plannedControlDirectory,
+    plannedLifecycleLockPath: deriveManuscriptLifecycleLockPath(plannedControlDirectory),
+  });
+  let selected = null;
+  const projectRootProbe = Object.freeze({
+    probe(input) {
+      selected = Object.freeze({
+        lifecycleLockPreflight,
+        operationId: input.migrationId,
+        projectInstanceId: input.projectInstanceId,
+        projectUid: input.projectUid,
+      });
+      return Object.freeze({ disposition: 'absent' });
+    },
+    selected() { return selected; },
+  });
+  const reservationSources = Object.freeze({
+    enumerate(scope) {
+      return deepFreeze({
+        complete: true,
+        projectUid: scope.projectUid,
+        projectInstanceId: scope.projectInstanceId,
+        objectKind: scope.objectKind,
+        records: [],
+      });
+    },
+  });
+  const service = new ManuscriptUidReservation({
+    journalAuthority,
+    reservationSources,
+    uuidV4() { return queue.shift(); },
+  });
+
+  const result = await service.reserveMigrationIdentities(Object.freeze({
+    migrationId: uuid(300),
+    projectInstanceId: PROJECT_INSTANCE_ID,
+    sourceBasis: migrationBasis(),
+    projectRootProbe,
+  }));
+
+  assert.strictEqual(result.migrationReservation.lifecycleLockPreflight, lifecycleLockPreflight);
+  const forged = structuredClone(result.migrationReservation);
+  forged.lifecycleLockPreflight.plannedControlDirectory = path.resolve(os.tmpdir(), 'foreign');
+  forged.lifecycleLockPreflight.plannedLifecycleLockPath = deriveManuscriptLifecycleLockPath(
+    forged.lifecycleLockPreflight.plannedControlDirectory,
+  );
+  deepFreeze(forged);
+  assert.throws(() => validateMigrationReservationManifest(forged), TypeError);
+});
+
 test('migration UID source ambiguity is RECOVERY_REQUIRED before RNG or path probing', async () => {
   const firstJournal = migrationJournalHarness([], 'lookup');
   const journalAuthority = firstJournal.journal.authority();
@@ -597,7 +656,10 @@ test('migration UID source ambiguity is RECOVERY_REQUIRED before RNG or path pro
     migrationId: uuid(81),
     projectInstanceId: PROJECT_INSTANCE_ID,
     sourceBasis: migrationBasis(),
-    projectRootProbe: Object.freeze({ probe() { calls.probe += 1; } }),
+    projectRootProbe: Object.freeze({
+      probe() { calls.probe += 1; },
+      selected() { throw new Error('selected must not run before journal lookup'); },
+    }),
   })), (error) => error?.code === 'RECOVERY_REQUIRED');
   assert.deepEqual(calls, { probe: 0, uuid: 0 });
 });

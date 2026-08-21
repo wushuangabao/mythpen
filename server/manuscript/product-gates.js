@@ -8,8 +8,9 @@ const OPTION_KEYS = Object.freeze([
   'freshness',
   'turnContextSource',
   'policy',
+  'productWriteIntentAuthority',
 ]);
-const WRITE_REQUEST_KEYS = Object.freeze(['logicalRequestId', 'policyInput']);
+const WRITE_REQUEST_KEYS = Object.freeze(['logicalRequestId', 'policyInput', 'writeIntent']);
 const TURN_CONTEXT_KEYS = Object.freeze([
   'journalId',
   'logicalRequestId',
@@ -150,7 +151,29 @@ function validateWriteRequest(writeRequest) {
   return Object.freeze({
     logicalRequestId,
     policyInput: descriptorValue(descriptors, 'policyInput'),
+    writeIntent: descriptorValue(descriptors, 'writeIntent'),
   });
+}
+
+function validateProductIntentDescriptor(value) {
+  const descriptors = exactDataDescriptors(
+    value,
+    ['family', 'logicalInputDigest'],
+    'product write intent descriptor',
+    true,
+  );
+  const family = descriptorValue(descriptors, 'family');
+  const logicalInputDigest = descriptorValue(descriptors, 'logicalInputDigest');
+  if (family === 'ordinary_create') {
+    if (typeof logicalInputDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(logicalInputDigest)) {
+      invalid('ordinary_create intent requires a lowercase SHA-256 logical digest');
+    }
+  } else if (family === 'non_create' || family === 'orphan_resolution') {
+    if (logicalInputDigest !== null) invalid(`${family} intent must not provide a logical digest`);
+  } else {
+    invalid('product write intent family is invalid');
+  }
+  return Object.freeze({ family, logicalInputDigest });
 }
 
 function validateTurnContext(turnContext, logicalRequestId) {
@@ -209,14 +232,14 @@ function sameResult(left, right) {
   return Object.is(left, right);
 }
 
-async function withSingleAdmission(record, projectSelector, operation) {
+async function withSingleAdmission(record, projectSelector, methodName, operation) {
   let callbackWindowOpen = true;
   let callbackCalls = 0;
   let callbackResult;
   let callbackSettled = false;
   let returned;
   try {
-    returned = await invoke(record.projectSessionAdmission, 'withAdmission', [
+    returned = await invoke(record.projectSessionAdmission, methodName, [
       projectSelector,
       async (admission) => {
         if (!callbackWindowOpen) {
@@ -286,7 +309,7 @@ function createManuscriptProductGates(options) {
   const record = Object.freeze({
     projectSessionAdmission: exactMethodPort(
       descriptorValue(optionDescriptors, 'projectSessionAdmission'),
-      ['withAdmission'],
+      ['withAdmission', 'withOrphanAdmission'],
       'projectSessionAdmission',
     ),
     writerTurns: exactMethodPort(
@@ -296,18 +319,23 @@ function createManuscriptProductGates(options) {
     ),
     freshness: exactMethodPort(
       descriptorValue(optionDescriptors, 'freshness'),
-      ['ensureProjectionCurrent', 'ensureReadableProjection'],
+      ['ensureProjectionCurrentForWrite', 'ensureReadableProjection'],
       'freshness',
     ),
     turnContextSource: exactMethodPort(
       descriptorValue(optionDescriptors, 'turnContextSource'),
-      ['capture'],
+      ['capture', 'captureOrphanBaseline'],
       'turnContextSource',
     ),
     policy: exactMethodPort(
       descriptorValue(optionDescriptors, 'policy'),
       ['authorizeWrite'],
       'policy',
+    ),
+    productWriteIntentAuthority: exactMethodPort(
+      descriptorValue(optionDescriptors, 'productWriteIntentAuthority'),
+      ['assert', 'describe'],
+      'productWriteIntentAuthority',
     ),
   });
 
@@ -316,16 +344,59 @@ function createManuscriptProductGates(options) {
       const current = gateRecord(this);
       const request = validateWriteRequest(writeRequest);
       if (typeof callback !== 'function') invalid('write callback must be a function');
-      return withSingleAdmission(current, projectSelector, (admission) => (
+      const assertedIntent = invoke(current.productWriteIntentAuthority, 'assert', [
+        request.writeIntent,
+      ]);
+      if (assertedIntent !== request.writeIntent) {
+        invalid('product write intent authority must preserve the original intent');
+      }
+      const intentDescriptor = validateProductIntentDescriptor(invoke(
+        current.productWriteIntentAuthority,
+        'describe',
+        [request.writeIntent],
+      ));
+      let admissionMethod = 'withAdmission';
+      if (intentDescriptor.family === 'orphan_resolution') {
+        const reassertedIntent = invoke(current.productWriteIntentAuthority, 'assert', [
+          request.writeIntent,
+        ]);
+        if (reassertedIntent !== request.writeIntent) {
+          invalid('product write intent authority must preserve the orphan intent');
+        }
+        const recheckedDescriptor = validateProductIntentDescriptor(invoke(
+          current.productWriteIntentAuthority,
+          'describe',
+          [request.writeIntent],
+        ));
+        if (
+          recheckedDescriptor.family !== intentDescriptor.family
+          || recheckedDescriptor.logicalInputDigest !== intentDescriptor.logicalInputDigest
+        ) invalid('product write intent descriptor changed before orphan admission');
+        admissionMethod = 'withOrphanAdmission';
+      }
+      return withSingleAdmission(current, projectSelector, admissionMethod, (admission) => (
         withSingleWriterTurn(current, admission, async (writerTurn) => {
-          await invoke(current.freshness, 'ensureProjectionCurrent', [admission, writerTurn]);
+          await invoke(current.freshness, 'ensureProjectionCurrentForWrite', [
+            admission,
+            writerTurn,
+            Object.freeze({
+              logicalRequestId: request.logicalRequestId,
+              writeIntent: request.writeIntent,
+            }),
+          ]);
           const contextInput = Object.freeze({
             admission,
             writerTurn,
             logicalRequestId: request.logicalRequestId,
           });
           const turnContext = validateTurnContext(
-            await invoke(current.turnContextSource, 'capture', [contextInput]),
+            await invoke(
+              current.turnContextSource,
+              intentDescriptor.family === 'orphan_resolution'
+                ? 'captureOrphanBaseline'
+                : 'capture',
+              [contextInput],
+            ),
             request.logicalRequestId,
           );
           const policyInput = Object.freeze({
@@ -344,7 +415,7 @@ function createManuscriptProductGates(options) {
 
     async withReadableManuscriptProjection(projectSelector, query) {
       const current = gateRecord(this);
-      return withSingleAdmission(current, projectSelector, (admission) => (
+      return withSingleAdmission(current, projectSelector, 'withAdmission', (admission) => (
         invoke(current.freshness, 'ensureReadableProjection', [admission, query])
       ));
     },

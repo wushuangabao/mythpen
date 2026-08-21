@@ -382,6 +382,10 @@ function createHarness({
       mark('buildTarget', input);
       return target;
     },
+    buildRevisionTarget(input) {
+      mark('buildRevisionTarget', input);
+      return target;
+    },
     publish() {
       throw new Error('service must not publish a projection twice');
     },
@@ -460,14 +464,18 @@ function createHarness({
   };
 }
 
-function serviceFor(harness) {
-  return createL2ManuscriptService({
+function serviceFor(harness, draftConflictIntentAuthority = null) {
+  const options = {
     manuscriptStore: harness.manuscriptStore,
     fileJournal: harness.fileJournal,
     projectionStore: harness.projectionStore,
     uidReservation: harness.uidReservation,
     uidPathProbe: harness.uidPathProbe,
-  });
+  };
+  if (draftConflictIntentAuthority !== null) {
+    options.draftConflictIntentAuthority = draftConflictIntentAuthority;
+  }
+  return createL2ManuscriptService(options);
 }
 
 async function executeCommand(service, command, context) {
@@ -498,6 +506,59 @@ const MUTATIONS = [
     patch: { title: '新卷名', summary: '新卷摘要' },
   },
 ];
+
+test('draft conflict execution accepts only its constructor-bound original apply intent and persists parent', async () => {
+  const records = new WeakMap();
+  const authority = Object.freeze({
+    assert(intent) {
+      if (!records.has(intent)) throw new TypeError('foreign draft conflict intent');
+      return intent;
+    },
+    describe(intent) {
+      const descriptor = records.get(intent);
+      if (descriptor === undefined) throw new TypeError('foreign draft conflict intent');
+      return descriptor;
+    },
+  });
+  const applyIntent = Object.freeze({});
+  records.set(applyIntent, deepFreeze({
+    kind: 'apply',
+    conflictId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    decisionEpoch: 3,
+    childJournalId: JOURNAL_ID,
+    externalRawSha256: 'e'.repeat(64),
+    baseGeneration: 4,
+    targetGeneration: 5,
+    resource: { kind: 'chapter', uid: CHAPTER_ACTIVE, domain: 'body' },
+  }));
+  const harness = createHarness();
+  const service = serviceFor(harness, authority);
+  const command = Object.freeze({
+    kind: 'chapter.replace_body',
+    bodyRef: REFS.body,
+    content: 'saved draft body',
+  });
+  await service.executeDraftConflict(
+    service.bindWriteIntent(command),
+    turnContext(),
+    applyIntent,
+  );
+  assert.deepEqual(harness.captured.stageAssets.parent, {
+    kind: 'draft_conflict',
+    journalId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+  });
+
+  const before = harness.calls.length;
+  await assert.rejects(
+    service.executeDraftConflict(
+      service.bindWriteIntent(command),
+      turnContext(),
+      Object.freeze({}),
+    ),
+    TypeError,
+  );
+  assert.equal(harness.calls.length, before);
+});
 
 const STRUCTURAL_MUTATIONS = [
   {
@@ -1010,6 +1071,114 @@ test('ordinary service preserves the four Task 7B non-create mutations and exact
     assert.equal(Object.isFrozen(targetInput.currentProjection), true);
     assert.equal(Object.isFrozen(targetInput.ignoredLedger), true);
     assert.equal(Object.isFrozen(targetInput.localIdentityPlan), true);
+  }
+});
+
+test('revision resolution publishes its selected accepted chapter through one L2 target sequence', async () => {
+  const harness = createHarness();
+  const context = turnContext();
+  context.currentProjection.basis.pendingProposals = [{ revisionId: 41, chapterId: 11 }];
+  context.currentProjection.basis.basisDigest = canonicalProjectionBasisDigest(
+    context.currentProjection.basis,
+  );
+  const resolution = Object.freeze({
+    revisionId: 41,
+    chapterId: 11,
+    chapterUid: CHAPTER_ACTIVE,
+    from: 'pending',
+    to: 'accepted',
+    baseContentSha256: '1'.repeat(64),
+    proposedContentSha256: '2'.repeat(64),
+    acceptedContentSha256: '3'.repeat(64),
+    decisionsSha256: '4'.repeat(64),
+    logicalRequestId: context.logicalRequestId,
+    commandKind: 'revision.accept',
+    commandDigest: '5'.repeat(64),
+  });
+  const command = Object.freeze({
+    kind: 'chapter.replace_body_and_sidecar',
+    bodyRef: REFS.body,
+    sidecarRef: REFS.sidecar,
+    content: 'accepted body',
+    patch: Object.freeze({ status: 'accepted' }),
+  });
+
+  const result = await serviceFor(harness).executeRevisionResolution(
+    Object.freeze({ command, revisionResolution: resolution }),
+    context,
+  );
+
+  assert.deepEqual(harness.calls, [
+    'buildClosure',
+    'stageAssets',
+    'finalizeCandidate',
+    'buildRevisionTarget',
+    'bindTarget',
+    'prepare',
+    'publishFiles',
+    'commitProjection',
+    'complete',
+  ]);
+  assert.deepEqual(result, { state: 'completed' });
+  assert.strictEqual(harness.captured.buildClosure.command.bodyRef, REFS.body);
+  assert.deepEqual(harness.captured.buildRevisionTarget.revisionResolution, resolution);
+  assert.equal(Object.isFrozen(harness.captured.buildRevisionTarget.revisionResolution), true);
+  assert.strictEqual(harness.captured.bindTarget.projectionTarget, harness.target);
+});
+
+test('revision resolution rejects extra transition or patch data before Store and journal I/O', async () => {
+  const baseResolution = {
+    revisionId: 41,
+    chapterId: 11,
+    chapterUid: CHAPTER_ACTIVE,
+    from: 'pending',
+    to: 'accepted',
+    baseContentSha256: '1'.repeat(64),
+    proposedContentSha256: '2'.repeat(64),
+    acceptedContentSha256: '3'.repeat(64),
+    decisionsSha256: '4'.repeat(64),
+    logicalRequestId: 'logical-request-1',
+    commandKind: 'revision.accept',
+    commandDigest: '5'.repeat(64),
+  };
+  for (const input of [
+    {
+      command: {
+        kind: 'chapter.replace_body_and_sidecar',
+        bodyRef: REFS.body,
+        sidecarRef: REFS.sidecar,
+        content: 'accepted body',
+        patch: { status: 'accepted' },
+      },
+      revisionResolution: { ...baseResolution, extra: true },
+    },
+    {
+      command: {
+        kind: 'chapter.replace_body_and_sidecar',
+        bodyRef: REFS.body,
+        sidecarRef: REFS.sidecar,
+        content: 'accepted body',
+        patch: { status: 'accepted', title: 'forged' },
+      },
+      revisionResolution: baseResolution,
+    },
+    {
+      command: {
+        kind: 'chapter.replace_body_and_sidecar',
+        bodyRef: REFS.body,
+        sidecarRef: REFS.sidecar,
+        content: 'accepted body',
+        patch: { status: 'accepted' },
+      },
+      revisionResolution: { ...baseResolution, logicalRequestId: 'foreign-request' },
+    },
+  ]) {
+    const harness = createHarness();
+    await assert.rejects(
+      serviceFor(harness).executeRevisionResolution(input, turnContext()),
+      TypeError,
+    );
+    assert.deepEqual(harness.calls, []);
   }
 });
 

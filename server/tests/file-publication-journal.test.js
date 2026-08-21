@@ -630,6 +630,7 @@ test('Task 6 RED: file publication modules expose the committed API', () => {
     'commitProjection',
     'complete',
     'recover',
+    'inspectDisposition',
     'collectAssets',
     'journalAuthority',
   ]) {
@@ -640,6 +641,41 @@ test('Task 6 RED: file publication modules expose the committed API', () => {
   assert.throws(
     () => new FilePublisher({ writerCapability: { ...writer.capability } }),
     TypeError,
+  );
+});
+
+test('draft conflict child disposition is classified only by its full journal and exact persisted parent', async () => {
+  const harness = createHarness({ parentKind: 'draft_conflict' });
+  assert.throws(
+    () => harness.journal.inspectDisposition(Object.freeze({
+      journalId: JOURNAL_ID,
+      parent: harness.parentValue,
+    })),
+    { code: 'RECOVERY_REQUIRED' },
+  );
+
+  await bindAndPrepare(harness);
+  assert.deepEqual(harness.journal.inspectDisposition(Object.freeze({
+    journalId: JOURNAL_ID,
+    parent: harness.parentValue,
+  })), { disposition: 'pending' });
+
+  await harness.journal.publishFiles(JOURNAL_ID);
+  await harness.journal.commitProjection(JOURNAL_ID);
+  await harness.journal.complete(JOURNAL_ID);
+  assert.deepEqual(harness.journal.inspectDisposition(Object.freeze({
+    journalId: JOURNAL_ID,
+    parent: harness.parentValue,
+  })), { disposition: 'after' });
+  assert.throws(
+    () => harness.journal.inspectDisposition(Object.freeze({
+      journalId: JOURNAL_ID,
+      parent: Object.freeze({
+        kind: 'draft_conflict',
+        journalId: '77777777-7777-4777-8777-777777777777',
+      }),
+    })),
+    { code: 'RECOVERY_REQUIRED' },
   );
 });
 

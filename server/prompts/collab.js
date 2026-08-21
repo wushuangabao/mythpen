@@ -4,8 +4,8 @@
  */
 const { buildProjectContext } = require('./context');
 
-function buildCollabPrompt(projectName) {
-  const context = buildProjectContext(projectName);
+async function buildCollabPrompt(projectName, expectedInstanceId = '') {
+  const context = await buildProjectContext(projectName, expectedInstanceId);
 
   return `你是一位富有创意的小说创作伙伴，善于通过对话帮助作者探索和构建精彩的故事世界。
 

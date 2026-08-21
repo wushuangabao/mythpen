@@ -3,6 +3,8 @@
  * from the database and formats it for injection into system prompts.
  */
 const db = require('../db');
+const { getManuscriptRuntime } = require('../manuscript/runtime');
+const { readLegacyPromptContext } = require('../manuscript-service');
 
 const GENRE_LABELS = {
   'sci-fi': '科幻', 'fantasy': '玄幻', 'romance': '言情',
@@ -27,15 +29,33 @@ const CHARACTER_ROLE_LABELS = {
   extra: '客串',
 };
 
-function buildProjectContext(projectName) {
-  try {
-    const pdb = db.getProjectDb(projectName);
-    const meta = {};
-    pdb.prepare('SELECT key, value FROM project_meta').all().forEach(m => meta[m.key] = m.value);
-    const genres = pdb.prepare('SELECT genre FROM project_genres').all().map(g => g.genre);
-    const chars = pdb.prepare('SELECT * FROM characters').all();
-    const chapters = pdb.prepare('SELECT id, volume_id, num, title, outline, status FROM chapters ORDER BY volume_id, num').all();
-    const foreshadows = pdb.prepare("SELECT * FROM foreshadows WHERE status IN ('planted','progressing')").all();
+function projectRouteError(route) {
+  const error = new Error(`Project manuscript route is not readable: ${route}`);
+  error.code = route === 'migrating' ? 'PROJECT_MIGRATION_BUSY' : 'RECOVERY_REQUIRED';
+  return error;
+}
+
+async function readProjectContext(projectName) {
+  const admission = db.inspectProjectManuscriptRoute(projectName);
+  if (admission.route === 'files') {
+    const result = await getManuscriptRuntime().read(
+      Object.freeze({ projectUid: admission.databaseFacts.projectUid }),
+      Object.freeze({ kind: 'prompt_context' }),
+    );
+    return result.value;
+  }
+  if (admission.route !== 'sqlite') throw projectRouteError(admission.route);
+  return readLegacyPromptContext(projectName);
+}
+
+async function buildProjectContext(projectName, expectedInstanceId = '') {
+  return db.runWithProjectInstance(projectName, expectedInstanceId, async () => {
+    const context = await readProjectContext(projectName);
+    const meta = context.metadata;
+    const genres = context.genres;
+    const chars = context.characters;
+    const chapters = context.chapters;
+    const foreshadows = context.foreshadows;
 
     const genreStr = genres.map(g => GENRE_LABELS[g] || g).join('、') || '未设定';
     const modeStr = MODE_LABELS[meta.mode] || meta.mode || '中篇';
@@ -54,13 +74,19 @@ function buildProjectContext(projectName) {
 ${chars.map(c => `- [${CHARACTER_ROLE_LABELS[c.role] || '配角'}] ${c.name}（${c.age}岁，${c.gender}）：${c.personality || ''} ${c.background || ''}`).join('\n')}
 
 章节概览:
-${chapters.map(ch => `[${ch.status}] [chapter_id=${ch.id}, volume_id=${ch.volume_id}] 第${ch.num}章 ${ch.title} - ${ch.outline || '（暂无大纲）'}`).join('\n')}
+${chapters.map((chapter) => {
+    const chapterIdentity = chapter.chapter_uid
+      ? `chapter_uid=${chapter.chapter_uid}`
+      : `chapter_id=${chapter.id}`;
+    const volumeIdentity = chapter.volume_uid
+      ? `volume_uid=${chapter.volume_uid}`
+      : `volume_id=${chapter.volume_id}`;
+    return `[${chapter.status}] [${chapterIdentity}, ${volumeIdentity}] 第${chapter.num}章 ${chapter.title} - ${chapter.outline || '（暂无大纲）'}`;
+  }).join('\n')}
 
 活跃伏笔:
 ${foreshadows.map(f => `[${f.priority}] ${f.title}：${f.description || ''}`).join('\n')}`;
-  } catch(e) {
-    return `项目: ${projectName}`;
-  }
+  });
 }
 
 module.exports = { buildProjectContext };

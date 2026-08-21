@@ -21,6 +21,8 @@ const SERVER_ROOT = path.join(REPO_ROOT, 'server');
 // five product write paths. Keep this exclusion exact: broad bootstrap/source
 // patterns would create an unaudited way around ManuscriptService.
 const NON_RUNTIME_BOOTSTRAP = 'server/seed.js';
+const NATIVE_PROJECTION_INSTALL_TARGET_BODY_UPSERT_SHA256 =
+  'b8ecd0807edd2c35e7817b03ba6054020f178cdae7f3388516b504966e795808';
 
 function repositoryPath(filePath) {
   return path.relative(REPO_ROOT, filePath).replaceAll('\\', '/');
@@ -305,6 +307,17 @@ function isExistingDbMigration(match) {
       === "UPDATE chapters SET content = '' WHERE content IS NULL";
 }
 
+function isNativeProjectionInstallTargetBodyWrite(file, match) {
+  if (
+    file !== 'server/native/native-project-store.js'
+    || match.functionName !== 'installTargetRows'
+    || match.kind !== 'upsert-content'
+  ) return false;
+  const normalizedSql = match.text.replace(/\s+/g, ' ').trim();
+  return createHash('sha256').update(normalizedSql).digest('hex')
+    === NATIVE_PROJECTION_INSTALL_TARGET_BODY_UPSERT_SHA256;
+}
+
 function findUnexpectedDirectContentWrites() {
   const offenders = [];
   for (const filePath of productionServerFiles()) {
@@ -314,6 +327,7 @@ function findUnexpectedDirectContentWrites() {
     for (const match of matches) {
       if (file === 'server/manuscript-service.js') continue;
       if (file === 'server/db.js' && isExistingDbMigration(match)) continue;
+      if (isNativeProjectionInstallTargetBodyWrite(file, match)) continue;
       offenders.push(`${file}:${match.line}:${match.kind}`);
     }
   }
@@ -517,6 +531,31 @@ test('static scanner finds multiline/template body SQL, dynamic assignments, and
       'update-content',
       'replace-content',
     ],
+  );
+});
+
+test('native projection body-write ownership is exact to installTargetRows and its approved SQL', () => {
+  const nativeFile = 'server/native/native-project-store.js';
+  const nativeSource = fs.readFileSync(path.join(REPO_ROOT, nativeFile), 'utf8');
+  const productionMatches = scanSource(nativeSource, nativeFile).filter((match) => (
+    match.functionName === 'installTargetRows' && match.kind === 'upsert-content'
+  ));
+  assert.equal(productionMatches.length, 1);
+  assert.equal(isNativeProjectionInstallTargetBodyWrite(nativeFile, productionMatches[0]), true);
+
+  const fixture = `
+    function anotherNativeFunction() {
+      db.prepare('INSERT INTO chapters (id, title) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.title');
+    }
+    function installTargetRows() {
+      db.prepare('INSERT INTO chapters (id, title) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.title');
+    }
+  `;
+  const rejected = scanSource(fixture, nativeFile);
+  assert.equal(rejected.length, 2);
+  assert.deepEqual(
+    rejected.map((match) => isNativeProjectionInstallTargetBodyWrite(nativeFile, match)),
+    [false, false],
   );
 });
 

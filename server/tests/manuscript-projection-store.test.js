@@ -10,6 +10,8 @@ const {
   SQLiteProjectionStore,
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
+  canonicalSchema12ReuseIdentityPlan,
+  currentProjectionAfterTarget,
 } = require('../manuscript/projection-store');
 const { ManuscriptStore } = require('../manuscript/store');
 const {
@@ -463,6 +465,128 @@ function emptySchema12CurrentProjection(
   basis.basisDigest = canonicalProjectionBasisDigest(basis);
   return deepFreeze({ projectUid, projectInstanceId, basis });
 }
+
+test('currentProjectionAfterTarget derives one exact frozen schema12 basis without rescanning', () => {
+  const target = buildDefaultTarget();
+
+  const current = currentProjectionAfterTarget(target);
+
+  assert.equal(Object.isFrozen(current), true);
+  assert.equal(Object.isFrozen(current.basis), true);
+  assert.equal(current.projectUid, target.projectUid);
+  assert.equal(current.projectInstanceId, target.projectInstanceId);
+  assert.equal(current.basis.sourceKind, 'schema12');
+  assert.equal(current.basis.baseGeneration, target.targetGeneration);
+  assert.deepEqual(current.basis.sqliteSequence, target.sqliteSequence);
+  assert.equal(
+    current.basis.ignoredBeforeDigest,
+    canonicalIgnoredLedgerDigest(target.ignoredLedger),
+  );
+  assert.deepEqual(
+    current.basis.pendingProposals,
+    target.basis.pendingProposals.filter((proposal) => (
+      !target.proposalInvalidations.some(({ revisionId }) => revisionId === proposal.revisionId)
+    )),
+  );
+  assert.equal(
+    current.basis.basisDigest,
+    canonicalProjectionBasisDigest(current.basis),
+  );
+  const tombstoneVolume = current.basis.volumes.find(({ uid }) => uid === VOLUME_TOMBSTONE);
+  const baseTombstoneVolume = target.basis.volumes.find(({ uid }) => uid === VOLUME_TOMBSTONE);
+  assert.equal(tombstoneVolume.sortOrder, baseTombstoneVolume.sortOrder);
+  const tombstoneChapter = current.basis.chapters.find(({ uid }) => uid === CHAPTER_DELETE);
+  const baseTombstoneChapter = target.basis.chapters.find(({ uid }) => uid === CHAPTER_DELETE);
+  assert.equal(tombstoneChapter.bodyRawSha256, baseTombstoneChapter.bodyRawSha256);
+  assert.equal(tombstoneChapter.status, baseTombstoneChapter.status);
+  assert.doesNotThrow(() => canonicalSchema12ReuseIdentityPlan(current));
+});
+
+test('installed orphan baseline receipt is Store-private, exact-generation, and binds complete schema12 facts', () => {
+  const store = new SQLiteProjectionStore();
+  const target = buildDefaultTarget(store);
+  const installedProjection = currentProjectionAfterTarget(target);
+  const queries = [];
+  const projectStore = Object.freeze({
+    readAll(sql) {
+      queries.push(sql);
+      if (/FROM volumes/u.test(sql)) {
+        return target.volumes.filter((row) => row.is_present === 1).map((row) => ({ ...row }));
+      }
+      if (/FROM chapters/u.test(sql)) {
+        return target.chapters.filter((row) => row.is_present === 1).map((row) => ({ ...row }));
+      }
+      if (/FROM manuscript_controlled_files/u.test(sql)) {
+        return target.controlledFiles.map((row) => ({
+          file_role: row.role,
+          resource_uid: row.resourceUid,
+          raw_sha256: row.rawSha256,
+          byte_size: row.byteSize,
+          file_identity_json: JSON.stringify({
+            fileIdentity: row.fileIdentity,
+            parentIdentity: row.parentIdentity,
+          }),
+          projection_generation: target.targetGeneration,
+        }));
+      }
+      if (/FROM manuscript_capacity_snapshot/u.test(sql)) {
+        const measurements = target.capacitySnapshot.measurements;
+        return [{
+          singleton_id: 1,
+          chapter_identities: measurements.chapterIdentities,
+          volume_identities: measurements.volumeIdentities,
+          controlled_files: measurements.controlledFiles,
+          chapter_directory_entries: measurements.chapterDirectoryEntries,
+          controlled_bytes: measurements.controlledBytes,
+          projection_generation: target.targetGeneration,
+        }];
+      }
+      throw new Error(`unexpected installed baseline query: ${sql}`);
+    },
+  });
+
+  const receipt = store.captureInstalledOrphanBaseline({
+    projectStore,
+    currentProjection: installedProjection,
+    ignoredLedger: target.ignoredLedger,
+  });
+  const authority = store.installedOrphanBaselineAuthority();
+  const description = authority.describe(receipt);
+
+  assert.equal(authority.assert(receipt), receipt);
+  assert.equal(Object.isFrozen(receipt), true);
+  assert.deepEqual(Reflect.ownKeys(receipt), []);
+  assert.equal(description.projectUid, target.projectUid);
+  assert.equal(description.projectInstanceId, target.projectInstanceId);
+  assert.equal(description.baseGeneration, target.targetGeneration);
+  assert.equal(description.basisDigest, installedProjection.basis.basisDigest);
+  assert.equal(description.ignoredDigest, installedProjection.basis.ignoredBeforeDigest);
+  assert.equal(description.volumes.length, target.volumes.filter((row) => row.is_present === 1).length);
+  assert.equal(description.chapters.length, target.chapters.filter((row) => row.is_present === 1).length);
+  assert.equal(description.controlledFiles.length, target.controlledFiles.length);
+  assert.equal(description.capacity.projection_generation, target.targetGeneration);
+  assert.equal(queries.length, 4);
+  assert.throws(() => authority.assert(Object.freeze({})), TypeError);
+  assert.throws(
+    () => new SQLiteProjectionStore().installedOrphanBaselineAuthority().assert(receipt),
+    TypeError,
+  );
+  let getterCalls = 0;
+  const poisonedProjectStore = {};
+  Object.defineProperty(poisonedProjectStore, 'readAll', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      throw new Error('poisoned installed baseline readAll');
+    },
+  });
+  assert.throws(() => store.captureInstalledOrphanBaseline({
+    projectStore: poisonedProjectStore,
+    currentProjection: installedProjection,
+    ignoredLedger: target.ignoredLedger,
+  }), TypeError);
+  assert.equal(getterCalls, 0);
+});
 
 function reservedPlanForCandidate(value) {
   return deepFreeze([

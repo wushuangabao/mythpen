@@ -4,16 +4,11 @@ import { ManuscriptMigrationDialog } from '@/components/ManuscriptMigrationDialo
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { useT } from '@/hooks/useT'
 import { activateOnKeyDown } from '@/lib/a11y'
-import { projectsApi, type FilesBetaProjectStatus } from '@/lib/api'
-import {
-  beginFilesBetaMigration,
-  FilesBetaMigrationBlockedError,
-  inspectFilesBetaMigrationPreflight,
-  type FilesBetaMigrationPreflight,
-} from '@/lib/manuscriptMigrationPreflight'
+import { type FilesBetaProjectStatus, projectsApi } from '@/lib/api'
+import { type ProductionMigrationPreflight, productionManuscriptMigration } from '@/lib/manuscriptMigrationComposition'
 import { recoveryReasonI18nKey } from '@/lib/projectRecovery'
-import { useProjectStore } from '@/stores/useProjectStore'
 import { useChapterStore } from '@/stores/useChapterStore'
+import { useProjectStore } from '@/stores/useProjectStore'
 import { useUIStore } from '@/stores/useUIStore'
 
 function formatDate(dateStr: string): string {
@@ -37,7 +32,7 @@ export function ProjectList() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [filesRoutes, setFilesRoutes] = useState<Record<string, FilesBetaProjectStatus['route']>>({})
   const [migrationTarget, setMigrationTarget] = useState<string | null>(null)
-  const [migrationPreflight, setMigrationPreflight] = useState<FilesBetaMigrationPreflight | null>(null)
+  const [migrationPreflight, setMigrationPreflight] = useState<ProductionMigrationPreflight | null>(null)
   const [migrationBusy, setMigrationBusy] = useState(false)
   const [migrationError, setMigrationError] = useState<string | null>(null)
   const deleteTargetProject = projects.find((project) => project.name === deleteTarget)
@@ -75,19 +70,32 @@ export function ProjectList() {
     await deleteProject(name)
   }
 
-  const openMigration = (name: string) => {
-    setMigrationTarget(name)
-    setMigrationPreflight(inspectFilesBetaMigrationPreflight(name))
+  const openMigration = async (name: string) => {
+    const project = projects.find((candidate) => candidate.name === name)
+    if (!project?.instanceId) return
+    setMigrationBusy(true)
     setMigrationError(null)
+    try {
+      const preflight = await productionManuscriptMigration.beginPreflight({
+        projectName: name,
+        projectInstanceId: project.instanceId,
+      })
+      setMigrationTarget(name)
+      setMigrationPreflight(preflight)
+    } catch (error) {
+      setMigrationError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMigrationBusy(false)
+    }
   }
 
   const confirmMigration = async () => {
-    if (!migrationTarget) return
+    if (!migrationTarget || !migrationPreflight) return
     const name = migrationTarget
     setMigrationBusy(true)
     setMigrationError(null)
     try {
-      await beginFilesBetaMigration(name, () => projectsApi.migrateFilesBeta(name))
+      await productionManuscriptMigration.confirm(migrationPreflight)
       setFilesRoutes((routes) => ({ ...routes, [name]: 'files' }))
       useChapterStore.getState().discardProjectState(name)
       setCurrentProject(name)
@@ -95,7 +103,6 @@ export function ProjectList() {
       setMigrationTarget(null)
       setMigrationPreflight(null)
     } catch (error) {
-      if (error instanceof FilesBetaMigrationBlockedError) setMigrationPreflight(error.preflight)
       setMigrationError(error instanceof Error ? error.message : String(error))
     } finally {
       setMigrationBusy(false)
@@ -201,7 +208,7 @@ export function ProjectList() {
                       className="mt-3 rounded-md border border-[var(--accent-gold)]/40 px-2.5 py-1.5 text-[11px] font-medium text-[var(--accent-gold)] hover:bg-[var(--accent-gold)]/10"
                       onClick={(event) => {
                         event.stopPropagation()
-                        openMigration(p.name)
+                        void openMigration(p.name)
                       }}
                     >
                       {t('project.filesBetaMigrate')}
@@ -287,6 +294,7 @@ export function ProjectList() {
           error={migrationError}
           onCancel={() => {
             if (migrationBusy) return
+            void productionManuscriptMigration.cancel(migrationPreflight)
             setMigrationTarget(null)
             setMigrationPreflight(null)
             setMigrationError(null)

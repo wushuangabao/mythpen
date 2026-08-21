@@ -1,10 +1,12 @@
 import { Pen } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { DraftConflictDialog } from '@/components/DraftConflictDialog'
 import { ManuscriptStatusBanner } from '@/components/ManuscriptStatusBanner'
 import { useT } from '@/hooks/useT'
 import { shouldSynchronizeEditorDom } from '@/lib/editorAuthoritySync'
 import { type EditorSaveIntent, runEditorSaveWithProtection } from '@/lib/editorSaveProtection'
 import {
+  discardEditorSave,
   editorSaveKey,
   enqueueEditorSave,
   flushEditorSave,
@@ -69,7 +71,7 @@ function getErrorMessage(error: unknown): string {
 
 export function EditorContent() {
   const { fontSize, fontFamily } = useEditorStore()
-  const { currentChapter, volumes, updateChapter, createChapter, setSaveStatus } = useChapterStore()
+  const { currentChapter, volumes, updateChapter, createChapter, loadChapters, setSaveStatus } = useChapterStore()
   const chapterProject = useChapterStore((s) => s.projectName)
   const currentProject = useProjectStore((s) => s.currentProject)
   const loadRevision = useRevisionStore((s) => s.loadRevision)
@@ -643,8 +645,23 @@ export function EditorContent() {
     [chapterId, currentProject],
   )
 
+  const handleDraftConflictResolved = useCallback(async () => {
+    if (!currentProject || !chapterId) return
+    discardEditorSave(currentProject, chapterId)
+    discardTitleSave(currentProject, chapterId)
+    await loadChapters(currentProject)
+    setSaveStatus('saved')
+  }, [chapterId, currentProject, loadChapters, setSaveStatus])
+
   return (
     <div className="flex-1 overflow-y-auto px-16 pb-32 pt-12 flex justify-center custom-scrollbar">
+      {manuscriptProtectionCode === 'EXTERNAL_DRAFT_CONFLICT' && currentProject && chapter?.chapterUid && (
+        <DraftConflictDialog
+          project={currentProject}
+          resourceUid={chapter.chapterUid}
+          onResolved={handleDraftConflictResolved}
+        />
+      )}
       <div
         className="w-full max-w-[var(--editor-max-w)] leading-[1.9] tracking-[0.01em]"
         style={{ fontFamily, fontSize: `${fontSize}px`, color: 'var(--ink)' }}

@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+const { ProjectCreationService } = require('../manuscript/project-creation-service');
 const { ManuscriptUidReservation } = require('../manuscript/uid-reservation');
 const { createUidReservationSources } = require('../manuscript/uid-reservation-sources');
 const { buildSchema12Candidate } = require('../native/durability-schema');
@@ -21,6 +22,7 @@ const {
   createMemoryControlStore,
   deepFreeze,
   emptyDirectoryPlan,
+  lifecycleLockReceipt,
   physicalIdentity,
 } = require('./fixtures/project-creation-crash');
 
@@ -30,6 +32,118 @@ function dispositionPort() {
     inspect() { return Object.freeze({ disposition: 'after' }); },
   });
 }
+
+test('cold creation activation re-verifies the complete after-state before activated append', async () => {
+  const calls = [];
+  const creationReservation = deepFreeze({
+    creationId: CREATION_ID,
+    projectInstanceId: '22222222-2222-4222-8222-222222222222',
+    projectReservation: { uid: PROJECT_UID },
+  });
+  const authority = Object.freeze(() => {});
+  const lifecyclePlatformIdentity = Object.freeze({ exact: 'lifecycle' });
+  const lifecycleLockReceipt = Object.freeze({ lifecyclePlatformIdentity });
+  let logicalInputDigest;
+  const journal = Object.freeze({
+    beginActivation() { throw new Error('unused'); },
+    prepareCreationContext(value) {
+      assert.strictEqual(value, authority);
+      calls.push('journal.prepareCreationContext');
+      return Object.freeze({ creationId: CREATION_ID, targetGeneration: 1 });
+    },
+    read() {
+      return deepFreeze({
+        state: 'activation_intent',
+        creationId: CREATION_ID,
+        projectUid: PROJECT_UID,
+        projectInstanceId: creationReservation.projectInstanceId,
+        logicalRequestId: 'creation-verify-after',
+        logicalInputDigest,
+        projectMetadata: {
+          name: 'Novel', mode: 'medium-novel', language: 'zh', genres: ['fantasy'],
+        },
+        baseGeneration: 0,
+        targetGeneration: 1,
+        lifecycleLockReceipt,
+        lifecyclePlatformIdentity,
+      });
+    },
+    recordActivated(value, evidence) {
+      assert.strictEqual(value, authority);
+      assert.deepEqual(evidence, { disposition: 'after', generation: 1, route: 'files' });
+      calls.push('journal.recordActivated');
+      return Object.freeze({ creationId: CREATION_ID, projectUid: PROJECT_UID, state: 'activated' });
+    },
+    recordDatabaseCandidate() { throw new Error('unused'); },
+    recordFilePublicationStarted() { throw new Error('unused'); },
+    recordFilesPublished() { throw new Error('unused'); },
+    recordProjectControlReady() { throw new Error('unused'); },
+    reserve() { throw new Error('unused'); },
+    resumeActivation() { return authority; },
+  });
+  const unused = (...methods) => Object.freeze(Object.fromEntries(methods.map((method) => [
+    method,
+    () => { throw new Error(`${method} is unused`); },
+  ])));
+  const service = new ProjectCreationService({
+    uidReservations: Object.freeze({
+      reserveCreationIdentity(input) {
+        logicalInputDigest = input.logicalInputDigest;
+        return Object.freeze({ creationReservation, authority });
+      },
+      assertCreationIdentity() { return creationReservation; },
+    }),
+    journals: Object.freeze({ open() { return journal; } }),
+    directories: Object.freeze({
+      ...unused('ensure', 'plan'),
+      verifyExisting(receipt) {
+        calls.push('directories.verifyExisting');
+        return receipt.lifecyclePlatformIdentity;
+      },
+    }),
+    store: unused('buildClosure', 'finalizeCandidate'),
+    projection: unused('buildTarget'),
+    childJournal: unused('bindTarget', 'prepare', 'publishFiles', 'stageAssets'),
+    route: Object.freeze({
+      prepareAbsentInstall() {
+        calls.push('route.prepareAbsentInstall');
+        return Object.freeze({});
+      },
+    }),
+    database: Object.freeze({
+      build() { throw new Error('unused'); },
+      activate() {
+        calls.push('database.activate');
+        return Object.freeze({ disposition: 'after', generation: 1, route: 'files' });
+      },
+      verifyActivationAfter() {
+        calls.push('database.verifyActivationAfter');
+        return Object.freeze({ disposition: 'after', generation: 1, route: 'files' });
+      },
+    }),
+  });
+
+  await service.create(deepFreeze({
+    childJournalId: '99999999-9999-4999-8999-999999999999',
+    logicalRequestId: 'creation-verify-after',
+    projectInstanceId: creationReservation.projectInstanceId,
+    projectMetadata: {
+      name: 'Novel', mode: 'medium-novel', language: 'zh', genres: ['fantasy'],
+    },
+    projectRootProbe: { probe() {} },
+    projectedAt: '2026-08-20T00:00:00.000Z',
+  }));
+
+  assert.deepEqual(calls, [
+    'directories.verifyExisting',
+    'journal.prepareCreationContext',
+    'route.prepareAbsentInstall',
+    'database.activate',
+    'database.verifyActivationAfter',
+    'directories.verifyExisting',
+    'journal.recordActivated',
+  ]);
+});
 
 test('restart after durable candidate and before absent install reuses evidence and activates once', async (t) => {
   const { ProjectCreationJournal } = require('../manuscript/project-creation-journal');
@@ -118,6 +232,7 @@ test('restart after durable candidate and before absent install reuses evidence 
     childJournalId: '99999999-9999-4999-8999-999999999999',
     childReservation: { version: 1 },
     closureDigest: DIGEST_A,
+    lifecycleLockReceipt: lifecycleLockReceipt(dataRoot, PROJECT_UID, projectInstanceId),
     logicalRequestId: 'create-request-crash',
     partialManifest: { version: 1, members: [] },
     projectionBasisDigest: target.basis.basisDigest,

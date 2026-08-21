@@ -4,8 +4,8 @@
  */
 const { buildProjectContext } = require('./context');
 
-function buildWritingPrompt(projectName) {
-  const context = buildProjectContext(projectName);
+async function buildWritingPrompt(projectName, expectedInstanceId = '') {
+  const context = await buildProjectContext(projectName, expectedInstanceId);
 
   return `你是一位经验丰富专业的小说创作助手，帮助作者高质量完稿。
 

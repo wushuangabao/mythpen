@@ -263,6 +263,20 @@
       "generic": "操作失败，项目现场已保留。请刷新诊断或导出诊断包。"
     }
   },
+  "manuscriptRecovery": {
+    "conflictUnavailable": "当前没有可处理的草稿冲突，请刷新后重试。",
+    "conflictTitle": "发现外部稿件变更",
+    "conflictDescription": "磁盘上的稿件与本地未保存草稿发生冲突。请选择保留外部版本，或将已保存的本地草稿重新应用到项目。",
+    "refresh": "刷新冲突状态",
+    "copyBackup": "复制草稿备份",
+    "acceptExternal": "采用外部版本",
+    "applySavedDraft": "应用已保存草稿",
+    "orphanTitle": "处理未归属稿件",
+    "reactivateOrphan": "恢复为待处理",
+    "keepOrphan": "保留并忽略",
+    "retiredTitle": "已停用的文件项目",
+    "retiredDescription": "这些项目仍保留在磁盘上，但不会进入普通项目列表。当前版本仅显示其状态，不会隐式重新启用。"
+  },
   "settings": {
     "title": "设置",
     "uiLanguage": "界面语言",

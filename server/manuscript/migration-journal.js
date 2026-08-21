@@ -4,6 +4,11 @@ const { createHash } = require('node:crypto');
 const path = require('node:path');
 
 const { assertCanonicalUuid, manuscriptError } = require('./contracts');
+const {
+  MANUSCRIPT_LIFECYCLE_LOCK_DERIVATION,
+  assertManuscriptLifecycleLockPreflight,
+  assertManuscriptLifecycleLockReceipt,
+} = require('./lifecycle-lock');
 const { faultPoint } = require('../testing/fault-injection');
 
 const PREFIX = 'migration.';
@@ -394,6 +399,7 @@ async function inspect(record, portName, aggregate) {
 
 function stateView(aggregate) {
   const reservation = reservationOf(aggregate);
+  const sourceSnapshot = aggregate.history.find((event) => event.state === 'source_snapshot_ready');
   const filesCandidate = aggregate.history.find((event) => event.state === 'files_candidate_ready');
   const publicationPin = aggregate.history.find((event) => event.state === 'file_publication_started');
   return Object.freeze({
@@ -407,8 +413,50 @@ function stateView(aggregate) {
     sourceBasisDigest: reservation.sourceBasisDigest,
     migrationReservation: reservation.migrationReservation,
     reservationDigest: reservation.reservationDigest,
+    lifecycleLockPreflight: reservation.migrationReservation.lifecycleLockPreflight,
+    lifecycleLockReceipt: sourceSnapshot?.data.lifecycleLockReceipt ?? null,
+    lifecyclePlatformIdentity:
+      sourceSnapshot?.data.lifecycleLockReceipt?.lifecyclePlatformIdentity ?? null,
     childReservation: filesCandidate?.data.childReservation ?? null,
     manifest: publicationPin?.data.manifest ?? null,
+  });
+}
+
+function lifecyclePreflightControlDirectory(preflight) {
+  return preflight.disposition === 'present'
+    ? preflight.canonicalRealControlDirectory
+    : preflight.plannedControlDirectory;
+}
+
+function assertReceiptMatchesReservedPreflight(preflight, receipt, migrationId) {
+  if (
+    receipt.lifecycleLockBefore.disposition !== preflight.disposition
+    || receipt.lifecyclePlatformIdentity.canonicalRealControlDirectory
+      !== lifecyclePreflightControlDirectory(preflight)
+  ) throw recoveryRequired('lifecycle lock receipt changed the reserved before disposition', {
+    migrationId,
+  });
+  if (
+    preflight.disposition === 'present'
+    && (
+      preflight.byteSize !== receipt.lifecycleLockBefore.byteSize
+      || preflight.sha256 !== receipt.lifecycleLockBefore.sha256
+      || !sameIdentity(preflight.lifecycleLockIdentity, receipt.lifecycleLockBefore.identity)
+      || !sameIdentity(
+        preflight.controlDirectoryIdentity,
+        receipt.lifecyclePlatformIdentity.controlDirectoryIdentity,
+      )
+      || !sameIdentity(
+        preflight.controlParentDirectoryIdentity,
+        receipt.lifecyclePlatformIdentity.controlParentDirectoryIdentity,
+      )
+      || !sameIdentity(
+        preflight.lifecycleLockIdentity,
+        receipt.lifecyclePlatformIdentity.lifecycleLockIdentity,
+      )
+    )
+  ) throw recoveryRequired('lifecycle lock receipt changed the reserved physical identity', {
+    migrationId,
   });
 }
 
@@ -639,6 +687,7 @@ class MigrationJournal {
         sourceBasisDigest: assertDigest(descriptors.sourceBasisDigest.value, 'sourceBasisDigest'),
         migrationReservation: snapshotPlain(descriptors.migrationReservation.value, 'migrationReservation'),
       };
+      assertManuscriptLifecycleLockPreflight(candidate.migrationReservation.lifecycleLockPreflight);
       const persisted = reservationOf(current);
       if (digestPlain(candidate) !== persisted.reservationDigest) {
         throw recoveryRequired('migration ID is already bound to another reservation', { migrationId });
@@ -659,6 +708,7 @@ class MigrationJournal {
       sourceBasisDigest: assertDigest(descriptors.sourceBasisDigest.value, 'sourceBasisDigest'),
       migrationReservation: snapshotPlain(descriptors.migrationReservation.value, 'migrationReservation'),
     };
+    assertManuscriptLifecycleLockPreflight(source.migrationReservation.lifecycleLockPreflight);
     const data = Object.freeze({
       version: VERSION,
       projectUid: record.binding.projectUid,
@@ -681,19 +731,48 @@ class MigrationJournal {
     if (classify(record, 'routeDisposition', routeEvidence, aggregate) !== 'after') {
       throw recoveryRequired('route fence is not proven after', { migrationId: aggregate.migrationId });
     }
+    const safeDirectoryPlan = snapshotPlain(directoryPlan, 'directoryPlan');
+    const lifecycleLockPreflight = reservationOf(aggregate)
+      .migrationReservation.lifecycleLockPreflight;
+    if (
+      safeDirectoryPlan.lifecycleLockDerivation !== MANUSCRIPT_LIFECYCLE_LOCK_DERIVATION
+      || safeDirectoryPlan.projectControlRoot
+        !== lifecyclePreflightControlDirectory(lifecycleLockPreflight)
+    ) throw recoveryRequired('route-fenced directory plan differs from lifecycle preflight', {
+      migrationId: aggregate.migrationId,
+    });
     append(record, aggregate.migrationId, 'route_fenced', aggregate.state, {
       reservationDigest: reservationOf(aggregate).reservationDigest,
       routeEvidenceDigest: digestPlain(snapshotPlain(routeEvidence, 'routeEvidence')),
-      directoryPlan: snapshotPlain(directoryPlan, 'directoryPlan'),
+      directoryPlan: safeDirectoryPlan,
     });
     return mintStage(record, requireAggregate(record, aggregate.migrationId));
   }
 
-  async recordSourceSnapshot(authority, sourceSnapshot) {
+  async recordSourceSnapshot(authority, sourceSnapshot, lifecycleLockReceiptValue) {
     const record = journalRecords.get(this);
     const aggregate = assertStage(record, authority, 'route_fenced');
     const snapshot = snapshotPlain(sourceSnapshot, 'sourceSnapshot');
+    const lifecycleLockReceipt = snapshotPlain(
+      lifecycleLockReceiptValue,
+      'lifecycleLockReceipt',
+    );
+    assertManuscriptLifecycleLockReceipt(lifecycleLockReceipt);
+    assertReceiptMatchesReservedPreflight(
+      reservationOf(aggregate).migrationReservation.lifecycleLockPreflight,
+      lifecycleLockReceipt,
+      aggregate.migrationId,
+    );
+    if (
+      aggregate.data.directoryPlan?.lifecycleLockDerivation
+        !== MANUSCRIPT_LIFECYCLE_LOCK_DERIVATION
+      || aggregate.data.directoryPlan?.projectControlRoot
+        !== lifecycleLockReceipt.lifecyclePlatformIdentity.canonicalRealControlDirectory
+    ) throw recoveryRequired('lifecycle lock receipt differs from the route-fenced directory plan', {
+      migrationId: aggregate.migrationId,
+    });
     append(record, aggregate.migrationId, 'source_snapshot_ready', aggregate.state, {
+      lifecycleLockReceipt,
       sourceSnapshot: snapshot,
       sourceSnapshotDigest: digestPlain(snapshot),
     });
@@ -902,8 +981,23 @@ class MigrationJournal {
     return Object.freeze({ migrationId: aggregate.migrationId, state: 'migration_aborted' });
   }
 
-  async recover(migrationId) {
+  async recover(migrationId, options = undefined) {
     const record = journalRecords.get(this);
+    let verifyActivationLifecycleAfterInspection = null;
+    if (options !== undefined) {
+      const descriptors = exactDescriptors(
+        options,
+        ['verifyActivationLifecycleAfterInspection'],
+        'migration recovery options',
+      );
+      verifyActivationLifecycleAfterInspection =
+        descriptors.verifyActivationLifecycleAfterInspection.value;
+      if (typeof verifyActivationLifecycleAfterInspection !== 'function') {
+        throw new TypeError(
+          'migration recovery verifyActivationLifecycleAfterInspection must be a function',
+        );
+      }
+    }
     let aggregate = requireAggregate(record, migrationId);
     if (TERMINAL.has(aggregate.state)) {
       return Object.freeze({ migrationId: aggregate.migrationId, state: aggregate.state });
@@ -930,6 +1024,15 @@ class MigrationJournal {
         || route.disposition !== 'after'
         || database.disposition !== 'after'
       ) throw recoveryRequired('activation prerequisites are not all proven after');
+      if (verifyActivationLifecycleAfterInspection === null) {
+        throw recoveryRequired('activation lifecycle after-inspection verifier is required', {
+          migrationId: aggregate.migrationId,
+        });
+      }
+      const verificationResult = verifyActivationLifecycleAfterInspection(stateView(aggregate));
+      if (verificationResult !== undefined) {
+        throw new TypeError('activation lifecycle after-inspection verifier must be synchronous');
+      }
       return this.recordActivated(mintStage(record, aggregate), database.evidence);
     }
     if (aggregate.state === 'migration_abort_intent') {

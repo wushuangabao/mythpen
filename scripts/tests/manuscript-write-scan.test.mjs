@@ -71,6 +71,9 @@ test('static scanner catches structural chapter write evasions', (t) => {
     { file: 'server/routes/07-quoted-boundaries.js', line: 2, kind: 'update-content' },
     { file: 'server/routes/07-quoted-boundaries.js', line: 3, kind: 'update-content' },
     { file: 'server/routes/08-multi-arm-upsert.js', line: 1, kind: 'upsert-content' },
+    { file: 'server/routes/metadata-only.js', line: 1, kind: 'article-truth-write' },
+    { file: 'server/routes/metadata-only.js', line: 2, kind: 'article-truth-write' },
+    { file: 'server/routes/metadata-only.js', line: 3, kind: 'article-truth-write' },
   ])
 })
 
@@ -96,7 +99,14 @@ test('static scanner follows dynamic assignment builders, aliases, and quoted ke
 
 test('static scanner applies only the exact owner, migration, and seed exclusions', (t) => {
   const root = fixtureRepository(t, {
-    'server/manuscript-service.js': "db.prepare('UPDATE chapters SET content = ? WHERE id = ?')\n",
+    'server/manuscript-service.js': [
+      'function writeChapterBodyInTransaction(db) {',
+      "  db.prepare('UPDATE chapters SET content = ? WHERE id = ?')",
+      '}',
+      'function unrelatedServiceWrite(db) {',
+      "  db.prepare('UPDATE chapters SET content = ? WHERE id = ?')",
+      '}',
+    ].join('\n'),
     'server/seed.js': "db.prepare('INSERT INTO chapters (id, content) VALUES (?, ?)')\n",
     'server/db.js': [
       'function normalizeLegacyChapterContent(db) {',
@@ -112,8 +122,263 @@ test('static scanner applies only the exact owner, migration, and seed exclusion
 
   assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
     { file: 'server/db.js', line: 5, kind: 'update-content' },
+    { file: 'server/manuscript-service.js', line: 5, kind: 'update-content' },
     { file: 'server/routes/api.js', line: 1, kind: 'update-content' },
     { file: 'server/tools.js', line: 1, kind: 'update-content' },
+  ])
+})
+
+test('static scanner catches every files-authority product bypass family', (t) => {
+  const root = fixtureRepository(t, {
+    'server/routes/article-truth.js': [
+      "db.prepare('UPDATE chapters SET title = ? WHERE id = ?')",
+      "db.prepare('INSERT INTO volumes (title) VALUES (?)')",
+      "db.prepare('DELETE FROM chapters WHERE id = ?')",
+    ].join('\n'),
+    'server/routes/legacy-position.js': [
+      "db.prepare('SELECT COALESCE(MAX(num), 0) FROM chapters')",
+      "db.prepare('SELECT expected_resolve_chapter FROM foreshadows')",
+    ].join('\n'),
+    'server/routes/read-bypass.js': [
+      "db.prepare('SELECT id, title FROM chapters ORDER BY num')",
+      "db.prepare('SELECT id, title FROM volumes ORDER BY sort_order')",
+    ].join('\n'),
+    'server/routes/caller-path.js': [
+      "publishGeneratedProjectFile({ finalPath: req.body.outputPath, content: 'x' })",
+      "publishOpaqueDiagnosticsExport({ exportDir: ownedExportDir, diagnostics })",
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/routes/article-truth.js', line: 1, kind: 'article-truth-write' },
+    { file: 'server/routes/article-truth.js', line: 2, kind: 'article-truth-write' },
+    { file: 'server/routes/article-truth.js', line: 3, kind: 'physical-delete' },
+    { file: 'server/routes/caller-path.js', line: 1, kind: 'caller-controlled-path' },
+    { file: 'server/routes/legacy-position.js', line: 1, kind: 'legacy-max-num' },
+    { file: 'server/routes/legacy-position.js', line: 2, kind: 'legacy-expected-resolve-chapter' },
+    { file: 'server/routes/read-bypass.js', line: 1, kind: 'freshness-bypass-read' },
+    { file: 'server/routes/read-bypass.js', line: 2, kind: 'freshness-bypass-read' },
+  ])
+})
+
+test('static scanner grants the production stats read only to its exact admitted owner', (t) => {
+  const root = fixtureRepository(t, {
+    'server/manuscript/production-runtime.js': [
+      'function statsView(db) {',
+      "  return db.prepare('SELECT chapter_uid, updated_at FROM chapters WHERE is_present = 1').all()",
+      '}',
+      'function unrelatedRead(db) {',
+      "  return db.prepare('SELECT chapter_uid, updated_at FROM chapters WHERE is_present = 1').all()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/manuscript/production-runtime.js', line: 5, kind: 'freshness-bypass-read' },
+  ])
+})
+
+test('static scanner grants revision resolution SQL only to its exact admitted publishers', (t) => {
+  const root = fixtureRepository(t, {
+    'server/manuscript/production-runtime.js': [
+      'function publishRevisionResolution(db) {',
+      "  return db.prepare('SELECT c.chapter_uid FROM chapter_revisions r JOIN chapters c ON c.id = r.chapter_id WHERE r.id = ?').get()",
+      '}',
+      'function readCommittedRevisionResolution(db) {',
+      "  return db.prepare('SELECT c.chapter_uid FROM chapter_revisions r JOIN chapters c ON c.id = r.chapter_id WHERE r.id = ?').get()",
+      '}',
+      'function publish(db) {',
+      "  return db.prepare('SELECT c.chapter_uid FROM chapter_revisions r JOIN chapters c ON c.id = r.chapter_id WHERE r.id = ?').get()",
+      '}',
+      'function revisionResolutionRow(db) {',
+      "  return db.prepare('SELECT c.chapter_uid FROM chapter_revisions r JOIN chapters c ON c.id = r.chapter_id WHERE r.id = ?').get()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/manuscript/production-runtime.js', line: 8, kind: 'freshness-bypass-read' },
+    { file: 'server/manuscript/production-runtime.js', line: 11, kind: 'freshness-bypass-read' },
+  ])
+})
+
+test('static scanner grants legacy tool SQL only to the four exact SQLite owners', (t) => {
+  const root = fixtureRepository(t, {
+    'server/tools.js': [
+      'function executeLegacySqliteTool(db) {',
+      "  return db.prepare('SELECT id, title FROM chapters ORDER BY num').all()",
+      '}',
+      'function executeLegacySqliteResolveChapter(db) {',
+      "  return db.prepare('SELECT expected_resolve_chapter FROM foreshadows').all()",
+      '}',
+      'function executeLegacySqliteUpdateById(db) {',
+      "  return db.prepare('UPDATE chapters SET title = ? WHERE id = ?').run()",
+      '}',
+      'function executeLegacySqliteDeleteById(db) {',
+      "  return db.prepare('DELETE FROM chapters WHERE id = ?').run()",
+      '}',
+      'function unrelatedTool(db) {',
+      "  db.prepare('SELECT id, title FROM chapters ORDER BY num').all()",
+      "  db.prepare('SELECT expected_resolve_chapter FROM foreshadows').all()",
+      "  db.prepare('UPDATE chapters SET title = ? WHERE id = ?').run()",
+      "  db.prepare('DELETE FROM chapters WHERE id = ?').run()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/tools.js', line: 14, kind: 'freshness-bypass-read' },
+    { file: 'server/tools.js', line: 15, kind: 'legacy-expected-resolve-chapter' },
+    { file: 'server/tools.js', line: 16, kind: 'article-truth-write' },
+    { file: 'server/tools.js', line: 17, kind: 'physical-delete' },
+  ])
+})
+
+test('static scanner grants recent-project SQL only to the exact legacy reader', (t) => {
+  const root = fixtureRepository(t, {
+    'server/recent-projects.js': [
+      'function readLegacyRecentProject(db) {',
+      "  return db.prepare('SELECT COUNT(*) AS c FROM chapters').get()",
+      '}',
+      'function unrelatedRecentReader(db) {',
+      "  return db.prepare('SELECT COUNT(*) AS c FROM chapters').get()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/recent-projects.js', line: 5, kind: 'freshness-bypass-read' },
+  ])
+})
+
+test('static scanner grants the AI chapter SQL fallback only to its exact route-aware owner', (t) => {
+  const root = fixtureRepository(t, {
+    'server/index.js': [
+      'function readAiChapter(db) {',
+      "  return db.prepare('SELECT * FROM chapters WHERE id = ?').get()",
+      '}',
+      'function unrelatedAiRead(db) {',
+      "  return db.prepare('SELECT * FROM chapters WHERE id = ?').get()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/index.js', line: 5, kind: 'freshness-bypass-read' },
+  ])
+})
+
+test('static scanner grants revision basis reads only to the native auxiliary owner', (t) => {
+  const root = fixtureRepository(t, {
+    'server/native/native-project-store.js': [
+      'function currentAuxiliaryChapter(db) {',
+      "  return db.prepare('SELECT id, content FROM chapters WHERE id = ?').get()",
+      '}',
+      'function unrelatedAuxiliaryRead(db) {',
+      "  return db.prepare('SELECT id, content FROM chapters WHERE id = ?').get()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/native/native-project-store.js', line: 5, kind: 'freshness-bypass-read' },
+  ])
+})
+
+test('static scanner grants legacy revision SQL only to exact revision owners', (t) => {
+  const root = fixtureRepository(t, {
+    'server/chapter-revisions.js': [
+      'function getPendingRevision(db) {',
+      "  return db.prepare('SELECT * FROM chapter_revisions JOIN chapters ON chapters.id = chapter_revisions.chapter_id').get()",
+      '}',
+      'function createPendingRevision(db) {',
+      "  return db.prepare('UPDATE chapters SET status = ? WHERE id = ?').run()",
+      '}',
+      'function applyRevision() {',
+      '  const applyInTransaction = (db) => {',
+      "    db.prepare('UPDATE chapters SET status = ? WHERE id = ?').run()",
+      '  }',
+      '  return applyInTransaction',
+      '}',
+      'function unrelatedRevisionRead(db) {',
+      "  return db.prepare('SELECT * FROM chapter_revisions JOIN chapters ON chapters.id = chapter_revisions.chapter_id').get()",
+      '}',
+      'function unrelatedRevisionWrite(db) {',
+      "  return db.prepare('UPDATE chapters SET status = ? WHERE id = ?').run()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/chapter-revisions.js', line: 14, kind: 'freshness-bypass-read' },
+    { file: 'server/chapter-revisions.js', line: 17, kind: 'article-truth-write' },
+  ])
+})
+
+test('static scanner grants legacy REST SQL only to exact SQLite route owners', (t) => {
+  const root = fixtureRepository(t, {
+    'server/routes/api.js': [
+      'function createLegacySqliteProject(db) {',
+      "  return db.prepare('INSERT INTO volumes (title) VALUES (?)').run()",
+      '}',
+      'function listLegacySqliteChapters(db) {',
+      "  return db.prepare('SELECT id, title FROM chapters ORDER BY num').all()",
+      '}',
+      'function readLegacySqliteChapter(db) {',
+      "  return db.prepare('SELECT id FROM chapters WHERE id = ?').get()",
+      '}',
+      'function resolveLegacySqliteChapter(db) {',
+      "  return db.prepare('SELECT id FROM chapters WHERE num = ?').all()",
+      '}',
+      'function updateLegacySqliteChapter(db) {',
+      "  return db.prepare('UPDATE chapters SET title = ? WHERE id = ?').run()",
+      '}',
+      'function createLegacySqliteChapter(db) {',
+      "  return db.prepare('INSERT INTO chapters (title) VALUES (?)').run()",
+      '}',
+      'function deleteLegacySqliteChapter(db) {',
+      "  return db.prepare('DELETE FROM chapters WHERE id = ?').run()",
+      '}',
+      'function listLegacySqliteVolumes(db) {',
+      "  return db.prepare('SELECT id, title FROM volumes ORDER BY sort_order').all()",
+      '}',
+      'function createLegacySqliteVolume(db) {',
+      "  return db.prepare('INSERT INTO volumes (title) VALUES (?)').run()",
+      '}',
+      'function updateLegacySqliteVolume(db) {',
+      "  return db.prepare('UPDATE volumes SET title = ? WHERE id = ?').run()",
+      '}',
+      'function deleteLegacySqliteVolume(db) {',
+      "  return db.prepare('DELETE FROM volumes WHERE id = ?').run()",
+      '}',
+      'function readLegacySqliteCharacterAssociations(db) {',
+      "  return db.prepare('SELECT chapters.id FROM chapters JOIN chapter_characters ON chapters.id = chapter_characters.chapter_id').all()",
+      '}',
+      'function createLegacySqliteForeshadow(db) {',
+      "  return db.prepare('INSERT INTO foreshadows (expected_resolve_chapter) VALUES (?)').run()",
+      '}',
+      'function readLegacySqliteStats(db) {',
+      "  return db.prepare('SELECT COALESCE(MAX(num), 0) FROM chapters').get()",
+      '}',
+      'function readLegacySqliteExportSnapshot(db) {',
+      "  return db.prepare('SELECT id, title FROM chapters ORDER BY num').all()",
+      '}',
+      'function unrelatedRoute(db) {',
+      "  db.prepare('SELECT id, title FROM chapters ORDER BY num').all()",
+      "  db.prepare('UPDATE chapters SET title = ? WHERE id = ?').run()",
+      "  db.prepare('DELETE FROM volumes WHERE id = ?').run()",
+      "  db.prepare('SELECT COALESCE(MAX(num), 0) FROM chapters').get()",
+      "  db.prepare('SELECT expected_resolve_chapter FROM foreshadows').all()",
+      '}',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(scanManuscriptWriteBoundary({ repositoryRoot: root }), [
+    { file: 'server/routes/api.js', line: 47, kind: 'freshness-bypass-read' },
+    { file: 'server/routes/api.js', line: 48, kind: 'article-truth-write' },
+    { file: 'server/routes/api.js', line: 49, kind: 'physical-delete' },
+    { file: 'server/routes/api.js', line: 50, kind: 'legacy-max-num' },
+    { file: 'server/routes/api.js', line: 51, kind: 'legacy-expected-resolve-chapter' },
   ])
 })
 

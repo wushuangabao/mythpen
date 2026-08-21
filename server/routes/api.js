@@ -10,6 +10,7 @@ const { getManuscriptRuntime } = require('../manuscript/runtime');
 const {
   publishGeneratedProjectFile,
   publishOpaqueDiagnosticsExport,
+  publishProjectExport,
 } = require('../project-export');
 const { readRecentProject } = require('../recent-projects');
 const { normalizeCharacterName } = require('../character-validation');
@@ -34,6 +35,15 @@ const RECOVERY_ACTIONS = new Set([
   'adopt_same_path_identity',
 ]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FILES_PROJECT_ICON = Object.freeze({
+  'sci-fi': 'Rocket', fantasy: 'Wand', romance: 'Heart', history: 'Landmark',
+  urban: 'Building', 'power-fantasy': 'Zap', biography: 'BookOpen', other: 'Scroll',
+});
+const FILES_PROJECT_GENRE_LABEL = Object.freeze({
+  'sci-fi': '科幻', fantasy: '玄幻', romance: '言情', history: '历史', urban: '都市',
+  'power-fantasy': '爽文', biography: '传记', other: '其他',
+});
 
 function isPlainJsonObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -51,6 +61,61 @@ function hasExactKeys(value, expectedKeys) {
 
 function hasEmptyQuery(req) {
   return req.query === undefined || Object.keys(req.query).length === 0;
+}
+
+function invalidFilesParams(message) {
+  const error = new TypeError(message);
+  error.code = 'INVALID_PARAMS';
+  throw error;
+}
+
+function canonicalFilesUid(value, label) {
+  if (typeof value !== 'string' || !UUID_V4_PATTERN.test(value)) {
+    invalidFilesParams(`${label} must be a canonical lowercase UUIDv4`);
+  }
+  return value;
+}
+
+function filesBody(value, allowedKeys, requiredKeys = ['base_witness']) {
+  if (!isPlainJsonObject(value)) invalidFilesParams('files request body must be an object');
+  const keys = Object.keys(value);
+  if (
+    keys.some((key) => !allowedKeys.includes(key))
+    || requiredKeys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
+  ) invalidFilesParams('files request body has an invalid shape');
+  return value;
+}
+
+function filesUidArray(value, label) {
+  if (!Array.isArray(value)) invalidFilesParams(`${label} must be a UID array`);
+  const result = value.map((uid, index) => canonicalFilesUid(uid, `${label}[${index}]`));
+  if (new Set(result).size !== result.length) invalidFilesParams(`${label} contains duplicates`);
+  return Object.freeze(result);
+}
+
+function nullableFilesUid(value, label) {
+  return value === null ? null : canonicalFilesUid(value, label);
+}
+
+function nonNegativePosition(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    invalidFilesParams(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function optionalPositiveInteger(value, label) {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    invalidFilesParams(`${label} must be null or a positive safe integer`);
+  }
+  return value;
+}
+
+function optionalString(value, label, fallback) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string') invalidFilesParams(`${label} must be a string`);
+  return value;
 }
 
 function invalidDiagnosticsParams(res) {
@@ -162,6 +227,78 @@ function retireStagedProjectCoverFiles(projectName, stagedFiles) {
   }
 }
 
+router.use((req, res, next) => {
+  if (
+    req.method !== 'POST'
+    || !/^\/[^/]+\/manuscript\/orphans\/(?:ignore-in-place|revoke-ignore)\/?$/.test(req.path)
+  ) return next();
+  try {
+    if (!hasEmptyQuery(req)) invalidFilesParams('orphan request query must be empty');
+    const body = filesBody(req.body, ['kind', 'uid'], ['kind', 'uid']);
+    if (body.kind !== 'chapter' && body.kind !== 'volume') {
+      invalidFilesParams('orphan kind must be chapter or volume');
+    }
+    req.filesOrphanRequest = Object.freeze({
+      kind: body.kind,
+      uid: canonicalFilesUid(body.uid, 'orphan uid'),
+    });
+    filesRequestId(req);
+    return next();
+  } catch (error) {
+    if (error?.code === 'INVALID_PARAMS') return sendJsonError(res, error.code);
+    return next(error);
+  }
+});
+
+router.use((req, res, next) => {
+  if (req.method !== 'POST') return next();
+  const match = /^\/[^/]+\/manuscript\/draft-conflicts\/([^/]+)\/(copy-backup|accept-external|apply-saved-draft)\/?$/.exec(req.path);
+  if (match === null) return next();
+  try {
+    if (!hasEmptyQuery(req)) invalidFilesParams('draft conflict request query must be empty');
+    const conflictId = canonicalFilesUid(match[1], 'draft conflict id');
+    const action = match[2];
+    const body = action === 'copy-backup'
+      ? filesBody(req.body, [], [])
+      : filesBody(req.body, ['decision_epoch'], ['decision_epoch']);
+    const decisionEpoch = action === 'copy-backup' ? null : body.decision_epoch;
+    if (
+      decisionEpoch !== null
+      && (!Number.isSafeInteger(decisionEpoch) || decisionEpoch < 0 || Object.is(decisionEpoch, -0))
+    ) invalidFilesParams('draft conflict decision_epoch must be a non-negative safe integer');
+    req.filesDraftConflictRequest = Object.freeze({ action, conflictId, decisionEpoch });
+    filesRequestId(req);
+    return next();
+  } catch (error) {
+    if (error?.code === 'INVALID_PARAMS') return sendJsonError(res, error.code);
+    return next(error);
+  }
+});
+
+router.use((req, res, next) => {
+  if (
+    req.method !== 'POST'
+    || !/^\/[^/]+\/manuscript\/ignored\/reference\/?$/.test(req.path)
+  ) return next();
+  try {
+    if (!hasEmptyQuery(req)) invalidFilesParams('ignored reference query must be empty');
+    const body = filesBody(req.body, ['action', 'uid'], ['action', 'uid']);
+    if (
+      body.action !== 'ignored.preserve_move_to_unassigned'
+      && body.action !== 'ignored.detach_reference'
+    ) invalidFilesParams('ignored reference action is unsupported');
+    req.filesIgnoredReferenceRequest = Object.freeze({
+      action: body.action,
+      uid: canonicalFilesUid(body.uid, 'ignored chapter uid'),
+    });
+    filesRequestId(req);
+    return next();
+  } catch (error) {
+    if (error?.code === 'INVALID_PARAMS') return sendJsonError(res, error.code);
+    return next(error);
+  }
+});
+
 router.param('project', (req, res, next, name) => {
   const expectedInstanceId = req.get(PROJECT_INSTANCE_HEADER) || '';
   return db.runWithProjectInstance(name, expectedInstanceId, () => {
@@ -223,11 +360,27 @@ function filesRequestId(req) {
 
 function filesBaseWitness(body) {
   const witness = body?.base_witness;
-  if (!isPlainJsonObject(witness)) {
-    const error = new Error('base_witness is required for files mutations');
-    error.code = 'INVALID_PARAMS';
-    throw error;
-  }
+  if (!hasExactKeys(witness, [
+    'expected_data_version',
+    'generation',
+    'raw_sha256',
+    'sidecar_raw_sha256',
+  ])) invalidFilesParams('base_witness has an invalid shape');
+  if (
+    !Number.isSafeInteger(witness.expected_data_version)
+    || witness.expected_data_version < 0
+    || !Number.isSafeInteger(witness.generation)
+    || witness.generation < 0
+    || typeof witness.raw_sha256 !== 'string'
+    || !SHA256_PATTERN.test(witness.raw_sha256)
+    || (
+      witness.sidecar_raw_sha256 !== null
+      && (
+        typeof witness.sidecar_raw_sha256 !== 'string'
+        || !SHA256_PATTERN.test(witness.sidecar_raw_sha256)
+      )
+    )
+  ) invalidFilesParams('base_witness contains invalid values');
   return Object.freeze({
     expectedDataVersion: witness.expected_data_version,
     generation: witness.generation,
@@ -281,6 +434,25 @@ function sendFilesRead(req, res, result) {
   });
 }
 
+function filesRevisionDecisions(value, label) {
+  if (!isPlainJsonObject(value)) invalidFilesParams(`${label} must be an object`);
+  const decisions = {};
+  for (const [changeId, decision] of Object.entries(value)) {
+    if (!changeId || (decision !== 'accepted' && decision !== 'rejected')) {
+      invalidFilesParams(`${label} contains an invalid decision`);
+    }
+    decisions[changeId] = decision;
+  }
+  return Object.freeze(decisions);
+}
+
+function sendFilesRevisionConflict(res, result, missingMessage) {
+  if (result.reason === 'chapter_missing' || result.reason === 'revision_missing') {
+    return sendJsonError(res, 'DB_NOT_FOUND', missingMessage);
+  }
+  return sendJsonError(res, 'EXTERNAL_DRAFT_CONFLICT', '待审修订已失效，请刷新后重试');
+}
+
 // ─── Shared helpers ───
 function updateRecord(projectName, table, id, body, allowedFields, addUpdatedAt) {
   const fields = []; const params = [];
@@ -310,6 +482,385 @@ function ambiguousChapterResponse(res, chapterNum) {
   });
 }
 
+function createLegacySqliteProject({ name, mode, language, genres, filePath }) {
+  const projectDb = db.createProjectDb(name);
+  const metaInsert = projectDb.prepare(
+    'INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)',
+  );
+  const now = new Date().toISOString();
+  const meta = {
+    name,
+    description: '',
+    mode,
+    language,
+    version: '1',
+    created_at: now,
+    updated_at: now,
+    word_count: '0',
+    author_name: '佚名',
+    workflow_phase: 'idea',
+  };
+  for (const [key, value] of Object.entries(meta)) metaInsert.run(key, value);
+  projectDb.prepare(
+    "INSERT INTO volumes (id, sort_order, title, summary) VALUES (1, 1, '第一卷', '')",
+  ).run();
+  for (const genre of genres) {
+    projectDb.prepare('INSERT OR IGNORE INTO project_genres (genre) VALUES (?)').run(genre);
+  }
+  const config = db.getConfigDb();
+  config.prepare(`
+    INSERT OR REPLACE INTO recent_projects
+      (id, name, file_path, last_opened, word_count)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(name, name, filePath, now, 0);
+  const instanceId = projectDb
+    .prepare("SELECT value FROM project_meta WHERE key = 'project_instance_id'")
+    .get()?.value;
+  projectDb.flush();
+  config.flush();
+  return Object.freeze({ instanceId });
+}
+
+function listLegacySqliteChapters(projectName) {
+  return db.projectQuery(
+    projectName,
+    'SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id ORDER BY c.num',
+  );
+}
+
+function readLegacySqliteChapter(projectName, chapterId) {
+  return db.projectGet(projectName, 'SELECT id FROM chapters WHERE id = ?', [chapterId]);
+}
+
+function resolveLegacySqliteChapter(projectName, { chapterId, chapterNum, volumeId }) {
+  if (chapterId) {
+    const volumeClause = volumeId ? ' AND c.volume_id = ?' : '';
+    return Object.freeze({
+      ambiguous: false,
+      row: db.projectGet(
+        projectName,
+        `SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id WHERE c.id = ? AND c.num = ?${volumeClause}`,
+        volumeId ? [chapterId, chapterNum, volumeId] : [chapterId, chapterNum],
+      ),
+    });
+  }
+  if (volumeId) {
+    return Object.freeze({
+      ambiguous: false,
+      row: db.projectGet(
+        projectName,
+        'SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id WHERE c.num = ? AND c.volume_id = ?',
+        [chapterNum, volumeId],
+      ),
+    });
+  }
+  const candidates = db.projectQuery(
+    projectName,
+    'SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id WHERE c.num = ? ORDER BY c.volume_id, c.id',
+    [chapterNum],
+  );
+  return Object.freeze({ ambiguous: candidates.length > 1, row: candidates[0] });
+}
+
+function createLegacySqliteChapter(projectName, input) {
+  const num = input.chapterNum === undefined
+    ? (db.projectGet(
+      projectName,
+      'SELECT MAX(num) as mx FROM chapters WHERE volume_id = ?',
+      [input.volumeId],
+    )?.mx || 0) + 1
+    : input.chapterNum;
+  db.projectExecute(
+    projectName,
+    "INSERT INTO chapters (volume_id, num, title, outline, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+    [input.volumeId, num, input.title, input.outline, input.status],
+  );
+  return db.projectGet(
+    projectName,
+    'SELECT * FROM chapters WHERE volume_id = ? AND num = ?',
+    [input.volumeId, num],
+  );
+}
+
+function updateLegacySqliteChapter(projectName, input) {
+  let targetChapter;
+  if (input.chapterId !== null) {
+    targetChapter = db.projectGet(
+      projectName,
+      'SELECT id, num FROM chapters WHERE id = ?',
+      [input.chapterId],
+    );
+    if (targetChapter && Number(targetChapter.num) !== input.chapterNum) {
+      return Object.freeze({ disposition: 'identity_mismatch' });
+    }
+  } else {
+    const candidates = db.projectQuery(
+      projectName,
+      'SELECT id FROM chapters WHERE num = ?',
+      [input.chapterNum],
+    );
+    if (candidates.length > 1) return Object.freeze({ disposition: 'ambiguous' });
+    targetChapter = candidates[0];
+  }
+  if (!targetChapter) return Object.freeze({ disposition: 'missing' });
+
+  const fields = [];
+  const params = [];
+  for (const [field, value] of Object.entries(input.patch)) {
+    if (value !== undefined) {
+      fields.push(`${field} = ?`);
+      params.push(value);
+    }
+  }
+  fields.push("updated_at = datetime('now')");
+  params.push(targetChapter.id);
+  if (input.expectedDataVersion !== undefined) params.push(input.expectedDataVersion);
+  const versionClause = input.expectedDataVersion === undefined ? '' : ' AND data_version = ?';
+  const sql = `UPDATE chapters SET ${fields.join(', ')} WHERE id = ?${versionClause}`;
+  const projectDb = db.getProjectDb(projectName);
+  return projectDb.transaction(() => {
+    const changes = projectDb.prepare(sql).run(...params).changes;
+    if (changes === 0) {
+      const current = projectDb.prepare('SELECT * FROM chapters WHERE id = ?').get(targetChapter.id);
+      if (!current) return Object.freeze({ disposition: 'missing' });
+      if (input.expectedDataVersion !== undefined) {
+        return Object.freeze({ disposition: 'conflict', current });
+      }
+      return Object.freeze({ disposition: 'missing' });
+    }
+    db.updateProjectWordCount(projectDb);
+    return Object.freeze({
+      disposition: 'updated',
+      updated: projectDb.prepare('SELECT * FROM chapters WHERE id = ?').get(targetChapter.id),
+    });
+  })();
+}
+
+function deleteLegacySqliteChapter(projectName, { chapterId, chapterNum, volumeId }) {
+  const projectDb = db.getProjectDb(projectName);
+  let targetChapter;
+  if (chapterId) {
+    const volumeClause = volumeId ? ' AND volume_id = ?' : '';
+    targetChapter = projectDb
+      .prepare(`SELECT id, volume_id, num FROM chapters WHERE id = ? AND num = ?${volumeClause}`)
+      .get(...(volumeId ? [chapterId, chapterNum, volumeId] : [chapterId, chapterNum]));
+  } else if (volumeId) {
+    targetChapter = projectDb
+      .prepare('SELECT id, volume_id, num FROM chapters WHERE volume_id = ? AND num = ?')
+      .get(volumeId, chapterNum);
+  } else {
+    const candidates = projectDb
+      .prepare('SELECT id, volume_id, num FROM chapters WHERE num = ? ORDER BY volume_id, id')
+      .all(chapterNum);
+    if (candidates.length > 1) return Object.freeze({ disposition: 'ambiguous' });
+    targetChapter = candidates[0];
+  }
+  if (!targetChapter) return Object.freeze({ disposition: 'missing' });
+  const changes = projectDb.transaction(() => {
+    projectDb.prepare('DELETE FROM chapter_revisions WHERE chapter_id = ?').run(targetChapter.id);
+    const deleted = projectDb.prepare('DELETE FROM chapters WHERE id = ?').run(targetChapter.id).changes;
+    if (deleted > 0) db.updateProjectWordCount(projectDb);
+    return deleted;
+  })();
+  if (changes === 0) return Object.freeze({ disposition: 'missing' });
+  return Object.freeze({ disposition: 'deleted', chapter: Object.freeze({ ...targetChapter }) });
+}
+
+function listLegacySqliteVolumes(projectName) {
+  const rows = db.projectQuery(projectName, 'SELECT * FROM volumes ORDER BY sort_order');
+  for (const volume of rows) {
+    volume.chapters = db.projectQuery(
+      projectName,
+      'SELECT * FROM chapters WHERE volume_id = ? ORDER BY num',
+      [volume.id],
+    );
+  }
+  return rows;
+}
+
+function createLegacySqliteVolume(projectName, { title, summary }) {
+  const projectDb = db.getProjectDb(projectName);
+  const max = projectDb.prepare('SELECT COALESCE(MAX(sort_order), 0) as mx FROM volumes').get();
+  const sortOrder = (max?.mx || 0) + 1;
+  const result = projectDb.prepare(
+    "INSERT INTO volumes (sort_order, title, summary, created_at) VALUES (?, ?, ?, datetime('now'))",
+  ).run(sortOrder, title, summary);
+  return Object.freeze({ id: result.lastInsertRowid, title });
+}
+
+function updateLegacySqliteVolume(projectName, id, body) {
+  const fields = [];
+  const params = [];
+  for (const key of ['title', 'summary']) {
+    if (body?.[key] !== undefined) {
+      fields.push(`${key} = ?`);
+      params.push(body[key]);
+    }
+  }
+  if (fields.length === 0) return null;
+  params.push(id);
+  return db.projectExecute(
+    projectName,
+    `UPDATE volumes SET ${fields.join(', ')} WHERE id = ?`,
+    params,
+  );
+}
+
+function deleteLegacySqliteVolume(projectName, id) {
+  const projectDb = db.getProjectDb(projectName);
+  return projectDb.transaction(() => {
+    projectDb.prepare('DELETE FROM chapters WHERE volume_id = ?').run(id);
+    const deleted = projectDb.prepare('DELETE FROM volumes WHERE id = ?').run(id).changes;
+    if (deleted > 0) db.updateProjectWordCount(projectDb);
+    return deleted;
+  })();
+}
+
+function readLegacySqliteCharacterAssociations(projectName) {
+  const characters = db.projectQuery(projectName, 'SELECT * FROM characters ORDER BY name');
+  const appearanceRows = db.projectQuery(projectName, `
+    SELECT
+      cc.character_id,
+      c.id AS chapter_id,
+      c.volume_id,
+      c.num,
+      c.title,
+      COALESCE(cc.role, 'appears') AS role
+    FROM chapter_characters cc
+    JOIN chapters c ON c.id = cc.chapter_id
+    LEFT JOIN volumes v ON v.id = c.volume_id
+    ORDER BY
+      CASE WHEN v.id IS NULL THEN 1 ELSE 0 END ASC,
+      v.sort_order ASC,
+      CASE WHEN c.volume_id IS NULL THEN 1 ELSE 0 END ASC,
+      c.volume_id ASC,
+      c.num ASC,
+      c.id ASC
+  `);
+  const appearancesByCharacter = new Map();
+  for (const appearance of appearanceRows) {
+    const appearances = appearancesByCharacter.get(appearance.character_id) || [];
+    appearances.push({
+      chapter_id: appearance.chapter_id,
+      volume_id: appearance.volume_id,
+      num: appearance.num,
+      title: appearance.title,
+      role: appearance.role,
+    });
+    appearancesByCharacter.set(appearance.character_id, appearances);
+  }
+  for (const character of characters) {
+    character.appearances = appearancesByCharacter.get(character.id) || [];
+    character.chapterCount = character.appearances.length;
+  }
+  return characters;
+}
+
+function createLegacySqliteForeshadow(projectName, input) {
+  db.projectExecute(
+    projectName,
+    'INSERT INTO foreshadows (id, title, description, status, priority, expected_resolve_chapter) VALUES (?, ?, ?, ?, ?, ?)',
+    [
+      input.id,
+      input.title,
+      input.description,
+      input.status,
+      input.priority,
+      input.expectedResolveChapter,
+    ],
+  );
+}
+
+function readLegacySqliteStats(projectName) {
+  const totalWords = db.projectGet(projectName, 'SELECT SUM(word_count) as total FROM chapters')?.total || 0;
+  const chapterCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM chapters')?.cnt || 0;
+  const acceptedCount = db.projectGet(projectName, "SELECT COUNT(*) as cnt FROM chapters WHERE status = 'accepted'")?.cnt || 0;
+  const characterCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM characters')?.cnt || 0;
+  const foreshadowCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM foreshadows')?.cnt || 0;
+  const resolvedForeshadow = db.projectGet(projectName, "SELECT COUNT(*) as cnt FROM foreshadows WHERE status = 'resolved'")?.cnt || 0;
+  const overdueForeshadow = db.projectGet(projectName, "SELECT COUNT(*) as cnt FROM foreshadows WHERE status = 'planted' AND expected_resolve_chapter < (SELECT COALESCE(MAX(num), 0) FROM chapters)")?.cnt || 0;
+  const worldCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM world_entries')?.cnt || 0;
+  const sciCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM science_entries')?.cnt || 0;
+  const relationCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM character_relations')?.cnt || 0;
+  const memoryCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM memories')?.cnt || 0;
+  const timelineCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM timeline_events')?.cnt || 0;
+  const volumeCount = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM volumes')?.cnt || 0;
+  const clueUnresolved = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM clue_board WHERE resolved = 0')?.cnt || 0;
+  const clueResolved = db.projectGet(projectName, 'SELECT COUNT(*) as cnt FROM clue_board WHERE resolved = 1')?.cnt || 0;
+  const genres = db.projectQuery(projectName, 'SELECT genre FROM project_genres').map((row) => row.genre);
+  const tokenUsage = db.projectGet(projectName, 'SELECT COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output FROM token_usage') || { input: 0, output: 0 };
+  const projectMode = db.projectGet(projectName, "SELECT value FROM project_meta WHERE key = 'mode'")?.value || 'medium-novel';
+  const targetDefaults = { 'short-story': 30000, 'medium-novel': 100000, 'long-novel': 200000 };
+  const customTarget = db.projectGet(projectName, "SELECT value FROM project_meta WHERE key = 'target_words'")?.value;
+  const targetWords = customTarget ? parseInt(customTarget) : (targetDefaults[projectMode] || 100000);
+  const volumes = db.projectQuery(projectName, 'SELECT id, title, sort_order, (SELECT COUNT(*) FROM chapters WHERE volume_id = volumes.id) as chapter_count, (SELECT COALESCE(SUM(word_count), 0) FROM chapters WHERE volume_id = volumes.id) as word_count FROM volumes ORDER BY sort_order');
+  const rawDaily = db.projectQuery(
+    projectName,
+    "SELECT date(updated_at) as day, SUM(word_count) as words FROM chapters WHERE updated_at >= date('now', '-6 days') GROUP BY date(updated_at) ORDER BY day",
+  );
+  const dailyMap = Object.fromEntries(rawDaily.map((row) => [row.day, row.words]));
+  const dailyWords = [];
+  for (let daysAgo = 6; daysAgo >= 0; daysAgo -= 1) {
+    const date = new Date();
+    date.setDate(date.getDate() - daysAgo);
+    dailyWords.push(dailyMap[date.toISOString().slice(0, 10)] || 0);
+  }
+  return {
+    totalWords,
+    chapterCount,
+    acceptedCount,
+    characterCount,
+    foreshadowCount,
+    resolvedForeshadow,
+    overdueForeshadow,
+    worldCount,
+    sciCount,
+    relationCount,
+    memoryCount,
+    timelineCount,
+    volumeCount,
+    volumes,
+    clueUnresolved,
+    clueResolved,
+    genres,
+    tokenInput: tokenUsage.input || 0,
+    tokenOutput: tokenUsage.output || 0,
+    targetWords,
+    currentChapter: db.projectGet(projectName, "SELECT * FROM chapters WHERE status = 'writing' ORDER BY num LIMIT 1"),
+    chapters: db.projectQuery(projectName, 'SELECT id, num, title, word_count, status FROM chapters ORDER BY num'),
+    dailyWords,
+  };
+}
+
+function readLegacySqliteExportSnapshot(projectName) {
+  const chapters = db.projectQuery(projectName, `
+    SELECT
+      c.id,
+      c.num,
+      c.title,
+      c.content,
+      c.volume_id,
+      v.sort_order AS volume_sort_order,
+      v.title AS volume_title,
+      v.summary AS volume_summary
+    FROM chapters c
+    LEFT JOIN volumes v ON v.id = c.volume_id
+    WHERE c.content != ''
+    ORDER BY
+      CASE WHEN v.id IS NULL THEN 1 ELSE 0 END ASC,
+      v.sort_order ASC,
+      c.volume_id ASC,
+      c.num ASC,
+      c.id ASC
+  `);
+  const volumes = db.projectQuery(projectName, 'SELECT * FROM volumes ORDER BY sort_order');
+  const meta = {};
+  for (const row of db.projectQuery(projectName, 'SELECT key, value FROM project_meta')) {
+    meta[row.key] = row.value;
+  }
+  return Object.freeze({ chapters, volumes, meta: Object.freeze(meta) });
+}
+
 function getTimelineSortMode(projectName) {
   const mode = db.projectGet(
     projectName,
@@ -330,22 +881,81 @@ function listTimelineEvents(projectName) {
 // PROJECTS
 // ═══════════════════════════════════════════
 
-router.get('/projects', (req, res) => {
+router.get('/projects', async (req, res, next) => {
+  try {
   const rows = db.dbQuery('SELECT * FROM recent_projects ORDER BY last_opened DESC');
-  const filesProjects = db.listFilesProjectSummaries();
-  const filesByName = new Map(filesProjects.map((project) => [project.name, project]));
-  const projects = rows.map((row) => filesByName.get(row.name) || readRecentProject(row, {
-    getProjectOpenState: db.getProjectOpenState,
-    openProjectDb: db.openProjectDb,
-    recordProjectOpenFailure: db.recordProjectOpenFailure,
-  }));
-  for (const project of filesProjects) {
-    if (!rows.some((row) => row.name === project.name)) projects.push(project);
+  const routeRecords = db.listProjectRouteCache();
+  const routeByName = new Map(routeRecords.map((record) => [record.name, record]));
+  const rowsByName = new Map(rows.map((row) => [row.name, row]));
+  for (const record of routeRecords) {
+    if (rowsByName.has(record.name)) continue;
+    rowsByName.set(record.name, {
+      id: record.name,
+      name: record.name,
+      file_path: record.filePath,
+      last_opened: record.lastModified,
+      word_count: 0,
+    });
   }
+  const projects = await Promise.all([...rowsByName.values()].map((row) => readRecentProject(row, {
+      getProjectOpenState: db.getProjectOpenState,
+      openProjectDb: db.openProjectDb,
+      recordProjectOpenFailure: db.recordProjectOpenFailure,
+      async readFilesRecentSummary(currentRow) {
+        const record = routeByName.get(currentRow.name);
+        if (record === undefined || record.route === 'sqlite') return null;
+        if (record.route !== 'files') {
+          return {
+            id: currentRow.id,
+            name: currentRow.name,
+            iconName: 'BookOpen',
+            genres: [],
+            wordCount: currentRow.word_count || 0,
+            chapterCount: 0,
+            lastOpened: currentRow.last_opened,
+            mode: 'medium-novel',
+            instanceId: record.projectInstanceId || '',
+            status: '未知',
+            openState: 'isolated',
+            reasonCode: record.route === 'migrating'
+              ? 'PROJECT_MIGRATION_BUSY'
+              : 'RECOVERY_REQUIRED',
+            recommendedAction: null,
+            manuscriptRoute: record.route,
+          };
+        }
+        const result = await getManuscriptRuntime().read(
+          Object.freeze({ projectUid: record.projectUid }),
+          Object.freeze({ kind: 'product_view' }),
+        );
+        const view = result.value;
+        const genres = view.metadata.genres || [];
+        const wordCount = view.summary.wordCount;
+        return {
+          id: currentRow.id,
+          name: currentRow.name,
+          iconName: genres.map((genre) => FILES_PROJECT_ICON[genre] || 'BookOpen').join(' ') || 'BookOpen',
+          genres: genres.map((genre) => FILES_PROJECT_GENRE_LABEL[genre] || genre),
+          wordCount,
+          chapterCount: view.summary.chapterCount,
+          lastOpened: currentRow.last_opened || record.lastModified,
+          mode: view.metadata.mode || 'medium-novel',
+          instanceId: record.projectInstanceId,
+          status: wordCount > 30000 ? '写作中' : wordCount > 5000 ? '进行中' : '刚起步',
+          openState: 'ready',
+          reasonCode: null,
+          recommendedAction: null,
+          manuscriptRoute: 'files',
+        };
+      },
+    })));
   projects.sort((left, right) => (
     left.lastOpened > right.lastOpened ? -1 : left.lastOpened < right.lastOpened ? 1 : 0
   ));
-  res.json(projects);
+  return res.json(projects);
+  } catch (error) {
+    return next(error);
+  }
 });
 
 router.post('/projects', (req, res) => {
@@ -357,32 +967,7 @@ router.post('/projects', (req, res) => {
     return res.status(409).json({ error: { code: 'PROJECT_ALREADY_EXISTS', message: `项目"${name}"已存在`, recoverable: true } });
   }
 
-  // Create new project DB
-  const pdb = db.createProjectDb(name);
-  const metaInsert = pdb.prepare('INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)');
-  const meta = { name, description: '', mode, language, version: '1', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), word_count: '0', author_name: '佚名', workflow_phase: 'idea' };
-  for (const [k, v] of Object.entries(meta)) metaInsert.run(k, v);
-
-  // Default volume
-  pdb.prepare("INSERT INTO volumes (id, sort_order, title, summary) VALUES (1, 1, '第一卷', '')").run();
-
-  // Genres
-  for (const g of genres) {
-    pdb.prepare('INSERT OR IGNORE INTO project_genres (genre) VALUES (?)').run(g);
-  }
-
-  // Config
-  const config = db.getConfigDb();
-  config.prepare('INSERT OR REPLACE INTO recent_projects (id, name, file_path, last_opened, word_count) VALUES (?, ?, ?, ?, ?)').run(name, name, filePath, new Date().toISOString(), 0);
-
-  const instanceId = pdb
-    .prepare("SELECT value FROM project_meta WHERE key = 'project_instance_id'")
-    .get()?.value;
-  // The client immediately lists and opens the new project. Persist before the
-  // 200 response so file-existence checks and duplicate-name detection observe
-  // the same committed instance rather than the 250 ms write batch window.
-  pdb.flush();
-  config.flush();
+  const { instanceId } = createLegacySqliteProject({ name, mode, language, genres, filePath });
   res.json({ name, filePath, mode, language, genres, instanceId });
 });
 
@@ -502,14 +1087,18 @@ router.post('/projects/by-name/:name/diagnostics/export', (req, res, next) => {
   }
 });
 
-function sendProjectMetadata(req, res, next) {
+async function sendProjectMetadata(req, res, next) {
   const { name } = req.params;
   const expectedInstanceId = req.get(PROJECT_INSTANCE_HEADER) || '';
-  return db.runWithProjectInstance(name, expectedInstanceId, () => {
+  return db.runWithProjectInstance(name, expectedInstanceId, async () => {
     try {
       const admission = db.inspectProjectManuscriptRoute(name);
       if (admission.route === 'files') {
-        return res.json(db.readFilesProjectProductView(name).metadata);
+        const result = await getManuscriptRuntime().read(
+          Object.freeze({ projectUid: admission.databaseFacts.projectUid }),
+          Object.freeze({ kind: 'product_view' }),
+        );
+        return res.json({ ...result.value.metadata, filePath: db.getProjectDbPath(name) });
       }
       const pdb = db.getProjectDb(name);
       const meta = {};
@@ -643,9 +1232,17 @@ router.delete('/projects/:name', (req, res, next) => {
 });
 
 // ─── Sidebar Items (genre-filtered) ───
-router.get('/:project/sidebar-items', (req, res) => {
+router.get('/:project/sidebar-items', async (req, res, next) => {
   if (isFilesRequest(req)) {
-    return res.json(db.readFilesProjectProductView(req.params.project).sidebarItems);
+    try {
+      const result = await getManuscriptRuntime().read(
+        Object.freeze({ projectUid: req.manuscriptAdmission.databaseFacts.projectUid }),
+        Object.freeze({ kind: 'product_view' }),
+      );
+      return res.json(result.value.sidebarItems);
+    } catch (error) {
+      return next(error);
+    }
   }
   const pdb = db.getProjectDb(req.params.project);
   try {
@@ -680,6 +1277,116 @@ router.get('/:project/manuscript/witness', async (req, res, next) => {
   } catch (error) { return next(error); }
 });
 
+router.get('/:project/manuscript/draft-conflicts', async (req, res, next) => {
+  if (!isFilesRequest(req)) {
+    return sendJsonError(res, 'INVALID_PARAMS', '草稿冲突恢复仅供 files 项目使用');
+  }
+  try {
+    if (!hasEmptyQuery(req)) invalidFilesParams('draft conflict list query must be empty');
+    return res.json(await getManuscriptRuntime().listDraftConflicts(filesProjectSelector(req)));
+  } catch (error) { return next(error); }
+});
+
+async function resolveFilesDraftConflict(req, res, next, action) {
+  if (!isFilesRequest(req)) {
+    return sendJsonError(res, 'INVALID_PARAMS', '草稿冲突恢复仅供 files 项目使用');
+  }
+  try {
+    const request = req.filesDraftConflictRequest;
+    if (request === undefined || request.action !== action) {
+      invalidFilesParams('draft conflict request was not preflighted');
+    }
+    const selector = filesProjectSelector(req);
+    const requestId = filesRequestId(req);
+    if (action === 'copy-backup') {
+      return res.json(await getManuscriptRuntime().copyDraftConflictBackup(
+        selector,
+        Object.freeze({ conflictId: request.conflictId, requestId }),
+      ));
+    }
+    const resolutionAction = action === 'accept-external'
+      ? 'accept_external'
+      : 'apply_saved_draft';
+    return res.json(await getManuscriptRuntime().resolveDraftConflict(
+      selector,
+      Object.freeze({
+        action: resolutionAction,
+        conflictId: request.conflictId,
+        decisionEpoch: request.decisionEpoch,
+        requestId,
+      }),
+    ));
+  } catch (error) {
+    if (error?.code === 'PROJECTION_STALE') {
+      return sendJsonError(res, 'RECOVERY_SNAPSHOT_STALE');
+    }
+    return next(error);
+  }
+}
+
+router.post('/:project/manuscript/draft-conflicts/:conflictId/copy-backup', (req, res, next) => (
+  resolveFilesDraftConflict(req, res, next, 'copy-backup')
+));
+
+router.post('/:project/manuscript/draft-conflicts/:conflictId/accept-external', (req, res, next) => (
+  resolveFilesDraftConflict(req, res, next, 'accept-external')
+));
+
+router.post('/:project/manuscript/draft-conflicts/:conflictId/apply-saved-draft', (req, res, next) => (
+  resolveFilesDraftConflict(req, res, next, 'apply-saved-draft')
+));
+
+async function resolveFilesOrphan(req, res, next, method) {
+  if (!isFilesRequest(req)) {
+    return sendJsonError(res, 'INVALID_PARAMS', '孤儿资源动作仅供 files 项目使用');
+  }
+  try {
+    const request = req.filesOrphanRequest;
+    if (request === undefined) invalidFilesParams('orphan request was not preflighted');
+    const result = await getManuscriptRuntime()[method](
+      filesProjectSelector(req),
+      Object.freeze({
+        requestId: filesRequestId(req),
+        kind: request.kind,
+        uid: request.uid,
+      }),
+    );
+    return res.json(result);
+  } catch (error) { return next(error); }
+}
+
+router.post('/:project/manuscript/orphans/ignore-in-place', (req, res, next) => (
+  resolveFilesOrphan(req, res, next, 'ignoreInPlace')
+));
+
+router.post('/:project/manuscript/orphans/revoke-ignore', (req, res, next) => (
+  resolveFilesOrphan(req, res, next, 'revokeIgnore')
+));
+
+router.post('/:project/manuscript/ignored/reference', async (req, res, next) => {
+  if (!isFilesRequest(req)) {
+    return sendJsonError(res, 'INVALID_PARAMS', 'ignored 结构动作仅供 files 项目使用');
+  }
+  try {
+    const request = req.filesIgnoredReferenceRequest;
+    if (request === undefined) invalidFilesParams('ignored reference request was not preflighted');
+    const selector = filesProjectSelector(req);
+    const snapshot = await getManuscriptRuntime().read(
+      selector,
+      Object.freeze({ kind: 'project' }),
+    );
+    const result = await getManuscriptRuntime().write(selector, Object.freeze({
+      requestId: filesRequestId(req),
+      baseWitness: snapshot.baseWitness,
+      command: Object.freeze({
+        kind: request.action,
+        chapterUid: request.uid,
+      }),
+    }));
+    return res.json(result);
+  } catch (error) { return next(error); }
+});
+
 router.get('/:project/chapters', async (req, res, next) => {
   if (isFilesRequest(req)) {
     try {
@@ -692,30 +1399,68 @@ router.get('/:project/chapters', async (req, res, next) => {
       )));
     } catch (error) { return next(error); }
   }
-  const rows = db.projectQuery(project(req.params.project),
-    'SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id ORDER BY c.num'
-  );
-  res.json(rows);
+  res.json(listLegacySqliteChapters(project(req.params.project)));
 });
 
-router.get('/:project/chapters/:chapterId/revisions/active', (req, res) => {
+router.get('/:project/chapters/:chapterId/revisions/active', async (req, res, next) => {
   const projectName = project(req.params.project);
+  if (isFilesRequest(req)) {
+    try {
+      if (!hasEmptyQuery(req)) invalidFilesParams('files active revision query must be empty');
+      const chapterUid = canonicalFilesUid(req.params.chapterId, 'chapter_uid');
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({ kind: 'revision_snapshot', chapterUid }),
+      );
+      return res.json(result.value);
+    } catch (error) { return next(error); }
+  }
   const chapterId = Number(req.params.chapterId);
-  if (!Number.isInteger(chapterId) || chapterId < 1) {
+  if (!Number.isSafeInteger(chapterId) || chapterId < 1) {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节标识无效', recoverable: true } });
   }
-  const chapter = db.projectGet(projectName, 'SELECT id FROM chapters WHERE id = ?', [chapterId]);
+  const chapter = readLegacySqliteChapter(projectName, chapterId);
   if (!chapter) {
     return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: '章节不存在', recoverable: true } });
   }
   res.json(getActiveRevision(projectName, chapterId));
 });
 
-router.post('/:project/chapters/:chapterId/revisions', (req, res) => {
+router.post('/:project/chapters/:chapterId/revisions', async (req, res, next) => {
   const projectName = project(req.params.project);
-  const chapterId = Number(req.params.chapterId);
   const { baseContent, proposedContent } = req.body || {};
-  if (!Number.isInteger(chapterId) || chapterId < 1 || typeof baseContent !== 'string' || typeof proposedContent !== 'string') {
+  if (isFilesRequest(req)) {
+    try {
+      const chapterUid = canonicalFilesUid(req.params.chapterId, 'chapter_uid');
+      const body = filesBody(
+        req.body,
+        ['base_witness', 'baseContent', 'proposedContent'],
+        ['base_witness', 'baseContent', 'proposedContent'],
+      );
+      if (typeof body.baseContent !== 'string' || typeof body.proposedContent !== 'string') {
+        invalidFilesParams('revision content must be strings');
+      }
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({ kind: 'revision.create', chapterUid, baseContent, proposedContent }),
+      }));
+      if (result.state === 'conflict') {
+        return sendFilesRevisionConflict(res, result, '章节不存在');
+      }
+      if (result.state === 'unchanged') return res.json({ unchanged: true, rebased: false });
+      if (result.state === 'created' || result.state === 'stale') {
+        return res.status(201).json({
+          revision: result.revision,
+          rebased: false,
+          ...(result.state === 'stale' ? { stale: true } : {}),
+        });
+      }
+      invalidFilesParams('revision.create returned an invalid state');
+    } catch (error) { return next(error); }
+  }
+  const chapterId = Number(req.params.chapterId);
+  if (!Number.isSafeInteger(chapterId) || chapterId < 1 || typeof baseContent !== 'string' || typeof proposedContent !== 'string') {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '修订稿参数无效', recoverable: true } });
   }
   const result = createPendingRevision(projectName, chapterId, baseContent, proposedContent);
@@ -729,15 +1474,21 @@ router.post('/:project/chapters/:chapterId/revisions', (req, res) => {
 router.put('/:project/chapters/order', async (req, res, next) => {
   if (!isFilesRequest(req)) return sendJsonError(res, 'INVALID_PARAMS', '章节排序仅供 files Beta 项目使用');
   try {
+    const body = filesBody(req.body, [
+      'base_witness',
+      'container_volume_uid',
+      'chapter_uids',
+    ], ['base_witness', 'container_volume_uid', 'chapter_uids']);
     const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
       requestId: filesRequestId(req),
-      baseWitness: filesBaseWitness(req.body),
+      baseWitness: filesBaseWitness(body),
       command: Object.freeze({
         kind: 'chapter.reorder',
-        containerVolumeId: req.body?.container_volume_id === null
-          ? null
-          : Number(req.body?.container_volume_id),
-        chapterIds: Object.freeze((req.body?.chapter_ids ?? []).map(Number)),
+        containerVolumeUid: nullableFilesUid(
+          body.container_volume_uid,
+          'container_volume_uid',
+        ),
+        chapterUids: filesUidArray(body.chapter_uids, 'chapter_uids'),
       }),
     }));
     return res.json(result);
@@ -747,16 +1498,19 @@ router.put('/:project/chapters/order', async (req, res, next) => {
 router.put('/:project/chapters/:chapterId/move', async (req, res, next) => {
   if (!isFilesRequest(req)) return sendJsonError(res, 'INVALID_PARAMS', '章节移动仅供 files Beta 项目使用');
   try {
+    const body = filesBody(req.body, [
+      'base_witness',
+      'target_volume_uid',
+      'target_position',
+    ], ['base_witness', 'target_volume_uid', 'target_position']);
     const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
       requestId: filesRequestId(req),
-      baseWitness: filesBaseWitness(req.body),
+      baseWitness: filesBaseWitness(body),
       command: Object.freeze({
         kind: 'chapter.move',
-        chapterId: Number(req.params.chapterId),
-        targetVolumeId: req.body?.target_volume_id === null
-          ? null
-          : Number(req.body?.target_volume_id),
-        targetPosition: Number(req.body?.target_position),
+        chapterUid: canonicalFilesUid(req.params.chapterId, 'chapter_uid'),
+        targetVolumeUid: nullableFilesUid(body.target_volume_uid, 'target_volume_uid'),
+        targetPosition: nonNegativePosition(body.target_position, 'target_position'),
       }),
     }));
     return res.json(result);
@@ -765,6 +1519,20 @@ router.put('/:project/chapters/:chapterId/move', async (req, res, next) => {
 
 router.get('/:project/chapters/:num', async (req, res, next) => {
   const projectName = project(req.params.project);
+  if (isFilesRequest(req)) {
+    try {
+      if (!hasEmptyQuery(req)) invalidFilesParams('files chapter query must be empty');
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({
+          kind: 'chapter',
+          chapterUid: canonicalFilesUid(req.params.num, 'chapter_uid'),
+        }),
+      );
+      return sendFilesRead(req, res, result);
+    } catch (error) { return next(error); }
+  }
+
   const chapterNum = positiveInteger(req.params.num);
   const hasChapterId = req.query.chapter_id !== undefined;
   const hasVolumeId = req.query.volume_id !== undefined;
@@ -774,44 +1542,9 @@ router.get('/:project/chapters/:num', async (req, res, next) => {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节身份参数无效', recoverable: true } });
   }
 
-  if (isFilesRequest(req)) {
-    try {
-      const result = await getManuscriptRuntime().read(
-        filesProjectSelector(req),
-        Object.freeze({
-          kind: 'chapter',
-          chapterId,
-          chapterNum,
-          volumeId,
-        }),
-      );
-      return sendFilesRead(req, res, result);
-    } catch (error) { return next(error); }
-  }
-
-  let row;
-  if (chapterId) {
-    const volumeClause = volumeId ? ' AND c.volume_id = ?' : '';
-    row = db.projectGet(
-      projectName,
-      `SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id WHERE c.id = ? AND c.num = ?${volumeClause}`,
-      volumeId ? [chapterId, chapterNum, volumeId] : [chapterId, chapterNum],
-    );
-  } else if (volumeId) {
-    row = db.projectGet(
-      projectName,
-      'SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id WHERE c.num = ? AND c.volume_id = ?',
-      [chapterNum, volumeId],
-    );
-  } else {
-    const candidates = db.projectQuery(
-      projectName,
-      'SELECT c.*, v.title as volume_title FROM chapters c JOIN volumes v ON c.volume_id = v.id WHERE c.num = ? ORDER BY c.volume_id, c.id',
-      [chapterNum],
-    );
-    if (candidates.length > 1) return ambiguousChapterResponse(res, chapterNum);
-    row = candidates[0];
-  }
+  const resolved = resolveLegacySqliteChapter(projectName, { chapterId, chapterNum, volumeId });
+  if (resolved.ambiguous) return ambiguousChapterResponse(res, chapterNum);
+  const { row } = resolved;
   if (!row) return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${req.params.num} 不存在`, recoverable: true } });
   res.json(row);
 });
@@ -827,6 +1560,7 @@ router.put('/:project/chapters/:num', async (req, res, next) => {
     title,
     content,
     outline,
+    summary,
     status,
     cognitive_frame,
     emotional_anchor,
@@ -834,6 +1568,94 @@ router.put('/:project/chapters/:num', async (req, res, next) => {
     concrete_mystery,
     interpersonal_tension,
   } = body;
+  if (isFilesRequest(req)) {
+    try {
+      const filesInput = filesBody(body, [
+        'base_witness',
+        'expected_data_version',
+        'title',
+        'content',
+        'outline',
+        'summary',
+        'status',
+        'cognitive_frame',
+        'emotional_anchor',
+        'world_texture',
+        'concrete_mystery',
+        'interpersonal_tension',
+      ]);
+      const baseWitness = filesBaseWitness(filesInput);
+      if (
+        expectedDataVersion !== undefined
+        && (
+          !Number.isSafeInteger(expectedDataVersion)
+          || expectedDataVersion < 0
+          || expectedDataVersion !== baseWitness.expectedDataVersion
+        )
+      ) invalidFilesParams('expected_data_version must match base_witness');
+      const patchInput = {
+        title,
+        outline,
+        summary,
+        status,
+        cognitive_frame,
+        emotional_anchor,
+        world_texture,
+        concrete_mystery,
+        interpersonal_tension,
+      };
+      for (const [key, value] of Object.entries(patchInput)) {
+        if (value !== undefined && typeof value !== 'string') {
+          invalidFilesParams(`${key} must be a string`);
+        }
+      }
+      if (content !== undefined && typeof content !== 'string') {
+        invalidFilesParams('content must be a string');
+      }
+      const patch = Object.fromEntries(
+        Object.entries(patchInput).filter(([, value]) => value !== undefined),
+      );
+      if (content === undefined && Object.keys(patch).length === 0) {
+        invalidFilesParams('chapter update has no fields');
+      }
+      const chapterUid = canonicalFilesUid(num, 'chapter_uid');
+      let command;
+      if (content === undefined) {
+        command = Object.freeze({
+          kind: 'chapter.patch_sidecar',
+          chapterUid,
+          expected_data_version: baseWitness.expectedDataVersion,
+          patch: Object.freeze(patch),
+        });
+      } else if (Object.keys(patch).length === 0) {
+        command = Object.freeze({
+          kind: 'chapter.replace_body',
+          chapterUid,
+          expected_data_version: baseWitness.expectedDataVersion,
+          content,
+        });
+      } else {
+        command = Object.freeze({
+          kind: 'chapter.replace_body_and_sidecar',
+          chapterUid,
+          expected_data_version: baseWitness.expectedDataVersion,
+          content,
+          patch: Object.freeze(patch),
+        });
+      }
+      await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness,
+        command,
+      }));
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({ kind: 'chapter', chapterUid }),
+      );
+      return sendFilesRead(req, res, result);
+    } catch (error) { return next(error); }
+  }
+
   if (!Number.isInteger(chapterNum) || chapterNum < 1) {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节编号无效', recoverable: true } });
   }
@@ -847,53 +1669,6 @@ router.put('/:project/chapters/:num', async (req, res, next) => {
         recoverable: true,
       },
     });
-  }
-
-  if (isFilesRequest(req)) {
-    try {
-      const baseWitness = filesBaseWitness(body);
-      const patch = Object.fromEntries(Object.entries({
-        title,
-        outline,
-        status,
-        cognitive_frame,
-        emotional_anchor,
-        world_texture,
-        concrete_mystery,
-        interpersonal_tension,
-      }).filter(([, value]) => value !== undefined));
-      const command = content === undefined
-        ? Object.freeze({
-          kind: 'chapter.patch_sidecar',
-          chapterId: requestedChapterId === undefined ? null : Number(requestedChapterId),
-          chapterNum,
-          expected_data_version: baseWitness.expectedDataVersion,
-          patch: Object.freeze(patch),
-        })
-        : Object.freeze({
-          kind: 'chapter.replace_body_and_sidecar',
-          chapterId: requestedChapterId === undefined ? null : Number(requestedChapterId),
-          chapterNum,
-          expected_data_version: baseWitness.expectedDataVersion,
-          content,
-          patch: Object.freeze(patch),
-        });
-      await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
-        requestId: filesRequestId(req),
-        baseWitness,
-        command,
-      }));
-      const result = await getManuscriptRuntime().read(
-        filesProjectSelector(req),
-        Object.freeze({
-          kind: 'chapter',
-          chapterId: requestedChapterId === undefined ? null : Number(requestedChapterId),
-          chapterNum,
-          volumeId: null,
-        }),
-      );
-      return sendFilesRead(req, res, result);
-    } catch (error) { return next(error); }
   }
 
   if (content !== undefined) {
@@ -911,6 +1686,7 @@ router.put('/:project/chapters/:num', async (req, res, next) => {
       source: 'rest',
       title,
       outline,
+      summary,
       status,
       cognitive_frame,
       emotional_anchor,
@@ -947,161 +1723,140 @@ router.put('/:project/chapters/:num', async (req, res, next) => {
     return res.json(updateResult.chapter);
   }
 
-  let targetChapter;
-  if (requestedChapterId !== undefined) {
-    const chapterId = Number(requestedChapterId);
-    if (!Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节标识无效', recoverable: true } });
-    }
-    targetChapter = db.projectGet(projectName, 'SELECT id, num FROM chapters WHERE id = ?', [chapterId]);
-    if (targetChapter && Number(targetChapter.num) !== chapterNum) {
-      return res.status(409).json({
-        error: {
-          code: 'CHAPTER_IDENTITY_MISMATCH',
-          message: `章节 ID ${chapterId} 与 URL 中的章节编号 ${chapterNum} 不匹配`,
-          recoverable: true,
-        },
-      });
-    }
-  } else {
-    const candidates = db.projectQuery(projectName, 'SELECT id FROM chapters WHERE num = ?', [chapterNum]);
-    if (candidates.length > 1) {
-      return res.status(409).json({
-        error: {
-          code: 'AMBIGUOUS_CHAPTER',
-          message: `多个卷中存在第 ${chapterNum} 章，请提供章节标识`,
-          recoverable: true,
-        },
-      });
-    }
-    targetChapter = candidates[0];
+  const chapterId = requestedChapterId === undefined ? null : Number(requestedChapterId);
+  if (chapterId !== null && (!Number.isInteger(chapterId) || chapterId < 1)) {
+    return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节标识无效', recoverable: true } });
   }
-  if (!targetChapter) {
-    return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${num} 不存在`, recoverable: true } });
-  }
-
-  if (content !== undefined) {
-    const updateResult = writeChapterBody({
-      projectName,
-      chapterId: targetChapter.id,
-      content,
-      expectedDataVersion,
-      source: 'rest',
+  const updateResult = updateLegacySqliteChapter(projectName, {
+    chapterId,
+    chapterNum,
+    expectedDataVersion,
+    patch: {
       title,
       outline,
+      summary,
       status,
       cognitive_frame,
       emotional_anchor,
       world_texture,
       concrete_mystery,
       interpersonal_tension,
+    },
+  });
+  if (updateResult.disposition === 'identity_mismatch') {
+    return res.status(409).json({
+      error: {
+        code: 'CHAPTER_IDENTITY_MISMATCH',
+        message: `章节 ID ${chapterId} 与 URL 中的章节编号 ${chapterNum} 不匹配`,
+        recoverable: true,
+      },
     });
-    if (updateResult.changes === 0) {
-      if (updateResult.conflict) {
-        return res.status(409).json({
-          error: {
-            code: 'CHAPTER_VERSION_CONFLICT',
-            message: '章节已在其他窗口更新；本地草稿已保留，请人工处理冲突后再重试',
-            recoverable: true,
-          },
-          chapter: updateResult.current,
-          current_data_version: updateResult.current.data_version,
-        });
-      }
-      return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${num} 不存在`, recoverable: true } });
-    }
-    return res.json(updateResult.chapter);
   }
-
-  const fields = [];
-  const params = [];
-  if (title !== undefined) { fields.push('title = ?'); params.push(title); }
-  if (outline !== undefined) { fields.push('outline = ?'); params.push(outline); }
-  if (status !== undefined) { fields.push('status = ?'); params.push(status); }
-  if (cognitive_frame !== undefined) { fields.push('cognitive_frame = ?'); params.push(cognitive_frame); }
-  if (emotional_anchor !== undefined) { fields.push('emotional_anchor = ?'); params.push(emotional_anchor); }
-  if (world_texture !== undefined) { fields.push('world_texture = ?'); params.push(world_texture); }
-  if (concrete_mystery !== undefined) { fields.push('concrete_mystery = ?'); params.push(concrete_mystery); }
-  if (interpersonal_tension !== undefined) { fields.push('interpersonal_tension = ?'); params.push(interpersonal_tension); }
-
-  fields.push("updated_at = datetime('now')");
-  params.push(targetChapter.id);
-  if (hasExpectedDataVersion) params.push(expectedDataVersion);
-
-  const versionClause = hasExpectedDataVersion ? ' AND data_version = ?' : '';
-  const sql = `UPDATE chapters SET ${fields.join(', ')} WHERE id = ?${versionClause}`;
-  const projectDb = db.getProjectDb(projectName);
-  const updateResult = projectDb.transaction(() => {
-    const changes = projectDb.prepare(sql).run(...params).changes;
-    if (changes === 0) {
-      const current = projectDb.prepare('SELECT * FROM chapters WHERE id = ?').get(targetChapter.id);
-      if (!current) return { changes, missing: true, updated: null };
-      if (hasExpectedDataVersion) return { changes, conflict: true, current, updated: null };
-      return { changes, missing: true, updated: null };
-    }
-    db.updateProjectWordCount(projectDb);
-    return {
-      changes,
-      updated: projectDb.prepare('SELECT * FROM chapters WHERE id = ?').get(targetChapter.id),
-    };
-  })();
-  const { changes } = updateResult;
-  if (changes === 0) {
-    if (updateResult.conflict) {
-      return res.status(409).json({
-        error: {
-          code: 'CHAPTER_VERSION_CONFLICT',
-          message: '章节已在其他窗口更新；本地草稿已保留，请人工处理冲突后再重试',
-          recoverable: true,
-        },
-        chapter: updateResult.current,
-        current_data_version: updateResult.current.data_version,
-      });
-    }
+  if (updateResult.disposition === 'ambiguous') {
+    return res.status(409).json({
+      error: {
+        code: 'AMBIGUOUS_CHAPTER',
+        message: `多个卷中存在第 ${chapterNum} 章，请提供章节标识`,
+        recoverable: true,
+      },
+    });
+  }
+  if (updateResult.disposition === 'conflict') {
+    return res.status(409).json({
+      error: {
+        code: 'CHAPTER_VERSION_CONFLICT',
+        message: '章节已在其他窗口更新；本地草稿已保留，请人工处理冲突后再重试',
+        recoverable: true,
+      },
+      chapter: updateResult.current,
+      current_data_version: updateResult.current.data_version,
+    });
+  }
+  if (updateResult.disposition === 'missing') {
     return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${num} 不存在`, recoverable: true } });
   }
-  res.json(updateResult.updated);
+  return res.json(updateResult.updated);
 });
 
 router.post('/:project/chapters', async (req, res, next) => {
   const { title, volume_id = 1, outline = '', status = 'pending', chapter_num } = req.body || {};
   if (isFilesRequest(req)) {
     try {
+      const body = filesBody(req.body, [
+        'base_witness',
+        'container_volume_uid',
+        'requested_num',
+        'title',
+        'outline',
+        'summary',
+        'status',
+        'content',
+        'cognitive_frame',
+        'emotional_anchor',
+        'world_texture',
+        'concrete_mystery',
+        'interpersonal_tension',
+      ], ['base_witness', 'container_volume_uid', 'title']);
+      const sidecar = Object.freeze({
+        title: optionalString(body.title, 'title', ''),
+        outline: optionalString(body.outline, 'outline', ''),
+        summary: optionalString(body.summary, 'summary', ''),
+        status: optionalString(body.status, 'status', 'pending'),
+        cognitive_frame: optionalString(body.cognitive_frame, 'cognitive_frame', ''),
+        emotional_anchor: optionalString(body.emotional_anchor, 'emotional_anchor', ''),
+        world_texture: optionalString(body.world_texture, 'world_texture', ''),
+        concrete_mystery: optionalString(body.concrete_mystery, 'concrete_mystery', ''),
+        interpersonal_tension: optionalString(
+          body.interpersonal_tension,
+          'interpersonal_tension',
+          '',
+        ),
+      });
       const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
         requestId: filesRequestId(req),
-        baseWitness: filesBaseWitness(req.body),
+        baseWitness: filesBaseWitness(body),
         command: Object.freeze({
           kind: 'chapter.create',
-          containerVolumeId: volume_id,
-          requestedNum: chapter_num ?? null,
-          content: '',
-          sidecar: Object.freeze({ title, outline, status }),
+          containerVolumeUid: nullableFilesUid(
+            body.container_volume_uid,
+            'container_volume_uid',
+          ),
+          requestedNum: optionalPositiveInteger(body.requested_num ?? null, 'requested_num'),
+          content: optionalString(body.content, 'content', ''),
+          sidecar,
         }),
       }));
       return res.status(201).json(result);
     } catch (error) { return next(error); }
   }
-  let num;
-  if (chapter_num !== undefined) {
-    num = chapter_num;
-  } else {
-    const maxNum = db.projectGet(project(req.params.project), 'SELECT MAX(num) as mx FROM chapters WHERE volume_id = ?', [volume_id]);
-    num = (maxNum?.mx || 0) + 1;
-  }
-  db.projectExecute(project(req.params.project),
-    'INSERT INTO chapters (volume_id, num, title, outline, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, datetime(\'now\'), datetime(\'now\'))',
-    [volume_id, num, title, outline, status]
-  );
-  const created = db.projectGet(
-    project(req.params.project),
-    'SELECT * FROM chapters WHERE volume_id = ? AND num = ?',
-    [volume_id, num],
-  );
+  const created = createLegacySqliteChapter(project(req.params.project), {
+    title,
+    volumeId: volume_id,
+    outline,
+    status,
+    chapterNum: chapter_num,
+  });
   res.status(201).json(created);
 });
 
 router.delete('/:project/chapters/:num', async (req, res, next) => {
   const projectName = project(req.params.project);
+  if (isFilesRequest(req)) {
+    try {
+      if (!hasEmptyQuery(req)) invalidFilesParams('files chapter delete query must be empty');
+      const body = filesBody(req.body, ['base_witness']);
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({
+          kind: 'chapter.delete',
+          chapterUid: canonicalFilesUid(req.params.num, 'chapter_uid'),
+        }),
+      }));
+      return res.json(result);
+    } catch (error) { return next(error); }
+  }
+
   const chapterNum = positiveInteger(req.params.num);
   const requestedChapterId = req.query.chapter_id ?? req.body?.chapter_id;
   const requestedVolumeId = req.query.volume_id ?? req.body?.volume_id;
@@ -1113,61 +1868,54 @@ router.delete('/:project/chapters/:num', async (req, res, next) => {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '章节身份参数无效', recoverable: true } });
   }
 
-  if (isFilesRequest(req)) {
-    try {
-      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
-        requestId: filesRequestId(req),
-        baseWitness: filesBaseWitness(req.body),
-        command: Object.freeze({ kind: 'chapter.delete', chapterId, chapterNum, volumeId }),
-      }));
-      return res.json(result);
-    } catch (error) { return next(error); }
-  }
-
-  const projectDb = db.getProjectDb(projectName);
-  let targetChapter;
-  if (chapterId) {
-    const volumeClause = volumeId ? ' AND volume_id = ?' : '';
-    targetChapter = projectDb
-      .prepare(`SELECT id, volume_id, num FROM chapters WHERE id = ? AND num = ?${volumeClause}`)
-      .get(...(volumeId ? [chapterId, chapterNum, volumeId] : [chapterId, chapterNum]));
-  } else if (volumeId) {
-    targetChapter = projectDb
-      .prepare('SELECT id, volume_id, num FROM chapters WHERE volume_id = ? AND num = ?')
-      .get(volumeId, chapterNum);
-  } else {
-    const candidates = projectDb
-      .prepare('SELECT id, volume_id, num FROM chapters WHERE num = ? ORDER BY volume_id, id')
-      .all(chapterNum);
-    if (candidates.length > 1) return ambiguousChapterResponse(res, chapterNum);
-    targetChapter = candidates[0];
-  }
-  if (!targetChapter) {
-    return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${req.params.num} 不存在`, recoverable: true } });
-  }
-
-  const changes = projectDb.transaction(() => {
-    projectDb.prepare('DELETE FROM chapter_revisions WHERE chapter_id = ?').run(targetChapter.id);
-    const deleted = projectDb.prepare('DELETE FROM chapters WHERE id = ?').run(targetChapter.id).changes;
-    if (deleted > 0) db.updateProjectWordCount(projectDb);
-    return deleted;
-  })();
-  if (changes === 0) {
+  const deletion = deleteLegacySqliteChapter(projectName, { chapterId, chapterNum, volumeId });
+  if (deletion.disposition === 'ambiguous') return ambiguousChapterResponse(res, chapterNum);
+  if (deletion.disposition === 'missing') {
     return res.status(404).json({ error: { code: 'DB_NOT_FOUND', message: `章节 ${req.params.num} 不存在`, recoverable: true } });
   }
   res.json({
     success: true,
-    chapter_id: targetChapter.id,
-    volume_id: targetChapter.volume_id,
-    deleted_num: targetChapter.num,
+    chapter_id: deletion.chapter.id,
+    volume_id: deletion.chapter.volume_id,
+    deleted_num: deletion.chapter.num,
   });
 });
 
-router.patch('/:project/revisions/:revisionId', (req, res) => {
+router.patch('/:project/revisions/:revisionId', async (req, res, next) => {
   const projectName = project(req.params.project);
   const revisionId = Number(req.params.revisionId);
-  if (!Number.isInteger(revisionId) || revisionId < 1) {
+  if (!Number.isSafeInteger(revisionId) || revisionId < 1) {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '修订标识无效', recoverable: true } });
+  }
+  if (isFilesRequest(req)) {
+    try {
+      const body = filesBody(
+        req.body,
+        ['base_witness', 'decisions', 'expectedBaseContent'],
+        ['base_witness', 'decisions', 'expectedBaseContent'],
+      );
+      if (typeof body.expectedBaseContent !== 'string') {
+        invalidFilesParams('expectedBaseContent must be a string');
+      }
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({
+          kind: 'revision.update_decisions',
+          revisionId,
+          decisions: filesRevisionDecisions(body.decisions, 'decisions'),
+          expectedBaseContent: body.expectedBaseContent,
+        }),
+      }));
+      if (result.state === 'conflict') {
+        return sendFilesRevisionConflict(res, result, '待审修订不存在');
+      }
+      if (result.state === 'stale') {
+        return sendJsonError(res, 'EXTERNAL_DRAFT_CONFLICT', '待审修订基线已失效，请刷新后重试');
+      }
+      if (result.state !== 'updated') invalidFilesParams('revision.update returned an invalid state');
+      return res.json({ revision: result.revision, rebased: false });
+    } catch (error) { return next(error); }
   }
   const result = updateRevisionDecisions(projectName, revisionId, req.body?.decisions, req.body?.expectedBaseContent);
   if (result.invalid) {
@@ -1179,11 +1927,49 @@ router.patch('/:project/revisions/:revisionId', (req, res) => {
   res.json({ revision: result.revision, rebased: !!result.rebased });
 });
 
-router.post('/:project/revisions/:revisionId/accept-all', (req, res) => {
+router.post('/:project/revisions/:revisionId/accept-all', async (req, res, next) => {
   const projectName = project(req.params.project);
   const revisionId = Number(req.params.revisionId);
-  if (!Number.isInteger(revisionId) || revisionId < 1) {
+  if (!Number.isSafeInteger(revisionId) || revisionId < 1) {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '修订标识无效', recoverable: true } });
+  }
+  if (isFilesRequest(req)) {
+    try {
+      const body = filesBody(
+        req.body,
+        ['base_witness', 'expectedBaseContent'],
+        ['base_witness', 'expectedBaseContent'],
+      );
+      if (typeof body.expectedBaseContent !== 'string') {
+        invalidFilesParams('expectedBaseContent must be a string');
+      }
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({
+          kind: 'revision.accept',
+          revisionId,
+          expectedBaseContent: body.expectedBaseContent,
+        }),
+      }));
+      if (result.state === 'conflict') {
+        return sendFilesRevisionConflict(res, result, '待审修订不存在');
+      }
+      if (result.state === 'stale') {
+        return sendJsonError(res, 'EXTERNAL_DRAFT_CONFLICT', '待审修订基线已失效，请刷新后重试');
+      }
+      if (result.state !== 'accepted') invalidFilesParams('revision.accept returned an invalid state');
+      const chapter = result.chapter;
+      return res.json({
+        success: true,
+        chapterId: chapter.id,
+        chapterUid: chapter.chapterUid,
+        content: chapter.content,
+        wordCount: chapter.wordCount,
+        status: chapter.status,
+        dataVersion: chapter.dataVersion,
+      });
+    } catch (error) { return next(error); }
   }
   const result = applyRevision(projectName, revisionId, 'accept-all', undefined, req.body?.expectedBaseContent);
   if (result.invalid) {
@@ -1202,11 +1988,48 @@ router.post('/:project/revisions/:revisionId/accept-all', (req, res) => {
   });
 });
 
-router.post('/:project/revisions/:revisionId/reject-all', (req, res) => {
+router.post('/:project/revisions/:revisionId/reject-all', async (req, res, next) => {
   const projectName = project(req.params.project);
   const revisionId = Number(req.params.revisionId);
-  if (!Number.isInteger(revisionId) || revisionId < 1) {
+  if (!Number.isSafeInteger(revisionId) || revisionId < 1) {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '修订标识无效', recoverable: true } });
+  }
+  if (isFilesRequest(req)) {
+    try {
+      const body = filesBody(
+        req.body,
+        ['base_witness', 'expectedBaseContent'],
+        ['base_witness', 'expectedBaseContent'],
+      );
+      if (typeof body.expectedBaseContent !== 'string') {
+        invalidFilesParams('expectedBaseContent must be a string');
+      }
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({
+          kind: 'revision.reject',
+          revisionId,
+          expectedBaseContent: body.expectedBaseContent,
+        }),
+      }));
+      if (result.state === 'conflict') {
+        return sendFilesRevisionConflict(res, result, '待审修订不存在');
+      }
+      if (result.state === 'stale') {
+        return sendJsonError(res, 'EXTERNAL_DRAFT_CONFLICT', '待审修订基线已失效，请刷新后重试');
+      }
+      if (result.state !== 'rejected') invalidFilesParams('revision.reject returned an invalid state');
+      const chapter = result.chapter ?? result;
+      return res.json({
+        success: true,
+        chapterId: chapter.id ?? result.chapterId,
+        content: chapter.content,
+        wordCount: chapter.wordCount,
+        status: chapter.status,
+        dataVersion: chapter.dataVersion,
+      });
+    } catch (error) { return next(error); }
   }
   const result = applyRevision(projectName, revisionId, 'reject-all', undefined, req.body?.expectedBaseContent);
   if (result.invalid) {
@@ -1226,12 +2049,55 @@ router.post('/:project/revisions/:revisionId/reject-all', (req, res) => {
   });
 });
 
-router.post('/:project/revisions/:revisionId/finalize', (req, res) => {
+router.post('/:project/revisions/:revisionId/finalize', async (req, res, next) => {
   const projectName = project(req.params.project);
   const revisionId = Number(req.params.revisionId);
   const { content, expectedDecisions } = req.body || {};
-  if (!Number.isInteger(revisionId) || revisionId < 1 || typeof content !== 'string') {
+  if (!Number.isSafeInteger(revisionId) || revisionId < 1 || typeof content !== 'string') {
     return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '修订确认参数无效', recoverable: true } });
+  }
+  if (isFilesRequest(req)) {
+    try {
+      const body = filesBody(
+        req.body,
+        ['base_witness', 'content', 'expectedBaseContent', 'expectedDecisions'],
+        ['base_witness', 'content', 'expectedBaseContent', 'expectedDecisions'],
+      );
+      if (typeof body.content !== 'string' || typeof body.expectedBaseContent !== 'string') {
+        invalidFilesParams('revision.finalize content fields must be strings');
+      }
+      const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
+        requestId: filesRequestId(req),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({
+          kind: 'revision.finalize',
+          revisionId,
+          content: body.content,
+          expectedBaseContent: body.expectedBaseContent,
+          expectedDecisions: filesRevisionDecisions(
+            body.expectedDecisions,
+            'expectedDecisions',
+          ),
+        }),
+      }));
+      if (result.state === 'conflict') {
+        return sendFilesRevisionConflict(res, result, '待审修订不存在');
+      }
+      if (result.state === 'stale') {
+        return sendJsonError(res, 'EXTERNAL_DRAFT_CONFLICT', '待审修订基线已失效，请刷新后重试');
+      }
+      if (result.state !== 'accepted') invalidFilesParams('revision.finalize returned an invalid state');
+      const chapter = result.chapter;
+      return res.json({
+        success: true,
+        chapterId: chapter.id,
+        chapterUid: chapter.chapterUid,
+        content: chapter.content,
+        wordCount: chapter.wordCount,
+        status: chapter.status,
+        dataVersion: chapter.dataVersion,
+      });
+    } catch (error) { return next(error); }
   }
   const result = applyRevision(
     projectName,
@@ -1268,43 +2134,50 @@ router.get('/:project/volumes', async (req, res, next) => {
       return res.json(serializeFilesVolumes(req, result.value, result.baseWitness.generation));
     } catch (error) { return next(error); }
   }
-  const rows = db.projectQuery(project(req.params.project), 'SELECT * FROM volumes ORDER BY sort_order');
-  for (const v of rows) {
-    v.chapters = db.projectQuery(project(req.params.project),
-      'SELECT * FROM chapters WHERE volume_id = ? ORDER BY num', [v.id]
-    );
-  }
-  res.json(rows);
+  res.json(listLegacySqliteVolumes(project(req.params.project)));
 });
 
 router.post('/:project/volumes', async (req, res, next) => {
   const { title, summary = '' } = req.body || {};
   if (isFilesRequest(req)) {
     try {
+      const body = filesBody(
+        req.body,
+        ['base_witness', 'title', 'summary'],
+        ['base_witness', 'title'],
+      );
       const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
         requestId: filesRequestId(req),
-        baseWitness: filesBaseWitness(req.body),
-        command: Object.freeze({ kind: 'volume.create', title, summary }),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({
+          kind: 'volume.create',
+          title: optionalString(body.title, 'title', ''),
+          summary: optionalString(body.summary, 'summary', ''),
+        }),
       }));
       return res.status(201).json(result);
     } catch (error) { return next(error); }
   }
-  const pdb = db.getProjectDb(project(req.params.project));
-  const max = pdb.prepare('SELECT COALESCE(MAX(sort_order), 0) as mx FROM volumes').get();
-  const sortOrder = (max?.mx || 0) + 1;
-  const result = pdb.prepare("INSERT INTO volumes (sort_order, title, summary, created_at) VALUES (?, ?, ?, datetime('now'))").run(sortOrder, title, summary);
-  res.status(201).json({ id: result.lastInsertRowid, title });
+  res.status(201).json(createLegacySqliteVolume(
+    project(req.params.project),
+    { title, summary },
+  ));
 });
 
 router.put('/:project/volumes/order', async (req, res, next) => {
   if (!isFilesRequest(req)) return sendJsonError(res, 'INVALID_PARAMS', '卷排序仅供 files Beta 项目使用');
   try {
+    const body = filesBody(
+      req.body,
+      ['base_witness', 'volume_uids'],
+      ['base_witness', 'volume_uids'],
+    );
     const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
       requestId: filesRequestId(req),
-      baseWitness: filesBaseWitness(req.body),
+      baseWitness: filesBaseWitness(body),
       command: Object.freeze({
         kind: 'volume.reorder',
-        volumeIds: Object.freeze((req.body?.volume_ids ?? []).map(Number)),
+        volumeUids: filesUidArray(body.volume_uids, 'volume_uids'),
       }),
     }));
     return res.json(result);
@@ -1314,23 +2187,34 @@ router.put('/:project/volumes/order', async (req, res, next) => {
 router.put('/:project/volumes/:id', async (req, res, next) => {
   if (isFilesRequest(req)) {
     try {
+      const body = filesBody(req.body, ['base_witness', 'title', 'summary']);
+      for (const key of ['title', 'summary']) {
+        if (body[key] !== undefined && typeof body[key] !== 'string') {
+          invalidFilesParams(`${key} must be a string`);
+        }
+      }
       const patch = Object.fromEntries(
-        Object.entries({ title: req.body?.title, summary: req.body?.summary })
+        Object.entries({ title: body.title, summary: body.summary })
           .filter(([, value]) => value !== undefined),
       );
+      if (Object.keys(patch).length === 0) invalidFilesParams('volume update has no fields');
       const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
         requestId: filesRequestId(req),
-        baseWitness: filesBaseWitness(req.body),
+        baseWitness: filesBaseWitness(body),
         command: Object.freeze({
           kind: 'volume.patch_metadata',
-          volumeId: Number(req.params.id),
+          volumeUid: canonicalFilesUid(req.params.id, 'volume_uid'),
           patch: Object.freeze(patch),
         }),
       }));
       return res.json(result);
     } catch (error) { return next(error); }
   }
-  const changes = updateRecord(project(req.params.project), 'volumes', req.params.id, req.body, ['title', 'summary'], false);
+  const changes = updateLegacySqliteVolume(
+    project(req.params.project),
+    req.params.id,
+    req.body,
+  );
   if (changes === null) return sendJsonError(res, 'INVALID_PARAMS', '没有要更新的字段');
   if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '卷不存在');
   res.json({ success: true });
@@ -1339,22 +2223,20 @@ router.put('/:project/volumes/:id', async (req, res, next) => {
 router.delete('/:project/volumes/:id', async (req, res, next) => {
   if (isFilesRequest(req)) {
     try {
+      if (!hasEmptyQuery(req)) invalidFilesParams('files volume delete query must be empty');
+      const body = filesBody(req.body, ['base_witness']);
       const result = await getManuscriptRuntime().write(filesProjectSelector(req), Object.freeze({
         requestId: filesRequestId(req),
-        baseWitness: filesBaseWitness(req.body),
-        command: Object.freeze({ kind: 'volume.delete', volumeId: Number(req.params.id) }),
+        baseWitness: filesBaseWitness(body),
+        command: Object.freeze({
+          kind: 'volume.delete',
+          volumeUid: canonicalFilesUid(req.params.id, 'volume_uid'),
+        }),
       }));
       return res.json(result);
     } catch (error) { return next(error); }
   }
-  const { id } = req.params;
-  const projectDb = db.getProjectDb(project(req.params.project));
-  const changes = projectDb.transaction(() => {
-    projectDb.prepare('DELETE FROM chapters WHERE volume_id = ?').run(id);
-    const deleted = projectDb.prepare('DELETE FROM volumes WHERE id = ?').run(id).changes;
-    if (deleted > 0) db.updateProjectWordCount(projectDb);
-    return deleted;
-  })();
+  const changes = deleteLegacySqliteVolume(project(req.params.project), req.params.id);
   if (changes === 0) return sendJsonError(res, 'DB_NOT_FOUND', '卷不存在');
   res.json({ success: true });
 });
@@ -1363,46 +2245,53 @@ router.delete('/:project/volumes/:id', async (req, res, next) => {
 // CHARACTERS
 // ═══════════════════════════════════════════
 
-router.get('/:project/characters', (req, res) => {
-  const projectName = project(req.params.project);
-  const chars = db.projectQuery(projectName, 'SELECT * FROM characters ORDER BY name');
-  const appearanceRows = db.projectQuery(projectName, `
-    SELECT
-      cc.character_id,
-      c.id AS chapter_id,
-      c.volume_id,
-      c.num,
-      c.title,
-      COALESCE(cc.role, 'appears') AS role
-    FROM chapter_characters cc
-    JOIN chapters c ON c.id = cc.chapter_id
-    LEFT JOIN volumes v ON v.id = c.volume_id
-    ORDER BY
-      CASE WHEN v.id IS NULL THEN 1 ELSE 0 END ASC,
-      v.sort_order ASC,
-      CASE WHEN c.volume_id IS NULL THEN 1 ELSE 0 END ASC,
-      c.volume_id ASC,
-      c.num ASC,
-      c.id ASC
-  `);
-  const appearancesByCharacter = new Map();
-  for (const appearance of appearanceRows) {
-    const appearances = appearancesByCharacter.get(appearance.character_id) || [];
-    appearances.push({
-      chapter_id: appearance.chapter_id,
-      volume_id: appearance.volume_id,
-      num: appearance.num,
-      title: appearance.title,
-      role: appearance.role,
-    });
-    appearancesByCharacter.set(appearance.character_id, appearances);
-  }
+const FILES_UNAVAILABLE_PRODUCT_PATHS = Object.freeze([
+  '/:project/world',
+  '/:project/science',
+  '/:project/foreshadows',
+  '/:project/relations',
+  '/:project/memories',
+  '/:project/timeline',
+  '/:project/workflow',
+  '/:project/target-words',
+  '/:project/tokens',
+  '/:project/cover',
+  '/:project/chat',
+]);
 
-  for (const c of chars) {
-    c.appearances = appearancesByCharacter.get(c.id) || [];
-    c.chapterCount = c.appearances.length;
+router.use('/:project/characters', (req, res, next) => {
+  if (!isFilesRequest(req)) return next();
+  if (req.method === 'GET' && /^\/?$/u.test(req.path)) return next();
+  return sendJsonError(
+    res,
+    'RECOVERY_REQUIRED',
+    '该 files 项目功能尚未接入同一写入 authority',
+  );
+});
+
+router.use(FILES_UNAVAILABLE_PRODUCT_PATHS, (req, res, next) => {
+  if (req.params.project === 'ai') return next();
+  if (!isFilesRequest(req)) return next();
+  if (req.method === 'GET' && /^\/phase\/?$/u.test(req.path)) return next();
+  return sendJsonError(
+    res,
+    'RECOVERY_REQUIRED',
+    '该 files 项目功能尚未接入同一写入 authority',
+  );
+});
+
+router.get('/:project/characters', async (req, res, next) => {
+  const projectName = project(req.params.project);
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().read(
+        filesProjectSelector(req),
+        Object.freeze({ kind: 'character_associations' }),
+      );
+      return res.json(result.value);
+    } catch (error) { return next(error); }
   }
-  res.json(chars);
+  res.json(readLegacySqliteCharacterAssociations(projectName));
 });
 
 router.get('/:project/characters/:id', (req, res) => {
@@ -1548,10 +2437,14 @@ router.get('/:project/foreshadows', (req, res) => {
 router.post('/:project/foreshadows', (req, res) => {
   const { title, description = '', status = 'planted', priority = 'normal', expected_resolve_chapter = 0 } = req.body || {};
   const id = randomUUID();
-  db.projectExecute(project(req.params.project),
-    'INSERT INTO foreshadows (id, title, description, status, priority, expected_resolve_chapter) VALUES (?, ?, ?, ?, ?, ?)',
-    [id, title, description, status, priority, expected_resolve_chapter]
-  );
+  createLegacySqliteForeshadow(project(req.params.project), {
+    id,
+    title,
+    description,
+    status,
+    priority,
+    expectedResolveChapter: expected_resolve_chapter,
+  });
   res.status(201).json({ id, title });
 });
 
@@ -1739,7 +2632,18 @@ router.put('/settings', (req, res) => {
 // PROJECT META
 // ═══════════════════════════════════════════
 
-router.get('/:project/meta', (req, res) => {
+router.get('/:project/meta', async (req, res, next) => {
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().read(
+        Object.freeze({ projectUid: req.manuscriptAdmission.databaseFacts.projectUid }),
+        Object.freeze({ kind: 'product_view' }),
+      );
+      return res.json(result.value.metadata);
+    } catch (error) {
+      return next(error);
+    }
+  }
   const rows = db.projectQuery(project(req.params.project), 'SELECT key, value FROM project_meta');
   const meta = {};
   for (const r of rows) meta[r.key] = r.value;
@@ -1751,10 +2655,17 @@ router.get('/:project/meta', (req, res) => {
 // WORKFLOW PHASE
 // ═══════════════════════════════════════════
 
-router.get('/:project/workflow/phase', (req, res) => {
+router.get('/:project/workflow/phase', async (req, res, next) => {
   if (isFilesRequest(req)) {
-    const phase = db.readFilesProjectProductView(req.params.project).metadata.workflow_phase;
-    return res.json({ phase: phase || 'idea' });
+    try {
+      const result = await getManuscriptRuntime().read(
+        Object.freeze({ projectUid: req.manuscriptAdmission.databaseFacts.projectUid }),
+        Object.freeze({ kind: 'product_view' }),
+      );
+      return res.json({ phase: result.value.metadata.workflow_phase || 'idea' });
+    } catch (error) {
+      return next(error);
+    }
   }
   const row = db.projectGet(project(req.params.project),
     "SELECT value FROM project_meta WHERE key = 'workflow_phase'"
@@ -1778,62 +2689,19 @@ router.put('/:project/workflow/phase', (req, res) => {
 // STATISTICS
 // ═══════════════════════════════════════════
 
-router.get('/:project/stats', (req, res) => {
-  const pn = project(req.params.project);
-  const totalWords = db.projectGet(pn, 'SELECT SUM(word_count) as total FROM chapters')?.total || 0;
-  const chCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM chapters')?.cnt || 0;
-  const acceptedCount = db.projectGet(pn, "SELECT COUNT(*) as cnt FROM chapters WHERE status = 'accepted'")?.cnt || 0;
-  const charCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM characters')?.cnt || 0;
-  const foreshadowCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM foreshadows')?.cnt || 0;
-  const resolvedForeshadow = db.projectGet(pn, "SELECT COUNT(*) as cnt FROM foreshadows WHERE status = 'resolved'")?.cnt || 0;
-  const overdueForeshadow = db.projectGet(pn, "SELECT COUNT(*) as cnt FROM foreshadows WHERE status = 'planted' AND expected_resolve_chapter < (SELECT COALESCE(MAX(num), 0) FROM chapters)")?.cnt || 0;
-  const worldCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM world_entries')?.cnt || 0;
-  const sciCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM science_entries')?.cnt || 0;
-  const relCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM character_relations')?.cnt || 0;
-  const memCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM memories')?.cnt || 0;
-  const tlCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM timeline_events')?.cnt || 0;
-  const volCount = db.projectGet(pn, 'SELECT COUNT(*) as cnt FROM volumes')?.cnt || 0;
-  const clueUnresolved = db.projectGet(pn, "SELECT COUNT(*) as cnt FROM clue_board WHERE resolved = 0")?.cnt || 0;
-  const clueResolved = db.projectGet(pn, "SELECT COUNT(*) as cnt FROM clue_board WHERE resolved = 1")?.cnt || 0;
-  const genres = db.projectQuery(pn, 'SELECT genre FROM project_genres').map(g => g.genre);
-  const tokenUsage = db.projectGet(pn, 'SELECT COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output FROM token_usage') || { input: 0, output: 0 };
-
-  // Target words: custom override or fallback to project mode default
-  const projectMode = db.projectGet(pn, "SELECT value FROM project_meta WHERE key = 'mode'")?.value || 'medium-novel';
-  const TARGET_WORDS = { 'short-story': 30000, 'medium-novel': 100000, 'long-novel': 200000 };
-  const customTarget = db.projectGet(pn, "SELECT value FROM project_meta WHERE key = 'target_words'")?.value;
-  const targetWords = customTarget ? parseInt(customTarget) : (TARGET_WORDS[projectMode] || 100000);
-
-  // Volume structure summary
-  const volumes = db.projectQuery(pn, 'SELECT id, title, sort_order, (SELECT COUNT(*) FROM chapters WHERE volume_id = volumes.id) as chapter_count, (SELECT COALESCE(SUM(word_count), 0) FROM chapters WHERE volume_id = volumes.id) as word_count FROM volumes ORDER BY sort_order');
-
-  // Daily word counts for sparkline (last 7 days)
-  const rawDaily = db.projectQuery(pn,
-    "SELECT date(updated_at) as day, SUM(word_count) as words FROM chapters WHERE updated_at >= date('now', '-6 days') GROUP BY date(updated_at) ORDER BY day"
-  );
-  const dailyMap = {};
-  for (const r of rawDaily) dailyMap[r.day] = r.words;
-  const dailyWords = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    dailyWords.push(dailyMap[key] || 0);
+router.get('/:project/stats', async (req, res, next) => {
+  if (isFilesRequest(req)) {
+    try {
+      const result = await getManuscriptRuntime().read(
+        Object.freeze({ projectUid: req.manuscriptAdmission.databaseFacts.projectUid }),
+        Object.freeze({ kind: 'stats' }),
+      );
+      return res.json(result.value);
+    } catch (error) {
+      return next(error);
+    }
   }
-
-  res.json({
-    totalWords, chapterCount: chCount, acceptedCount, characterCount: charCount,
-    foreshadowCount, resolvedForeshadow, overdueForeshadow, worldCount, sciCount,
-    relationCount: relCount, memoryCount: memCount, timelineCount: tlCount,
-    volumeCount: volCount, volumes,
-    clueUnresolved, clueResolved,
-    genres,
-    tokenInput: tokenUsage.input || 0, tokenOutput: tokenUsage.output || 0,
-    targetWords,
-    currentChapter: db.projectGet(pn, "SELECT * FROM chapters WHERE status = 'writing' ORDER BY num LIMIT 1"),
-    chapters: db.projectQuery(pn, 'SELECT id, num, title, word_count, status FROM chapters ORDER BY num'),
-    dailyWords,
-    });
+  return res.json(readLegacySqliteStats(project(req.params.project)));
   });
 
 // ─── Target words ───
@@ -1962,32 +2830,56 @@ router.delete('/:project/cover', (req, res) => {
 // EXPORT
 // ═══════════════════════════════════════════
 
-router.get('/:project/export', async (req, res) => {
+router.get('/:project/export', async (req, res, next) => {
   const { format = 'txt' } = req.query;
   const pn = project(req.params.project);
-  const chapters = db.projectQuery(pn, `
-    SELECT
-      c.id,
-      c.num,
-      c.title,
-      c.content,
-      c.volume_id,
-      v.sort_order AS volume_sort_order,
-      v.title AS volume_title,
-      v.summary AS volume_summary
-    FROM chapters c
-    LEFT JOIN volumes v ON v.id = c.volume_id
-    WHERE c.content != ''
-    ORDER BY
-      CASE WHEN v.id IS NULL THEN 1 ELSE 0 END ASC,
-      v.sort_order ASC,
-      c.volume_id ASC,
-      c.num ASC,
-      c.id ASC
-  `);
-  const volumes = db.projectQuery(pn, 'SELECT * FROM volumes ORDER BY sort_order');
-  const meta = {};
-  db.projectQuery(pn, 'SELECT key, value FROM project_meta').forEach(m => meta[m.key] = m.value);
+  if (isFilesRequest(req)) {
+    try {
+      const initialFacts = req.manuscriptAdmission.databaseFacts;
+      const result = await getManuscriptRuntime().read(
+        Object.freeze({ projectUid: initialFacts.projectUid }),
+        Object.freeze({ kind: 'export_snapshot' }),
+      );
+      const published = await publishProjectExport({
+        snapshot: result.value,
+        exportRoot: db.getExportDir(),
+        exportName: pn,
+        options: Object.freeze({ format }),
+        assertCurrent: async (expected) => {
+          const current = db.inspectProjectManuscriptRoute(pn);
+          if (
+            current.route !== 'files'
+            || current.databaseFacts.projectUid !== initialFacts.projectUid
+            || current.databaseFacts.projectInstanceId !== initialFacts.projectInstanceId
+            || current.databaseFacts.projectionGeneration !== expected.projectionGeneration
+          ) {
+            const error = new Error('Project changed while its export was being generated');
+            error.code = 'PROJECT_INSTANCE_MISMATCH';
+            throw error;
+          }
+        },
+      });
+      if (req.query.download === '1' || req.query.download === 'true') {
+        res.setHeader('Content-Type', published.manifest.mime);
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="${encodeURIComponent(published.manifest.filename)}"`,
+        );
+        return res.end(published.bytes);
+      }
+      return res.json({
+        success: true,
+        format: published.manifest.format,
+        filePath: published.filePath,
+        wordCount: published.manifest.wordCount,
+        chapterCount: published.manifest.chapterCount,
+        filename: published.manifest.filename,
+      });
+    } catch (error) {
+      return next(error);
+    }
+  }
+  const { chapters, volumes, meta } = readLegacySqliteExportSnapshot(pn);
   const exportInstanceId = meta.project_instance_id;
 
   const totalWords = chapters.reduce((s, c) => s + (c.content?.replace(/\s/g, '').length || 0), 0);

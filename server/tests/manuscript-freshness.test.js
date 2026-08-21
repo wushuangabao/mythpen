@@ -368,6 +368,36 @@ test('constructor, owner, and admission brands reject inexact ports and plain au
   await assert.rejects(fixture.lifecycle.close(owner), TypeError);
 });
 
+test('orphan start verifies the route and feed capability without recovery or FULL, then ordinary work refreshes', async () => {
+  const fixture = harness({ capability: false });
+  const owner = fixture.lifecycle.createOwner(fixture.identity);
+
+  await fixture.lifecycle.startOrphan(owner, fixture.identity);
+
+  assert.deepEqual(fixture.events, [
+    'pre-start',
+    'identity-assert',
+    'capability',
+  ]);
+  assert.equal(fixture.calls.preStart, 1);
+  assert.equal(fixture.calls.assertIdentity, 1);
+  assert.equal(fixture.calls.open, 0);
+  assert.equal(fixture.calls.writer, 0);
+  assert.equal(fixture.calls.recover, 0);
+  assert.equal(fixture.calls.fullInputs.length, 0);
+
+  await admitted(fixture, owner, (admission) => (
+    fixture.ports.writerTurns.withWriterTurn(
+      admission,
+      (writerTurn) => ensureProjectionCurrent(admission, writerTurn),
+    )
+  ));
+  assert.equal(fixture.calls.writer, 1);
+  assert.equal(fixture.calls.recover, 1);
+  assert.equal(fixture.calls.fullInputs.length, 1);
+  await fixture.lifecycle.close(owner);
+});
+
 test('capability disabled, no slot, and known unavailable enter startup-full degraded mode without event-clean claims', async () => {
   const knownError = new Error('known unavailable');
   const cases = [

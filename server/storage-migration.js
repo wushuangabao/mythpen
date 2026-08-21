@@ -55,6 +55,30 @@ function nativeDataRootMigrationUnsupported(projectPath) {
   return error;
 }
 
+function missingDataRootPolicyAuthority() {
+  const error = new Error('Production data-root policy authority is unavailable');
+  error.code = 'NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED';
+  error.status = 409;
+  error.recoverable = false;
+  return error;
+}
+
+function captureDataRootPolicyAuthority(authority) {
+  if (
+    authority === null
+    || (typeof authority !== 'object' && typeof authority !== 'function')
+  ) throw new TypeError('policyAuthority must be an object');
+  const descriptor = Object.getOwnPropertyDescriptor(authority, 'assertChangeAllowed');
+  if (
+    descriptor === undefined
+    || !Object.hasOwn(descriptor, 'value')
+    || typeof descriptor.value !== 'function'
+  ) throw new TypeError('policyAuthority.assertChangeAllowed must be an own data function');
+  return Object.freeze({
+    assertChangeAllowed: (request) => Reflect.apply(descriptor.value, authority, [request]),
+  });
+}
+
 function untrustedDataRoot(message, cause) {
   const error = new Error(message, { cause });
   error.code = 'STORAGE_UNAVAILABLE';
@@ -200,6 +224,20 @@ function inspectProjectMarkers(SQL, projectPath, fsApi) {
 async function assertDataRootMigrationSupported(dataDir, options = {}) {
   const fsApi = options.fsApi || fs;
   const source = path.resolve(dataDir);
+  const targetRoot = options.targetRoot === undefined
+    ? source
+    : path.resolve(options.targetRoot);
+  const migrate = options.migrate === true;
+  if (options.policyAuthority !== undefined && options.policyAuthority !== null) {
+    const policy = captureDataRootPolicyAuthority(options.policyAuthority);
+    await policy.assertChangeAllowed(Object.freeze({
+      sourceRoot: source,
+      targetRoot,
+      migrate,
+    }));
+  } else if (options.requirePolicyAuthority === true) {
+    throw missingDataRootPolicyAuthority();
+  }
   const configDbPath = path.join(source, 'config.db');
   const projectsDir = path.join(source, 'projects');
   if (!probePathExists(source, fsApi, 'Data root')) return;

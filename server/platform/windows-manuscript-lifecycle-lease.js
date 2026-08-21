@@ -1,11 +1,13 @@
 'use strict';
 
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { types: { isProxy } } = require('node:util');
 
 const { manuscriptError } = require('../manuscript/contracts');
+const {
+  deriveManuscriptLifecycleLockPath,
+} = require('../manuscript/lifecycle-lock');
 const { acquireExistingFileRangeLease, inspectPath } = require('./durability');
 
 const PLATFORM_IDENTITY_KEYS = Object.freeze([
@@ -169,17 +171,6 @@ function requirePlainEmptyLock(targetPath, expectedIdentity) {
   }
 }
 
-function deriveLifecycleLockPath(canonicalRealControlDirectory) {
-  const digest = crypto
-    .createHash('sha256')
-    .update(Buffer.from(canonicalRealControlDirectory, 'utf8'))
-    .digest('hex');
-  return path.join(
-    path.dirname(canonicalRealControlDirectory),
-    `.manuscript-${digest}.lifecycle.lock`,
-  );
-}
-
 function verifyPlatformFacts(identity, lockPath) {
   const controlDirectory = identity.canonicalRealControlDirectory;
   const controlParent = path.dirname(controlDirectory);
@@ -268,7 +259,7 @@ function acquire(identityInput, exclusive) {
   let primitiveLease;
   try {
     identity = requirePlatformIdentity(identityInput);
-    const lockPath = deriveLifecycleLockPath(identity.canonicalRealControlDirectory);
+    const lockPath = deriveManuscriptLifecycleLockPath(identity.canonicalRealControlDirectory);
     verifyPlatformFacts(identity, lockPath);
     primitiveLease = acquireExistingFileRangeLease(lockPath, {
       expectedIdentity: identity.lifecycleLockIdentity,

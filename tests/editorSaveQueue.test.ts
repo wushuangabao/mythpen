@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ManuscriptBaseWitness } from '../src/lib/api.ts'
 import {
+  cancelAndDrainEditorHostQueues,
   type EditorSaveEntry,
   discardEditorSave,
   discardProjectEditorSaves,
@@ -11,7 +12,13 @@ import {
   getEditorSaveDraft,
   getEditorSaveQueueSnapshot,
   getEditorSaveFailure,
+  getEditorHostMigrationState,
+  releaseEditorHostQueueDrain,
 } from '../src/lib/editorSaveQueue.ts'
+import {
+  freezeManuscriptSaveAdmission,
+  releaseManuscriptSaveAdmission,
+} from '../src/lib/manuscriptHostSaveAdmission.ts'
 import {
   discardManuscriptDirtyResource,
   getManuscriptDirtySnapshot,
@@ -347,6 +354,71 @@ test('a deleted chapter rejects a late failed write without restoring its draft'
     assert.equal(getEditorSaveDraft(project, chapterId), null)
     assert.equal(getEditorSaveQueueSnapshot().errors[editorSaveKey(project, chapterId)], undefined)
   } finally {
+    discardProjectEditorSaves(project)
+  }
+})
+
+test('host drain preserves a successfully persisted frozen editor entry until release', async () => {
+  const project = 'editor-host-drain-success'
+  const chapterId = 1001
+  const write = createDeferred()
+  let writes = 0
+
+  try {
+    enqueueEditorSave(project, chapterId, 10, 'durable body', 3)
+    const save = flushEditorSave(project, chapterId, () => {
+      writes += 1
+      return write.promise
+    })
+    await waitFor(() => writes === 1)
+    const drain = cancelAndDrainEditorHostQueues(project)
+    write.resolve()
+    await save
+
+    assert.deepEqual(await drain, [{
+      resourceUid: `sqlite-chapter-${chapterId}`,
+      domain: 'body',
+      disposition: 'persisted',
+    }])
+    assert.deepEqual(getEditorHostMigrationState(project), {
+      resources: [{
+        domain: 'body',
+        loaded: false,
+        resourceKind: 'chapter',
+        resourceUid: `sqlite-chapter-${chapterId}`,
+        revision: getEditorHostMigrationState(project).resources[0]?.revision,
+      }],
+      queues: [{
+        domain: 'body',
+        loaded: false,
+        queueId: `editor:${chapterId}`,
+        revision: getEditorHostMigrationState(project).queues[0]?.revision,
+        state: 'cancelled_and_drained',
+      }],
+    })
+
+    releaseEditorHostQueueDrain(project)
+    assert.deepEqual(getEditorHostMigrationState(project), { resources: [], queues: [] })
+  } finally {
+    releaseEditorHostQueueDrain(project)
+    discardProjectEditorSaves(project)
+  }
+})
+
+test('a frozen project rejects new editor save admission without consuming its draft', () => {
+  const project = 'editor-host-frozen'
+  const instanceId = '11111111-1111-4111-8111-111111111111'
+  const chapterId = 1002
+  try {
+    enqueueEditorSave(project, chapterId, 10, 'still local', 0)
+    freezeManuscriptSaveAdmission(project, instanceId)
+    assert.throws(
+      () => flushEditorSave(project, chapterId, async () => {}),
+      /frozen/u,
+    )
+    assert.equal(getEditorSaveDraft(project, chapterId)?.content, 'still local')
+  } finally {
+    releaseManuscriptSaveAdmission(project, instanceId)
     discardProjectEditorSaves(project)
   }
 })

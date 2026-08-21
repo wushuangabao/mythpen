@@ -21,6 +21,7 @@ const {
   normalizeIgnoredLedgerRows,
 } = require('./ignored-ledger');
 const {
+  assertInstalledOrphanBaselineAuthority,
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
   canonicalSchema12ReuseIdentityPlan,
@@ -2003,6 +2004,267 @@ function assertResolutionCandidateMatchesBaseline(candidate, baselineCandidate, 
   ) throw new TypeError('orphan resolution found a non-target projection or file fact change');
 }
 
+function installedControlledKey(fact) {
+  return `${fact.role}:${fact.resourceUid ?? ''}`;
+}
+
+function candidateControlledFacts(candidate) {
+  return candidate.controlledFiles.map((fact) => ({
+    byteSize: fact.byteSize,
+    fileIdentity: fact.fileIdentity,
+    parentIdentity: fact.parentIdentity,
+    rawSha256: fact.rawSha256,
+    resourceUid: fact.resourceUid,
+    role: fact.role,
+  }));
+}
+
+function sameInstalledControlledFacts(installedFacts, candidateFacts, rewrittenKey = null) {
+  if (installedFacts.length !== candidateFacts.length) return false;
+  const candidateByKey = new Map(candidateFacts.map((fact) => [installedControlledKey(fact), fact]));
+  if (candidateByKey.size !== candidateFacts.length) return false;
+  for (const installed of installedFacts) {
+    const key = installedControlledKey(installed);
+    const candidate = candidateByKey.get(key);
+    if (candidate === undefined) return false;
+    if (key !== rewrittenKey) {
+      if (!isDeepStrictEqual(candidate, installed)) return false;
+      continue;
+    }
+    if (
+      candidate.role !== installed.role
+      || candidate.resourceUid !== installed.resourceUid
+      || !isDeepStrictEqual(candidate.parentIdentity, installed.parentIdentity)
+    ) return false;
+  }
+  return true;
+}
+
+function allowsInstalledNewActiveIndexInsertion(candidate, installed, preparation) {
+  if (preparation.transitionKind !== 'new_active') return false;
+  const targetObservation = candidate.ignoredLedgerAfter.find((observation) => (
+    observation.kind === preparation.kind && observation.uid === preparation.uid
+  ));
+  if (
+    targetObservation === undefined
+    || targetObservation.status !== 'active'
+    || targetObservation.reference.state !== 'indexed'
+  ) return false;
+  const candidateRecord = projectionCandidateRecords.get(candidate);
+  const after = validatedSnapshotRecords.get(candidateRecord?.snapshot);
+  if (after === undefined) return false;
+
+  const installedVolumeUids = installed.volumes.map((row) => row.volume_uid);
+  const installedVolumeUidById = new Map(
+    installed.volumes.map((row) => [row.id, row.volume_uid]),
+  );
+  const installedUnassigned = installed.chapters
+    .filter((row) => row.volume_id === null)
+    .sort((left, right) => left.chapter_position - right.chapter_position)
+    .map((row) => row.chapter_uid);
+  const installedByVolume = new Map(installed.volumes.map((row) => [row.volume_uid, []]));
+  for (const chapter of installed.chapters) {
+    if (chapter.volume_id === null) continue;
+    const volumeUid = installedVolumeUidById.get(chapter.volume_id);
+    if (volumeUid === undefined) return false;
+    installedByVolume.get(volumeUid)?.push(chapter);
+  }
+  for (const [volumeUid, rows] of installedByVolume) {
+    installedByVolume.set(volumeUid, rows
+      .sort((left, right) => left.chapter_position - right.chapter_position)
+      .map((row) => row.chapter_uid));
+  }
+  if (
+    !isDeepStrictEqual([...after.volumeSnapshots.keys()], installedVolumeUids)
+  ) return false;
+
+  let rewrittenKey;
+  if (preparation.kind === 'volume') {
+    if (
+      targetObservation.reference.containerKind !== 'manuscript'
+      || targetObservation.reference.containerUid !== null
+      || !isExactSingleInsertion(
+        installedVolumeUids,
+        after.manuscript.parsed.volume_uids,
+        preparation.uid,
+      )
+      || !isDeepStrictEqual(installedUnassigned, after.unassigned.parsed.chapter_uids)
+    ) return false;
+    rewrittenKey = 'manuscript:';
+  } else if (targetObservation.reference.containerKind === 'unassigned') {
+    if (
+      targetObservation.reference.containerUid !== null
+      || !isDeepStrictEqual(installedVolumeUids, after.manuscript.parsed.volume_uids)
+      || !isExactSingleInsertion(
+        installedUnassigned,
+        after.unassigned.parsed.chapter_uids,
+        preparation.uid,
+      )
+    ) return false;
+    rewrittenKey = 'unassigned:';
+  } else if (targetObservation.reference.containerKind === 'volume') {
+    const volumeUid = targetObservation.reference.containerUid;
+    const afterVolume = after.volumeSnapshots.get(volumeUid);
+    const installedMembers = installedByVolume.get(volumeUid);
+    if (
+      installedMembers === undefined
+      || afterVolume === undefined
+      || !isDeepStrictEqual(installedVolumeUids, after.manuscript.parsed.volume_uids)
+      || !isDeepStrictEqual(installedUnassigned, after.unassigned.parsed.chapter_uids)
+      || !isExactSingleInsertion(
+        installedMembers,
+        afterVolume.parsed.chapter_uids,
+        preparation.uid,
+      )
+    ) return false;
+    rewrittenKey = `volume_index:${volumeUid}`;
+  } else {
+    return false;
+  }
+
+  for (const [volumeUid, installedMembers] of installedByVolume) {
+    const afterVolume = after.volumeSnapshots.get(volumeUid);
+    if (afterVolume === undefined) return false;
+    if (
+      rewrittenKey !== `volume_index:${volumeUid}`
+      && !isDeepStrictEqual(installedMembers, afterVolume.parsed.chapter_uids)
+    ) return false;
+  }
+  return sameInstalledControlledFacts(
+    installed.controlledFiles,
+    candidateControlledFacts(candidate),
+    rewrittenKey,
+  );
+}
+
+function orphanInstalledCapacityMismatch() {
+  throw manuscriptError('RECOVERY_REQUIRED', {
+    reason: 'orphan_installed_capacity_mismatch',
+  });
+}
+
+function safeCapacitySum(values) {
+  let total = 0;
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || value < 0) orphanInstalledCapacityMismatch();
+    total += value;
+    if (!Number.isSafeInteger(total)) orphanInstalledCapacityMismatch();
+  }
+  return total;
+}
+
+function safeCapacityAdjustment(value, ...deltas) {
+  let result = value;
+  if (!Number.isSafeInteger(result) || result < 0) orphanInstalledCapacityMismatch();
+  for (const delta of deltas) {
+    if (!Number.isSafeInteger(delta)) orphanInstalledCapacityMismatch();
+    result += delta;
+    if (!Number.isSafeInteger(result) || result < 0) orphanInstalledCapacityMismatch();
+  }
+  return result;
+}
+
+function assertResolutionCapacityMatchesInstalled(candidate, installed, preparation) {
+  const expected = {
+    chapterIdentities: installed.capacity.chapter_identities,
+    volumeIdentities: installed.capacity.volume_identities,
+    controlledFiles: installed.capacity.controlled_files,
+    chapterDirectoryEntries: installed.capacity.chapter_directory_entries,
+    controlledBytes: installed.capacity.controlled_bytes,
+  };
+  if (preparation.transitionKind === 'new_active') {
+    const targetObservation = candidate.ignoredLedgerAfter.find((observation) => (
+      observation.kind === preparation.kind && observation.uid === preparation.uid
+    ));
+    if (targetObservation === undefined || targetObservation.status !== 'active') {
+      orphanInstalledCapacityMismatch();
+    }
+    const presentMembers = targetObservation.members.filter((member) => member.present === true);
+    const targetBytes = safeCapacitySum(presentMembers.map((member) => member.byteSize));
+    const installedControlledBytes = safeCapacitySum(
+      installed.controlledFiles.map((fact) => fact.byteSize),
+    );
+    const candidateControlledBytes = safeCapacitySum(
+      candidate.controlledFiles.map((fact) => fact.byteSize),
+    );
+    expected[`${preparation.kind}Identities`] = safeCapacityAdjustment(
+      expected[`${preparation.kind}Identities`],
+      1,
+    );
+    expected.controlledFiles = safeCapacityAdjustment(
+      expected.controlledFiles,
+      presentMembers.length,
+    );
+    expected.controlledBytes = safeCapacityAdjustment(
+      expected.controlledBytes,
+      targetBytes,
+      candidateControlledBytes - installedControlledBytes,
+    );
+    if (preparation.kind === 'chapter') {
+      expected.chapterDirectoryEntries = safeCapacityAdjustment(
+        expected.chapterDirectoryEntries,
+        presentMembers.length,
+      );
+    }
+  }
+  const actual = candidate.capacitySnapshot.measurements;
+  if (
+    actual.chapterIdentities !== expected.chapterIdentities
+    || actual.volumeIdentities !== expected.volumeIdentities
+    || actual.controlledFiles !== expected.controlledFiles
+    || actual.chapterDirectoryEntries !== expected.chapterDirectoryEntries
+    || actual.controlledBytes !== expected.controlledBytes
+  ) orphanInstalledCapacityMismatch();
+}
+
+function assertResolutionCandidateMatchesInstalled(candidate, installed, preparation) {
+  const volumes = installed.volumes.map((row) => ({
+    summary: row.summary,
+    title: row.title,
+    volumePosition: row.sort_order,
+    volumeUid: row.volume_uid,
+  }));
+  const volumeUidById = new Map(installed.volumes.map((row) => [row.id, row.volume_uid]));
+  const controlledByKey = new Map(
+    installed.controlledFiles.map((fact) => [installedControlledKey(fact), fact]),
+  );
+  const chapters = installed.chapters.map((row) => ({
+    bodyFileIdentity: controlledByKey.get(`chapter_body:${row.chapter_uid}`)?.fileIdentity,
+    bodyRawSha256: row.body_raw_sha256,
+    chapterPosition: row.chapter_position,
+    chapterUid: row.chapter_uid,
+    cognitiveFrame: row.cognitive_frame,
+    concreteMystery: row.concrete_mystery,
+    content: row.content,
+    contentAvailable: row.content_available === 1,
+    emotionalAnchor: row.emotional_anchor,
+    interpersonalTension: row.interpersonal_tension,
+    manuscriptPosition: row.manuscript_position,
+    outline: row.outline,
+    sidecarFileIdentity: controlledByKey.get(`chapter_sidecar:${row.chapter_uid}`)?.fileIdentity,
+    sidecarRawSha256: row.sidecar_raw_sha256,
+    status: row.status,
+    summary: row.summary,
+    title: row.title,
+    volumeUid: row.volume_id === null ? null : volumeUidById.get(row.volume_id),
+    wordCount: row.word_count,
+    worldTexture: row.world_texture,
+  }));
+  const candidateChapters = candidate.chapters.map(({ markdownMode: _markdownMode, ...row }) => row);
+  if (
+    candidate.projectUid !== installed.projectUid
+    || !isDeepStrictEqual(candidate.volumeOrder, volumes.map((row) => row.volumeUid))
+    || !isDeepStrictEqual(candidate.volumes, volumes)
+    || !isDeepStrictEqual(candidateChapters, chapters)
+  ) throw new TypeError('orphan resolution found a non-target installed projection change');
+  const candidateFacts = candidateControlledFacts(candidate);
+  if (
+    !sameInstalledControlledFacts(installed.controlledFiles, candidateFacts)
+    && !allowsInstalledNewActiveIndexInsertion(candidate, installed, preparation)
+  ) throw new TypeError('orphan resolution found a non-target installed file fact change');
+  assertResolutionCapacityMatchesInstalled(candidate, installed, preparation);
+}
+
 function assertUnambiguousEnumeration(context) {
   if (context.journalCandidates.length !== 0 || context.residues.length !== 0) {
     throw manuscriptError('RECOVERY_REQUIRED', { reason: 'uid_path_enumeration_ambiguous' });
@@ -2693,12 +2955,38 @@ class ManuscriptStore {
     dataRoot,
     fileBoundary,
     journalAuthority,
+    installedOrphanBaselineAuthority,
     limits = LIMITS,
     capacityObserver,
   } = {}) {
     const safeDataRoot = assertCanonicalDataRoot(dataRoot);
     const boundary = requireFileBoundaryCapability(fileBoundary).methods;
     const authority = requireJournalAuthorityCapability(journalAuthority).methods;
+    let installedBaselineAuthority = null;
+    if (installedOrphanBaselineAuthority !== undefined) {
+      const installedAuthority = assertInstalledOrphanBaselineAuthority(
+        installedOrphanBaselineAuthority,
+      );
+      const installedDescriptors = dataDescriptors(
+        installedAuthority,
+        'installed orphan baseline authority',
+      );
+      assertExactKeys(
+        installedDescriptors,
+        ['assert', 'describe'],
+        'installed orphan baseline authority',
+      );
+      for (const method of ['assert', 'describe']) {
+        if (typeof descriptorValue(installedDescriptors, method) !== 'function') {
+          throw new TypeError(`installed orphan baseline authority.${method} must be a function`);
+        }
+      }
+      installedBaselineAuthority = Object.freeze({
+        authority: installedAuthority,
+        assert: descriptorValue(installedDescriptors, 'assert'),
+        describe: descriptorValue(installedDescriptors, 'describe'),
+      });
+    }
     if (capacityObserver !== undefined && typeof capacityObserver !== 'function') {
       throw new TypeError('capacityObserver must be a function');
     }
@@ -2708,6 +2996,7 @@ class ManuscriptStore {
       dataRoot: safeDataRoot,
       fileBoundary: boundary,
       journalAuthority: authority,
+      installedBaselineAuthority,
       limits: { ...limits },
       nextScanEpoch: 0,
     });
@@ -2720,9 +3009,12 @@ class ManuscriptStore {
 
   captureOrphanBaseline(input) {
     const descriptors = dataDescriptors(input, 'orphan baseline input');
+    const installedMode = Object.hasOwn(descriptors, 'installedProjectionBaseline');
     assertExactKeys(
       descriptors,
-      ['projectBinding', 'currentProjection', 'ignoredLedger', 'projectionCandidate'],
+      installedMode
+        ? ['projectBinding', 'currentProjection', 'ignoredLedger', 'installedProjectionBaseline']
+        : ['projectBinding', 'currentProjection', 'ignoredLedger', 'projectionCandidate'],
       'orphan baseline input',
     );
     const projectBinding = snapshotProjectBinding(
@@ -2730,14 +3022,54 @@ class ManuscriptStore {
     );
     const currentProjection = descriptorValue(descriptors, 'currentProjection');
     canonicalSchema12ReuseIdentityPlan(currentProjection);
-    const projectionCandidate = descriptorValue(descriptors, 'projectionCandidate');
-    const candidateRecord = projectionCandidateRecords.get(projectionCandidate);
-    if (candidateRecord === undefined || candidateRecord.store !== this) {
-      throw new TypeError(
-        'orphan baseline requires the original Store projection candidate authority',
+    let projectionCandidate = null;
+    let installedProjectionFacts = null;
+    if (installedMode) {
+      const installedAuthority = storeRecords.get(this).installedBaselineAuthority;
+      if (installedAuthority === null) {
+        throw new TypeError('orphan baseline Store has no installed projection authority');
+      }
+      const receipt = descriptorValue(descriptors, 'installedProjectionBaseline');
+      const asserted = Reflect.apply(
+        installedAuthority.assert,
+        installedAuthority.authority,
+        [receipt],
       );
+      if (asserted !== receipt) {
+        throw new TypeError('installed orphan baseline authority changed the receipt');
+      }
+      installedProjectionFacts = Reflect.apply(
+        installedAuthority.describe,
+        installedAuthority.authority,
+        [receipt],
+      );
+      assertDeepFrozenPlainData(installedProjectionFacts, 'installed orphan baseline facts');
+      const installedDescriptors = dataDescriptors(
+        installedProjectionFacts,
+        'installed orphan baseline facts',
+      );
+      assertExactKeys(installedDescriptors, [
+        'projectUid', 'projectInstanceId', 'baseGeneration', 'basisDigest',
+        'ignoredDigest', 'volumes', 'chapters', 'controlledFiles', 'capacity',
+      ], 'installed orphan baseline facts');
+      if (
+        installedProjectionFacts.projectUid !== currentProjection.projectUid
+        || installedProjectionFacts.projectInstanceId !== currentProjection.projectInstanceId
+        || installedProjectionFacts.baseGeneration !== currentProjection.basis.baseGeneration
+        || installedProjectionFacts.basisDigest !== currentProjection.basis.basisDigest
+        || installedProjectionFacts.ignoredDigest
+          !== currentProjection.basis.ignoredBeforeDigest
+      ) throw new TypeError('installed orphan baseline receipt is foreign or stale');
+    } else {
+      projectionCandidate = descriptorValue(descriptors, 'projectionCandidate');
+      const candidateRecord = projectionCandidateRecords.get(projectionCandidate);
+      if (candidateRecord === undefined || candidateRecord.store !== this) {
+        throw new TypeError(
+          'orphan baseline requires the original Store projection candidate authority',
+        );
+      }
+      assertCandidateMatchesProjectionBasis(projectionCandidate, currentProjection);
     }
-    assertCandidateMatchesProjectionBasis(projectionCandidate, currentProjection);
     if (currentProjection.projectUid !== projectBinding.projectUid) {
       throw new TypeError('orphan baseline project binding does not match currentProjection');
     }
@@ -2782,6 +3114,7 @@ class ManuscriptStore {
       ignoredRows,
       lifecycleBasis,
       projectionCandidate,
+      installedProjectionFacts,
       projectBinding,
       store: this,
       targetGeneration: baseGeneration + 1,
@@ -2817,7 +3150,11 @@ class ManuscriptStore {
       });
     }
     const candidate = await this.buildProjectionCandidate(snapshot);
-    assertResolutionCandidateMatchesBaseline(candidate, base.projectionCandidate, pending);
+    if (base.installedProjectionFacts === null) {
+      assertResolutionCandidateMatchesBaseline(candidate, base.projectionCandidate, pending);
+    } else {
+      assertResolutionCandidateMatchesInstalled(candidate, base.installedProjectionFacts, pending);
+    }
     const transition = ignoredIdentityLedger.finalizeResolution({
       preparation,
       candidate,

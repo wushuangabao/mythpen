@@ -29,11 +29,13 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
+          chapter_uid: { type: 'string', description: '文件稿件路由使用的稳定章节 UID' },
           chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
           volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
           chapter_num: { type: 'number', description: '章节编号；同号章节存在于多个卷时还必须提供 volume_id 或 chapter_id' },
         },
         anyOf: [
+          { required: ['chapter_uid'] },
           { required: ['chapter_id'] },
           { required: ['chapter_num'] },
         ],
@@ -52,6 +54,9 @@ const TOOLS = [
           chapter_num: { type: 'number', description: '章节编号（可选）。不传则自动按卷内顺序编号；传入则使用指定编号，适合跨卷续接场景' },
           outline: { type: 'string', description: '章节大纲（可选）' },
           content: { type: 'string', description: '章节正文（可选）' },
+          status: { type: 'string', enum: ['pending', 'writing', 'review', 'accepted'], description: '章节状态（可选）' },
+          summary: { type: 'string', description: '章节摘要（可选）' },
+          volume_uid: { type: 'string', description: '文件稿件路由使用的所属卷 UID' },
           volume_id: { type: 'number', description: '所属卷ID，默认为1' },
           cognitive_frame: { type: 'string', description: '叙事维度 — 认知框架（可选）' },
           emotional_anchor: { type: 'string', description: '叙事维度 — 情感锚点（可选）' },
@@ -71,6 +76,7 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
+          chapter_uid: { type: 'string', description: '文件稿件路由使用的稳定章节 UID' },
           chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
           volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
           chapter_num: { type: 'number', description: '章节编号；同号章节存在于多个卷时还必须提供 volume_id 或 chapter_id' },
@@ -86,6 +92,7 @@ const TOOLS = [
           interpersonal_tension: { type: 'string', description: '叙事维度 — 人际张力：角色间的冲突与张力（可选）' },
         },
         anyOf: [
+          { required: ['chapter_uid'] },
           { required: ['chapter_id'] },
           { required: ['chapter_num'] },
         ],
@@ -100,11 +107,13 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
+          chapter_uid: { type: 'string', description: '文件稿件路由使用的稳定章节 UID' },
           chapter_id: { type: 'number', description: '稳定章节 ID（推荐）' },
           volume_id: { type: 'number', description: '卷 ID；与 chapter_num 联合定位章节' },
           chapter_num: { type: 'number', description: '章节编号；同号章节存在于多个卷时还必须提供 volume_id 或 chapter_id' },
         },
         anyOf: [
+          { required: ['chapter_uid'] },
           { required: ['chapter_id'] },
           { required: ['chapter_num'] },
         ],
@@ -387,11 +396,15 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
+          volume_uid: { type: 'string', description: '文件稿件路由使用的稳定卷 UID' },
           volume_id: { type: 'number', description: '要更新的卷ID' },
           title: { type: 'string', description: '新卷名（可选）' },
           summary: { type: 'string', description: '新卷简介（可选）' },
         },
-        required: ['volume_id'],
+        anyOf: [
+          { required: ['volume_uid'] },
+          { required: ['volume_id'] },
+        ],
       },
     },
   },
@@ -403,9 +416,13 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
+          volume_uid: { type: 'string', description: '文件稿件路由使用的稳定卷 UID' },
           volume_id: { type: 'number', description: '要删除的卷ID' },
         },
-        required: ['volume_id'],
+        anyOf: [
+          { required: ['volume_uid'] },
+          { required: ['volume_id'] },
+        ],
       },
     },
   },
@@ -746,9 +763,350 @@ const TOOLS = [
 ];
 const { randomUUID } = require('crypto');
 
+const FILES_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const CHAPTER_SIDECAR_FIELDS = Object.freeze([
+  'title',
+  'outline',
+  'status',
+  'summary',
+  'cognitive_frame',
+  'emotional_anchor',
+  'world_texture',
+  'concrete_mystery',
+  'interpersonal_tension',
+]);
+const CHAPTER_STATUSES = new Set(['pending', 'writing', 'review', 'accepted']);
+const FILES_RUNTIME_TOOLS = new Set([
+  'list_chapters',
+  'get_chapter',
+  'create_chapter',
+  'update_chapter',
+  'delete_chapter',
+  'list_volumes',
+  'create_volume',
+  'update_volume',
+  'delete_volume',
+  'get_stats',
+  'get_project_meta',
+]);
+
+function filesToolError(code, message) {
+  const error = new Error(message);
+  error.name = 'FilesManuscriptToolError';
+  error.code = code;
+  if (code === 'FILES_TOOL_AUTHORITY_UNAVAILABLE') error.recoverable = true;
+  return error;
+}
+
+function exactFilesToolArgs(value, allowedKeys, requiredKeys, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label} must be a plain object`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label} must be a plain object`);
+  }
+  const allowed = new Set(allowedKeys);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key];
+    if (
+      typeof key !== 'string'
+      || !allowed.has(key)
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')
+    ) throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label} has an invalid shape`);
+  }
+  for (const key of requiredKeys) {
+    if (!Object.hasOwn(descriptors, key)) {
+      throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label}.${key} is required`);
+    }
+  }
+  const result = {};
+  for (const key of allowedKeys) {
+    if (Object.hasOwn(descriptors, key)) result[key] = descriptors[key].value;
+  }
+  return Object.freeze(result);
+}
+
+function filesString(value, label, { nonEmpty = false } = {}) {
+  if (typeof value !== 'string' || (nonEmpty && value.length === 0)) {
+    throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label} must be ${nonEmpty ? 'a non-empty ' : ''}string`);
+  }
+  return value;
+}
+
+function filesUid(value, label) {
+  if (typeof value !== 'string' || !FILES_UUID_PATTERN.test(value)) {
+    throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label} must be a canonical lowercase UUIDv4`);
+  }
+  return value;
+}
+
+function filesChapterNumber(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0 || Object.is(value, -0)) {
+    throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function filesChapterPatch(input, label) {
+  const patch = {};
+  for (const key of CHAPTER_SIDECAR_FIELDS) {
+    if (!Object.hasOwn(input, key)) continue;
+    const value = filesString(input[key], `${label}.${key}`);
+    if (key === 'status' && !CHAPTER_STATUSES.has(value)) {
+      throw filesToolError('INVALID_FILES_TOOL_INPUT', `${label}.status is invalid`);
+    }
+    patch[key] = value;
+  }
+  return Object.freeze(patch);
+}
+
+function filesCreateResult(result, objectKind, title) {
+  const uidKey = `${objectKind}_uid`;
+  return Object.freeze({
+    created: true,
+    [uidKey]: result.uid,
+    [`${objectKind}_id`]: result.id,
+    ...(objectKind === 'chapter' ? { chapter_num: result.num } : {}),
+    title,
+  });
+}
+
+async function executeFilesManuscriptTool(admission, toolName, callerArgs) {
+  if (!FILES_RUNTIME_TOOLS.has(toolName)) {
+    throw filesToolError(
+      'FILES_TOOL_AUTHORITY_UNAVAILABLE',
+      `Files manuscript tool has no safe runtime authority: ${toolName}`,
+    );
+  }
+  const runtime = require('./manuscript/runtime').getManuscriptRuntime();
+  const projectSelector = Object.freeze({
+    projectUid: filesUid(
+      admission.databaseFacts?.projectUid,
+      'manuscriptRoute.databaseFacts.projectUid',
+    ),
+  });
+  const read = async (request) => runtime.read(projectSelector, Object.freeze(request));
+  const writeFrom = async (captured, command) => runtime.write(projectSelector, Object.freeze({
+    requestId: randomUUID(),
+    baseWitness: captured.baseWitness,
+    command: Object.freeze(command),
+  }));
+
+  switch (toolName) {
+    case 'list_chapters': {
+      exactFilesToolArgs(callerArgs, [], [], 'list_chapters args');
+      return (await read({ kind: 'chapters' })).value;
+    }
+    case 'get_chapter': {
+      const args = exactFilesToolArgs(callerArgs, ['chapter_uid'], ['chapter_uid'], 'get_chapter args');
+      const chapterUid = filesUid(args.chapter_uid, 'get_chapter.chapter_uid');
+      return (await read({ kind: 'chapter', chapterUid })).value;
+    }
+    case 'create_chapter': {
+      const args = exactFilesToolArgs(callerArgs, [
+        'volume_uid',
+        'chapter_num',
+        'title',
+        'outline',
+        'content',
+        'status',
+        'summary',
+        'cognitive_frame',
+        'emotional_anchor',
+        'world_texture',
+        'concrete_mystery',
+        'interpersonal_tension',
+      ], ['volume_uid', 'title'], 'create_chapter args');
+      const title = filesString(args.title, 'create_chapter.title', { nonEmpty: true });
+      const sidecarInput = {
+        title,
+        outline: Object.hasOwn(args, 'outline') ? args.outline : '',
+        status: Object.hasOwn(args, 'status') ? args.status : 'pending',
+        summary: Object.hasOwn(args, 'summary') ? args.summary : '',
+        cognitive_frame: Object.hasOwn(args, 'cognitive_frame') ? args.cognitive_frame : '',
+        emotional_anchor: Object.hasOwn(args, 'emotional_anchor') ? args.emotional_anchor : '',
+        world_texture: Object.hasOwn(args, 'world_texture') ? args.world_texture : '',
+        concrete_mystery: Object.hasOwn(args, 'concrete_mystery') ? args.concrete_mystery : '',
+        interpersonal_tension: Object.hasOwn(args, 'interpersonal_tension') ? args.interpersonal_tension : '',
+      };
+      const command = {
+        kind: 'chapter.create',
+        containerVolumeUid: filesUid(args.volume_uid, 'create_chapter.volume_uid'),
+        requestedNum: Object.hasOwn(args, 'chapter_num')
+          ? filesChapterNumber(args.chapter_num, 'create_chapter.chapter_num')
+          : null,
+        content: Object.hasOwn(args, 'content')
+          ? filesString(args.content, 'create_chapter.content')
+          : '',
+        sidecar: filesChapterPatch(sidecarInput, 'create_chapter'),
+      };
+      const captured = await read({ kind: 'project' });
+      return filesCreateResult(await writeFrom(captured, command), 'chapter', title);
+    }
+    case 'update_chapter': {
+      const args = exactFilesToolArgs(callerArgs, [
+        'chapter_uid',
+        'content',
+        ...CHAPTER_SIDECAR_FIELDS,
+      ], ['chapter_uid'], 'update_chapter args');
+      const chapterUid = filesUid(args.chapter_uid, 'update_chapter.chapter_uid');
+      const patch = filesChapterPatch(args, 'update_chapter');
+      const hasContent = Object.hasOwn(args, 'content');
+      if (!hasContent && Object.keys(patch).length === 0) {
+        throw filesToolError('INVALID_FILES_TOOL_INPUT', 'update_chapter has no changed fields');
+      }
+      const content = hasContent ? filesString(args.content, 'update_chapter.content') : null;
+      const captured = await read({ kind: 'chapter', chapterUid });
+      const command = hasContent
+        ? (Object.keys(patch).length > 0
+          ? { kind: 'chapter.replace_body_and_sidecar', chapterUid, content, patch }
+          : { kind: 'chapter.replace_body', chapterUid, content })
+        : { kind: 'chapter.patch_sidecar', chapterUid, patch };
+      await writeFrom(captured, command);
+      return Object.freeze({
+        updated: true,
+        chapter_uid: chapterUid,
+        chapter_id: captured.value?.id ?? null,
+        volume_id: captured.value?.volume_id ?? null,
+        chapter_num: captured.value?.num ?? null,
+        changed_fields: Object.freeze([
+          ...(hasContent ? ['content'] : []),
+          ...Object.keys(patch),
+        ]),
+      });
+    }
+    case 'delete_chapter': {
+      const args = exactFilesToolArgs(callerArgs, ['chapter_uid'], ['chapter_uid'], 'delete_chapter args');
+      const chapterUid = filesUid(args.chapter_uid, 'delete_chapter.chapter_uid');
+      const captured = await read({ kind: 'chapter', chapterUid });
+      await writeFrom(captured, { kind: 'chapter.delete', chapterUid });
+      return Object.freeze({
+        deleted: true,
+        chapter_uid: chapterUid,
+        chapter_id: captured.value?.id ?? null,
+        volume_id: captured.value?.volume_id ?? null,
+        chapter_num: captured.value?.num ?? null,
+      });
+    }
+    case 'list_volumes': {
+      exactFilesToolArgs(callerArgs, [], [], 'list_volumes args');
+      return (await read({ kind: 'volumes' })).value;
+    }
+    case 'get_stats': {
+      exactFilesToolArgs(callerArgs, [], [], 'get_stats args');
+      return (await read({ kind: 'stats' })).value;
+    }
+    case 'get_project_meta': {
+      exactFilesToolArgs(callerArgs, [], [], 'get_project_meta args');
+      const view = (await read({ kind: 'product_view' })).value;
+      const metadata = view.metadata;
+      const genres = metadata.genres;
+      const phase = metadata.workflow_phase || 'idea';
+      const genreLabels = {
+        'sci-fi': '科幻',
+        fantasy: '玄幻',
+        romance: '言情',
+        history: '历史',
+        urban: '都市',
+        'power-fantasy': '爽文',
+        biography: '传记',
+        other: '其他',
+      };
+      const phaseLabels = {
+        idea: '选题',
+        setting: '设定',
+        outline: '大纲',
+        writing: '写作',
+        review: '审阅',
+        consistency: '一致性',
+        export: '导出',
+      };
+      return Object.freeze({
+        name: metadata.name || '',
+        genres,
+        genreLabels: Object.freeze(genres.map((genre) => genreLabels[genre] || genre)),
+        mode: metadata.mode || 'medium-novel',
+        language: metadata.language || 'zh',
+        phase,
+        phaseLabel: phaseLabels[phase] || '选题',
+        wordCount: view.summary.wordCount,
+        authorName: metadata.author_name || '',
+        description: metadata.description || '',
+      });
+    }
+    case 'create_volume': {
+      const args = exactFilesToolArgs(callerArgs, ['title', 'summary'], ['title'], 'create_volume args');
+      const title = filesString(args.title, 'create_volume.title', { nonEmpty: true });
+      const summary = Object.hasOwn(args, 'summary')
+        ? filesString(args.summary, 'create_volume.summary')
+        : '';
+      const captured = await read({ kind: 'project' });
+      const result = await writeFrom(captured, { kind: 'volume.create', title, summary });
+      return filesCreateResult(result, 'volume', title);
+    }
+    case 'update_volume': {
+      const args = exactFilesToolArgs(
+        callerArgs,
+        ['volume_uid', 'title', 'summary'],
+        ['volume_uid'],
+        'update_volume args',
+      );
+      const volumeUid = filesUid(args.volume_uid, 'update_volume.volume_uid');
+      const patch = {};
+      for (const key of ['title', 'summary']) {
+        if (Object.hasOwn(args, key)) patch[key] = filesString(args[key], `update_volume.${key}`);
+      }
+      if (Object.keys(patch).length === 0) {
+        throw filesToolError('INVALID_FILES_TOOL_INPUT', 'update_volume has no changed fields');
+      }
+      const captured = await read({ kind: 'volume', volumeUid });
+      await writeFrom(captured, {
+        kind: 'volume.patch_metadata',
+        volumeUid,
+        patch: Object.freeze(patch),
+      });
+      return Object.freeze({
+        updated: true,
+        volume_uid: volumeUid,
+        volume_id: captured.value?.id ?? null,
+      });
+    }
+    case 'delete_volume': {
+      const args = exactFilesToolArgs(callerArgs, ['volume_uid'], ['volume_uid'], 'delete_volume args');
+      const volumeUid = filesUid(args.volume_uid, 'delete_volume.volume_uid');
+      const captured = await read({ kind: 'volume', volumeUid });
+      await writeFrom(captured, { kind: 'volume.delete', volumeUid });
+      return Object.freeze({
+        deleted: true,
+        volume_uid: volumeUid,
+        volume_id: captured.value?.id ?? null,
+      });
+    }
+    default:
+      throw filesToolError('FILES_TOOL_AUTHORITY_UNAVAILABLE', 'Files manuscript tool is unavailable');
+  }
+}
+
 function executeTool(projectName, toolName, args) {
   const db = require('./db');
+  const manuscriptRoute = db.inspectProjectManuscriptRoute(projectName);
+  if (manuscriptRoute.route === 'files') {
+    return executeFilesManuscriptTool(manuscriptRoute, toolName, args);
+  }
+  if (manuscriptRoute.route !== 'sqlite') {
+    throw filesToolError(
+      'MANUSCRIPT_ROUTE_UNAVAILABLE',
+      `Manuscript route is not active: ${manuscriptRoute.route}`,
+    );
+  }
 
+  return executeLegacySqliteTool(db, projectName, toolName, args);
+}
+
+function executeLegacySqliteTool(db, projectName, toolName, args) {
   const bodyToolIdentity = (identity = {}) => {
     const provided = (value) => value !== undefined && value !== null && value !== '';
     const parsedPositive = (value) => {
@@ -838,7 +1196,7 @@ function executeTool(projectName, toolName, args) {
   const pdb = db.getProjectDb(projectName);
 
   // ─── Shared helpers ───
-  function updateById(id, table, fields, allowed, addUpdatedAt) {
+  function executeLegacySqliteUpdateById(id, table, fields, allowed, addUpdatedAt) {
     const updates = []; const params = [];
     for (const key of allowed) {
       if (fields[key] !== undefined) { updates.push(`${key} = ?`); params.push(fields[key]); }
@@ -851,7 +1209,7 @@ function executeTool(projectName, toolName, args) {
     return { updated: true, id };
   }
 
-  function deleteById(id, table, idField, entityName) {
+  function executeLegacySqliteDeleteById(id, table, idField, entityName) {
     const info = pdb.prepare(`DELETE FROM ${table} WHERE ${idField} = ?`).run(id);
     if (info.changes === 0) return { error: `${entityName} ${id} 不存在` };
     return { deleted: true, [idField]: id };
@@ -880,7 +1238,7 @@ function executeTool(projectName, toolName, args) {
     };
   }
 
-  function resolveChapter(identity = {}) {
+  function executeLegacySqliteResolveChapter(identity = {}) {
     const hasChapterId = isProvided(identity.chapter_id);
     const hasVolumeId = isProvided(identity.volume_id);
     const hasChapterNum = isProvided(identity.chapter_num);
@@ -940,7 +1298,7 @@ function executeTool(projectName, toolName, args) {
       return rows;
     }
     case 'get_chapter': {
-      const resolved = resolveChapter(args);
+      const resolved = executeLegacySqliteResolveChapter(args);
       if (resolved.error) return resolved;
       return resolved.chapter;
     }
@@ -970,7 +1328,7 @@ function executeTool(projectName, toolName, args) {
       };
     }
     case 'update_chapter': {
-      const resolved = resolveChapter(args);
+      const resolved = executeLegacySqliteResolveChapter(args);
       if (resolved.error) return resolved;
       const chapter = resolved.chapter;
       const { chapter_id: _chapterId, chapter_num: _chapterNum, volume_id: _volumeId, ...fields } = args;
@@ -1038,7 +1396,7 @@ function executeTool(projectName, toolName, args) {
       };
     }
     case 'delete_chapter': {
-      const resolved = resolveChapter(args);
+      const resolved = executeLegacySqliteResolveChapter(args);
       if (resolved.error) return resolved;
       const chapter = resolved.chapter;
       pdb.transaction(() => {
@@ -1169,7 +1527,7 @@ function executeTool(projectName, toolName, args) {
       const sourceIdentity = prefixedChapterIdentity(args, 'source');
       let sourceChapter = null;
       if (hasChapterIdentity(sourceIdentity)) {
-        const resolved = resolveChapter(sourceIdentity);
+        const resolved = executeLegacySqliteResolveChapter(sourceIdentity);
         if (resolved.error) return resolved;
         sourceChapter = resolved.chapter;
       }
@@ -1269,26 +1627,26 @@ function executeTool(projectName, toolName, args) {
         return { error: worldEntryCategoryError() };
       }
       const fields = args.tags === undefined ? args : { ...args, tags: serializeWorldTags(args.tags) };
-      return updateById(args.id, 'world_entries', fields, ['category', 'name', 'description', 'tags'], true);
+      return executeLegacySqliteUpdateById(args.id, 'world_entries', fields, ['category', 'name', 'description', 'tags'], true);
     }
     case 'delete_world_entry': {
-      return deleteById(args.id, 'world_entries', 'id', '条目');
+      return executeLegacySqliteDeleteById(args.id, 'world_entries', 'id', '条目');
     }
 
     // ── Relations update/delete ──
     case 'update_relation': {
-      return updateById(args.id, 'character_relations', args, ['relation_type', 'description', 'intensity'], false);
+      return executeLegacySqliteUpdateById(args.id, 'character_relations', args, ['relation_type', 'description', 'intensity'], false);
     }
     case 'delete_relation': {
-      return deleteById(args.id, 'character_relations', 'id', '关系');
+      return executeLegacySqliteDeleteById(args.id, 'character_relations', 'id', '关系');
     }
 
     // ── Memories update/delete ──
     case 'update_memory': {
-      return updateById(args.id, 'memories', args, ['category', 'content'], false);
+      return executeLegacySqliteUpdateById(args.id, 'memories', args, ['category', 'content'], false);
     }
     case 'delete_memory': {
-      return deleteById(args.id, 'memories', 'id', '记忆');
+      return executeLegacySqliteDeleteById(args.id, 'memories', 'id', '记忆');
     }
 
     // ── Timeline update/delete ──
@@ -1296,25 +1654,25 @@ function executeTool(projectName, toolName, args) {
       const fields = args.importance === undefined
         ? args
         : { ...args, importance: clampTimelineImportance(args.importance) };
-      return updateById(args.id, 'timeline_events', fields, ['year', 'title', 'description', 'importance'], false);
+      return executeLegacySqliteUpdateById(args.id, 'timeline_events', fields, ['year', 'title', 'description', 'importance'], false);
     }
     case 'delete_timeline_event': {
-      return deleteById(args.id, 'timeline_events', 'id', '事件');
+      return executeLegacySqliteDeleteById(args.id, 'timeline_events', 'id', '事件');
     }
 
     // ── Science delete ──
     case 'delete_science_entry': {
-      return deleteById(args.id, 'science_entries', 'id', '条目');
+      return executeLegacySqliteDeleteById(args.id, 'science_entries', 'id', '条目');
     }
 
     // ── Character delete ──
     case 'delete_character': {
-      return deleteById(args.name, 'characters', 'name', '角色');
+      return executeLegacySqliteDeleteById(args.name, 'characters', 'name', '角色');
     }
 
     // ── Foreshadow delete ──
     case 'delete_foreshadow': {
-      return deleteById(args.title, 'foreshadows', 'title', '伏笔');
+      return executeLegacySqliteDeleteById(args.title, 'foreshadows', 'title', '伏笔');
     }
 
     // ── Chapter Characters ──
@@ -1322,7 +1680,7 @@ function executeTool(projectName, toolName, args) {
       const filters = [];
       const params = [];
       if (hasChapterIdentity(args)) {
-        const resolved = resolveChapter(args);
+        const resolved = executeLegacySqliteResolveChapter(args);
         if (resolved.error) return resolved;
         filters.push('c.id = ?');
         params.push(resolved.chapter.id);
@@ -1342,7 +1700,7 @@ function executeTool(projectName, toolName, args) {
         ORDER BY c.volume_id, c.num, ch.name`).all(...params);
     }
     case 'set_chapter_character': {
-      const resolved = resolveChapter(args);
+      const resolved = executeLegacySqliteResolveChapter(args);
       if (resolved.error) return resolved;
       const chapter = resolved.chapter;
       const char = pdb.prepare('SELECT id FROM characters WHERE name = ?').get(args.character_name);
@@ -1360,7 +1718,7 @@ function executeTool(projectName, toolName, args) {
       };
     }
     case 'remove_chapter_character': {
-      const resolved = resolveChapter(args);
+      const resolved = executeLegacySqliteResolveChapter(args);
       if (resolved.error) return resolved;
       const chapter = resolved.chapter;
       const char = pdb.prepare('SELECT id FROM characters WHERE name = ?').get(args.character_name);
@@ -1387,7 +1745,7 @@ function executeTool(projectName, toolName, args) {
       const relatedIdentity = prefixedChapterIdentity(args, 'related');
       let relatedChapter = null;
       if (hasChapterIdentity(relatedIdentity)) {
-        const resolved = resolveChapter(relatedIdentity);
+        const resolved = executeLegacySqliteResolveChapter(relatedIdentity);
         if (resolved.error) return resolved;
         relatedChapter = resolved.chapter;
       }
@@ -1422,7 +1780,7 @@ function executeTool(projectName, toolName, args) {
       return { updated: true, id: args.id };
     }
     case 'delete_clue': {
-      return deleteById(args.id, 'clue_board', 'id', '线索');
+      return executeLegacySqliteDeleteById(args.id, 'clue_board', 'id', '线索');
     }
 
     // ── Project Meta ──

@@ -211,18 +211,51 @@ function assertDurableBinding(view, reservation, request) {
   });
 }
 
+function verifyLifecycleReady(record, journal) {
+  const durable = journal.read();
+  if (
+    durable?.lifecycleLockReceipt === null
+    || durable?.lifecycleLockReceipt === undefined
+    || record.directories.verifyExisting(durable.lifecycleLockReceipt)
+      !== durable.lifecyclePlatformIdentity
+  ) throw recoveryRequired('project creation lifecycle lock is not proven ready');
+}
+
+function assertActivationAfter(value, targetGeneration) {
+  const descriptors = exactDescriptors(
+    value,
+    ['disposition', 'generation', 'route'],
+    'verified creation activation after evidence',
+  );
+  if (
+    descriptors.disposition.value !== 'after'
+    || descriptors.generation.value !== targetGeneration
+    || descriptors.route.value !== 'files'
+  ) throw recoveryRequired('created project activation is not completely proven after');
+  return value;
+}
+
 async function activateDurable(record, journal, activationAuthority) {
   if (
     activationAuthority?.state === 'activated'
     && activationAuthority.creationId !== undefined
   ) return activationAuthority;
+  verifyLifecycleReady(record, journal);
   const context = journal.prepareCreationContext(activationAuthority);
   const creationCas = await record.route.prepareAbsentInstall(context);
   const databaseEvidence = await record.database.activate(Object.freeze({
     creationCas,
     creationContext: context,
   }));
-  return journal.recordActivated(activationAuthority, databaseEvidence);
+  const verifiedAfter = assertActivationAfter(
+    await record.database.verifyActivationAfter(Object.freeze({
+      activationEvidence: databaseEvidence,
+      creationContext: context,
+    })),
+    context.targetGeneration,
+  );
+  verifyLifecycleReady(record, journal);
+  return journal.recordActivated(activationAuthority, verifiedAfter);
 }
 
 class ProjectCreationService {
@@ -243,7 +276,11 @@ class ProjectCreationService {
         'reserveCreationIdentity',
       ], 'uidReservations'),
       journals: capturePort(descriptors.journals.value, ['open'], 'journals'),
-      directories: capturePort(descriptors.directories.value, ['ensure', 'plan'], 'directories'),
+      directories: capturePort(
+        descriptors.directories.value,
+        ['ensure', 'plan', 'verifyExisting'],
+        'directories',
+      ),
       store: capturePort(descriptors.store.value, ['buildClosure', 'finalizeCandidate'], 'store'),
       projection: capturePort(descriptors.projection.value, ['buildTarget'], 'projection'),
       childJournal: capturePort(descriptors.childJournal.value, [
@@ -252,7 +289,11 @@ class ProjectCreationService {
         'publishFiles',
         'stageAssets',
       ], 'childJournal'),
-      database: capturePort(descriptors.database.value, ['activate', 'build'], 'database'),
+      database: capturePort(
+        descriptors.database.value,
+        ['activate', 'build', 'verifyActivationAfter'],
+        'database',
+      ),
       route: capturePort(descriptors.route.value, ['prepareAbsentInstall'], 'route'),
     }));
     Object.freeze(this);
@@ -292,6 +333,7 @@ class ProjectCreationService {
     if (durable !== null) {
       assertDurableBinding(durable, creationReservation, request);
       if (durable.state === 'activated') {
+        verifyLifecycleReady(record, journal);
         return Object.freeze({
           creationId: durable.creationId,
           projectUid: durable.projectUid,
@@ -306,6 +348,9 @@ class ProjectCreationService {
         creationId: durable.creationId,
         state: durable.state,
       });
+      if (durable.state === 'database_candidate_ready') {
+        verifyLifecycleReady(record, journal);
+      }
       return activateDurable(record, journal, await journal.resumeActivation());
     }
 
@@ -319,10 +364,22 @@ class ProjectCreationService {
       baseGeneration: 0,
       targetGeneration: 1,
     }));
-    const emptyEnumeration = await record.directories.ensure(Object.freeze({
+    const ready = await record.directories.ensure(Object.freeze({
       creationReservation,
       directoryPlan,
     }));
+    const readyDescriptors = exactDescriptors(ready, [
+      'enumeration',
+      'lifecycleLockReceipt',
+      'lifecyclePlatformIdentity',
+    ], 'project control readiness');
+    if (
+      !Object.isFrozen(ready)
+      || readyDescriptors.lifecyclePlatformIdentity.value
+        !== readyDescriptors.lifecycleLockReceipt.value?.lifecyclePlatformIdentity
+    ) throw recoveryRequired('project control readiness lost its original lifecycle identity');
+    const emptyEnumeration = readyDescriptors.enumeration.value;
+    const lifecycleLockReceipt = readyDescriptors.lifecycleLockReceipt.value;
     const projectIdentity = Object.freeze({
       creationId: creationReservation.creationId,
       projectUid: creationReservation.projectReservation.uid,
@@ -357,6 +414,7 @@ class ProjectCreationService {
       childJournalId: request.childJournalId,
       childReservation,
       closureDigest,
+      lifecycleLockReceipt,
       logicalRequestId: request.logicalRequestId,
       partialManifest,
       projectionBasisDigest: currentProjection.basis.basisDigest,
@@ -430,6 +488,7 @@ class ProjectCreationService {
       finalCommitSeq: databaseCandidate.finalCommitSeq,
       transitionProofDigest: databaseCandidate.transitionProofDigest,
     }));
+    verifyLifecycleReady(record, journal);
     authority = await journal.beginActivation(authority);
     return activateDurable(record, journal, authority);
   }

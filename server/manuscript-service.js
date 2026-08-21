@@ -26,6 +26,7 @@ const CREATE_FIELDS = new Set([
   'volume_id',
   'world_texture',
 ]);
+const PRODUCT_ORPHAN_ACTIONS = new Set(['ignore_in_place', 'revoke_ignore']);
 
 class ManuscriptServiceError extends Error {
   constructor(code, message, options) {
@@ -50,12 +51,332 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function readLegacyPromptContext(projectName) {
+  const projectDatabase = db.getProjectDb(projectName);
+  const metadata = {};
+  for (const item of projectDatabase.prepare('SELECT key, value FROM project_meta').all()) {
+    metadata[item.key] = item.value;
+  }
+  return Object.freeze({
+    metadata: Object.freeze(metadata),
+    genres: Object.freeze(
+      projectDatabase.prepare('SELECT genre FROM project_genres').all().map((item) => item.genre),
+    ),
+    characters: Object.freeze(projectDatabase.prepare('SELECT * FROM characters').all()),
+    chapters: Object.freeze(projectDatabase.prepare(
+      'SELECT id, volume_id, num, title, outline, status FROM chapters ORDER BY volume_id, num',
+    ).all()),
+    foreshadows: Object.freeze(projectDatabase.prepare(
+      "SELECT * FROM foreshadows WHERE status IN ('planted','progressing')",
+    ).all()),
+  });
+}
+
 function hasExactKeys(value, keys) {
   return value !== null
     && typeof value === 'object'
     && !Array.isArray(value)
     && Object.keys(value).length === keys.length
     && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function exactOwnDataDescriptors(value, keys, label, frozen = false) {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || (frozen && !Object.isFrozen(value))
+  ) {
+    throw new TypeError(`${label} must be ${frozen ? 'a frozen ' : ''}plain object`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${label} must be a plain object`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const actual = Reflect.ownKeys(descriptors);
+  const expected = [...keys].sort();
+  if (
+    actual.some((key) => typeof key !== 'string')
+    || actual.length !== expected.length
+    || actual.map(String).sort().some((key, index) => key !== expected[index])
+  ) throw new TypeError(`${label} has an inexact key set`);
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
+      throw new TypeError(`${label} must contain enumerable own data properties only`);
+    }
+  }
+  return descriptors;
+}
+
+function productIntentDescriptor(value) {
+  const descriptors = exactOwnDataDescriptors(
+    value,
+    ['family', 'logicalInputDigest'],
+    'product write intent descriptor',
+    true,
+  );
+  const family = descriptors.family.value;
+  const logicalInputDigest = descriptors.logicalInputDigest.value;
+  if (family === 'ordinary_create') {
+    if (typeof logicalInputDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(logicalInputDigest)) {
+      throw new TypeError('ordinary_create requires a lowercase SHA-256 logical input digest');
+    }
+  } else if (family === 'non_create' || family === 'orphan_resolution') {
+    if (logicalInputDigest !== null) {
+      throw new TypeError(`${family} must not provide a logical input digest`);
+    }
+  } else {
+    throw new TypeError('product write intent family is invalid');
+  }
+  return Object.freeze({ family, logicalInputDigest });
+}
+
+function requireProductService(value, methods, label) {
+  if (
+    value === null
+    || (typeof value !== 'object' && typeof value !== 'function')
+  ) throw new TypeError(`${label} is invalid`);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const captured = {};
+  for (const method of methods) {
+    const descriptor = descriptors[method];
+    if (
+      descriptor === undefined
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')
+      || typeof descriptor.value !== 'function'
+    ) throw new TypeError(`${label}.${method} must be an own enumerable data method`);
+    const implementation = descriptor.value;
+    captured[method] = (...args) => Reflect.apply(implementation, value, args);
+  }
+  return Object.freeze(captured);
+}
+
+function createProductWriteIntents(options) {
+  const optionKeys = (() => {
+    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      throw new TypeError('product write intent owner options must be a plain object');
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(options);
+    return Object.hasOwn(descriptors, 'revisionService')
+      ? ['l2Service', 'orphanResolutionService', 'revisionService']
+      : ['l2Service', 'orphanResolutionService'];
+  })();
+  const optionDescriptors = exactOwnDataDescriptors(
+    options,
+    optionKeys,
+    'product write intent owner options',
+  );
+  const l2Service = requireProductService(optionDescriptors.l2Service.value, [
+    'bindWriteIntent',
+    'writeIntentAuthority',
+    'execute',
+  ], 'l2Service');
+  const orphanResolutionService = requireProductService(
+    optionDescriptors.orphanResolutionService.value,
+    ['snapshotRequest', 'preflightResolution', 'publishResolution'],
+    'orphanResolutionService',
+  );
+  const revisionService = Object.hasOwn(optionDescriptors, 'revisionService')
+    ? requireProductService(
+      optionDescriptors.revisionService.value,
+      ['bindWriteIntent', 'writeIntentAuthority', 'execute'],
+      'revisionService',
+    )
+    : null;
+  const l2BindWriteIntent = l2Service.bindWriteIntent;
+  const l2WriteIntentAuthority = l2Service.writeIntentAuthority;
+  const l2Execute = l2Service.execute;
+  const orphanSnapshotRequest = orphanResolutionService.snapshotRequest;
+  const orphanPreflightResolution = orphanResolutionService.preflightResolution;
+  const orphanPublishResolution = orphanResolutionService.publishResolution;
+  const revisionBindWriteIntent = revisionService?.bindWriteIntent;
+  const revisionWriteIntentAuthority = revisionService?.writeIntentAuthority;
+  const revisionExecute = revisionService?.execute;
+  const downstreamAuthority = Reflect.apply(l2WriteIntentAuthority, l2Service, []);
+  exactOwnDataDescriptors(
+    downstreamAuthority,
+    ['assert', 'describe'],
+    'L2 write intent authority',
+    true,
+  );
+  const revisionAuthority = revisionService === null
+    ? null
+    : Reflect.apply(revisionWriteIntentAuthority, revisionService, []);
+  if (revisionAuthority !== null) {
+    exactOwnDataDescriptors(
+      revisionAuthority,
+      ['assert', 'describe'],
+      'revision write intent authority',
+      true,
+    );
+  }
+  const records = new WeakMap();
+  let authority;
+  let broker;
+
+  function recordFor(receiver, writeIntent) {
+    if (receiver !== authority) throw new TypeError('product write intent authority receiver is invalid');
+    const record = (
+      writeIntent !== null
+      && (typeof writeIntent === 'object' || typeof writeIntent === 'function')
+    ) ? records.get(writeIntent) : undefined;
+    if (record === undefined) throw new TypeError('product write intent is foreign or stale');
+    return record;
+  }
+
+  authority = Object.freeze({
+    assert(writeIntent) {
+      recordFor(this, writeIntent);
+      return writeIntent;
+    },
+    describe(writeIntent) {
+      return recordFor(this, writeIntent).descriptor;
+    },
+  });
+
+  broker = Object.freeze({
+    bindL2Command(command) {
+      if (this !== broker) throw new TypeError('product write intent broker receiver is invalid');
+      const downstreamIntent = Reflect.apply(l2BindWriteIntent, l2Service, [command]);
+      const asserted = Reflect.apply(
+        downstreamAuthority.assert,
+        downstreamAuthority,
+        [downstreamIntent],
+      );
+      if (asserted !== downstreamIntent) {
+        throw new TypeError('L2 write intent authority did not preserve the original intent');
+      }
+      const descriptor = productIntentDescriptor(Reflect.apply(
+        downstreamAuthority.describe,
+        downstreamAuthority,
+        [downstreamIntent],
+      ));
+      const writeIntent = Object.freeze({});
+      records.set(writeIntent, Object.freeze({
+        descriptor,
+        downstreamIntent,
+        family: 'l2',
+      }));
+      return writeIntent;
+    },
+    bindOrphanAction(action, request) {
+      if (this !== broker) throw new TypeError('product write intent broker receiver is invalid');
+      if (!PRODUCT_ORPHAN_ACTIONS.has(action)) {
+        throw new TypeError('orphan product action must be one server-owned literal');
+      }
+      const requestSnapshot = Reflect.apply(
+        orphanSnapshotRequest,
+        orphanResolutionService,
+        [request],
+      );
+      const writeIntent = Object.freeze({});
+      records.set(writeIntent, Object.freeze({
+        action,
+        descriptor: Object.freeze({
+          family: 'orphan_resolution',
+          logicalInputDigest: null,
+        }),
+        family: 'orphan',
+        requestSnapshot,
+      }));
+      return writeIntent;
+    },
+    bindRevisionCommand(command) {
+      if (this !== broker) throw new TypeError('product write intent broker receiver is invalid');
+      if (revisionService === null) {
+        throw new TypeError('product revision service is unavailable');
+      }
+      const downstreamIntent = Reflect.apply(
+        revisionBindWriteIntent,
+        revisionService,
+        [command],
+      );
+      const asserted = Reflect.apply(
+        revisionAuthority.assert,
+        revisionAuthority,
+        [downstreamIntent],
+      );
+      if (asserted !== downstreamIntent) {
+        throw new TypeError('revision write intent authority did not preserve the original intent');
+      }
+      const descriptor = productIntentDescriptor(Reflect.apply(
+        revisionAuthority.describe,
+        revisionAuthority,
+        [downstreamIntent],
+      ));
+      const writeIntent = Object.freeze({});
+      records.set(writeIntent, Object.freeze({
+        descriptor,
+        downstreamIntent,
+        family: 'revision',
+      }));
+      return writeIntent;
+    },
+    authority() {
+      if (this !== broker) throw new TypeError('product write intent broker receiver is invalid');
+      return authority;
+    },
+    async execute(writeIntent, turnContext) {
+      if (this !== broker) throw new TypeError('product write intent broker receiver is invalid');
+      const record = recordFor(authority, writeIntent);
+      if (record.family === 'l2') {
+        const asserted = Reflect.apply(
+          downstreamAuthority.assert,
+          downstreamAuthority,
+          [record.downstreamIntent],
+        );
+        if (asserted !== record.downstreamIntent) {
+          throw new TypeError('L2 downstream intent changed after binding');
+        }
+        return Reflect.apply(l2Execute, l2Service, [record.downstreamIntent, turnContext]);
+      }
+      if (record.family === 'revision') {
+        const asserted = Reflect.apply(
+          revisionAuthority.assert,
+          revisionAuthority,
+          [record.downstreamIntent],
+        );
+        if (asserted !== record.downstreamIntent) {
+          throw new TypeError('revision downstream intent changed after binding');
+        }
+        return Reflect.apply(
+          revisionExecute,
+          revisionService,
+          [record.downstreamIntent, turnContext],
+        );
+      }
+      const contextDescriptors = Object.getOwnPropertyDescriptors(turnContext);
+      for (const key of ['fileSnapshot', 'currentProjection', 'projectedAt']) {
+        const descriptor = contextDescriptors[key];
+        if (
+          descriptor === undefined
+          || descriptor.enumerable !== true
+          || !Object.hasOwn(descriptor, 'value')
+        ) throw new TypeError(`orphan turnContext.${key} is required own data`);
+      }
+      const prepared = await Reflect.apply(
+        orphanPreflightResolution,
+        orphanResolutionService,
+        [
+          record.action,
+          record.requestSnapshot,
+          contextDescriptors.fileSnapshot.value,
+        ],
+      );
+      return Reflect.apply(
+        orphanPublishResolution,
+        orphanResolutionService,
+        [prepared, Object.freeze({
+          currentProjection: contextDescriptors.currentProjection.value,
+          projectedAt: contextDescriptors.projectedAt.value,
+        })],
+      );
+    },
+  });
+  return broker;
 }
 
 function positiveInteger(value) {
@@ -201,10 +522,13 @@ function resolveChapter(projectDb, chapterId, identity) {
   return { chapter: candidates[0] };
 }
 
-function createManuscriptService(database) {
+function createManuscriptService(database, productOptions) {
   if (!database || typeof database !== 'object') {
     throw new TypeError('ManuscriptService requires a database facade');
   }
+  const productWriteIntents = productOptions === undefined
+    ? null
+    : createProductWriteIntents(productOptions);
 
   function transactionCapability() {
     const capability = database.manuscriptTransactionCapability;
@@ -585,6 +909,23 @@ function createManuscriptService(database) {
       && database.isManuscriptPersistenceError(error)
     ),
     writeChapterBody,
+    ...(productWriteIntents === null ? {} : {
+      bindProductL2Command(command) {
+        return productWriteIntents.bindL2Command(command);
+      },
+      bindProductOrphanAction(action, request) {
+        return productWriteIntents.bindOrphanAction(action, request);
+      },
+      bindProductRevisionCommand(command) {
+        return productWriteIntents.bindRevisionCommand(command);
+      },
+      productWriteIntentAuthority() {
+        return productWriteIntents.authority();
+      },
+      executeProductWriteIntent(intent, turnContext) {
+        return productWriteIntents.execute(intent, turnContext);
+      },
+    }),
   });
 }
 
@@ -597,5 +938,6 @@ module.exports = {
   createManuscriptService,
   internals: manuscriptService.internals,
   isManuscriptPersistenceError: manuscriptService.isManuscriptPersistenceError,
+  readLegacyPromptContext,
   writeChapterBody: manuscriptService.writeChapterBody,
 };

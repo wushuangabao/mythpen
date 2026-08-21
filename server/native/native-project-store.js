@@ -1,6 +1,7 @@
 const { createHash, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { isDeepStrictEqual } = require('node:util');
 const { Database } = require('bun:sqlite');
 
 const controlStoreModule = require('../control-store');
@@ -11,7 +12,11 @@ const {
   canonicalTriggerSetDigest,
   inspectSchema12Contract,
 } = require('./durability-schema');
-const { SQLiteProjectionStore } = require('../manuscript/projection-store');
+const {
+  SQLiteProjectionStore,
+  canonicalIgnoredLedgerDigest,
+  canonicalProjectionBasisDigest,
+} = require('../manuscript/projection-store');
 const {
   consumeCreationRouteCas,
   consumeRouteCas,
@@ -34,6 +39,23 @@ const {
 
 // Deliberately module-private. Business statement facades never receive this capability.
 const DURABILITY_SQL_CAPABILITY = Symbol('native durability SQL capability');
+const fullRefreshDispositionRecords = new WeakMap();
+const knownRolledBackTargetInstallErrors = new WeakSet();
+const knownRolledBackAuxiliaryActionErrors = new WeakSet();
+
+function markKnownRolledBackTargetInstall(error) {
+  if (
+    (typeof error === 'object' || typeof error === 'function')
+    && error !== null
+  ) knownRolledBackTargetInstallErrors.add(error);
+}
+
+function markKnownRolledBackAuxiliaryAction(error) {
+  if (
+    (typeof error === 'object' || typeof error === 'function')
+    && error !== null
+  ) knownRolledBackAuxiliaryActionErrors.add(error);
+}
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_MILLISECOND_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -104,6 +126,50 @@ function isPlainObject(value) {
 function exactKeys(value, expected) {
   return isPlainObject(value)
     && Object.keys(value).sort().join(',') === [...expected].sort().join(',');
+}
+
+function exactDataValue(value, expected, key, label) {
+  if (!isPlainObject(value)) throw new TypeError(`${label} must be a plain object`);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const actualKeys = Reflect.ownKeys(descriptors);
+  if (
+    actualKeys.length !== expected.length
+    || actualKeys.some((current) => (
+      typeof current !== 'string' || !expected.includes(current)
+    ))
+  ) throw new TypeError(`${label} has an inexact key set`);
+  for (const current of expected) {
+    const descriptor = descriptors[current];
+    if (
+      descriptor === undefined
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')
+    ) throw new TypeError(`${label}.${current} must be an enumerable data property`);
+  }
+  return descriptors[key].value;
+}
+
+function exactDataValues(value, expected, label) {
+  if (!isPlainObject(value)) throw new TypeError(`${label} must be a plain object`);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const actualKeys = Reflect.ownKeys(descriptors);
+  if (
+    actualKeys.length !== expected.length
+    || actualKeys.some((current) => (
+      typeof current !== 'string' || !expected.includes(current)
+    ))
+  ) throw new TypeError(`${label} has an inexact key set`);
+  const result = {};
+  for (const current of expected) {
+    const descriptor = descriptors[current];
+    if (
+      descriptor === undefined
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')
+    ) throw new TypeError(`${label}.${current} must be an enumerable data property`);
+    result[current] = descriptor.value;
+  }
+  return result;
 }
 
 function evidenceError(message, cause) {
@@ -1178,11 +1244,91 @@ function controlledIdentityJson(row) {
   });
 }
 
-function installTargetRows(database, target, context, beforeSeq, expectedRoute = 'migrating') {
+function canonicalRevisionDecisionsDigest(value) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch (cause) {
+    throw nativeError('RECOVERY_REQUIRED', 'Revision resolution decisions are malformed', cause);
+  }
+  const decisions = auxiliaryDecisionMap(parsed, 'revision resolution decisions');
+  return createHash('sha256').update(JSON.stringify(decisions), 'utf8').digest('hex');
+}
+
+function revisionRequestKey(logicalRequestId) {
+  return `_mythpen_revision_request:${createHash('sha256')
+    .update(logicalRequestId, 'utf8')
+    .digest('hex')}`;
+}
+
+function revisionResolutionReceiptValue(resolution) {
+  return JSON.stringify({
+    version: 1,
+    revisionResolution: {
+      revisionId: resolution.revisionId,
+      chapterId: resolution.chapterId,
+      chapterUid: resolution.chapterUid,
+      from: resolution.from,
+      to: resolution.to,
+      baseContentSha256: resolution.baseContentSha256,
+      proposedContentSha256: resolution.proposedContentSha256,
+      acceptedContentSha256: resolution.acceptedContentSha256,
+      decisionsSha256: resolution.decisionsSha256,
+      logicalRequestId: resolution.logicalRequestId,
+      commandKind: resolution.commandKind,
+      commandDigest: resolution.commandDigest,
+    },
+  });
+}
+
+function assertRevisionResolutionBase(database, target) {
+  const resolution = target.revisionResolution;
+  if (resolution === undefined) return;
+  if (database.query('SELECT value FROM project_meta WHERE key = ?').get(
+    revisionRequestKey(resolution.logicalRequestId),
+  ) !== null) {
+    throw nativeError('RECOVERY_REQUIRED', 'Revision logical request is already bound');
+  }
+  const row = database.query(`
+    SELECT r.id, r.chapter_id, r.base_content, r.proposed_content,
+           r.decisions_json, r.status, c.chapter_uid, c.content
+    FROM chapter_revisions AS r
+    JOIN chapters AS c ON c.id = r.chapter_id
+    WHERE r.id = ? AND r.chapter_id = ?
+  `).get(resolution.revisionId, resolution.chapterId);
+  if (
+    row === null
+    || row === undefined
+    || row.status !== 'pending'
+    || row.chapter_uid !== resolution.chapterUid
+    || createHash('sha256').update(row.base_content, 'utf8').digest('hex')
+      !== resolution.baseContentSha256
+    || createHash('sha256').update(row.proposed_content, 'utf8').digest('hex')
+      !== resolution.proposedContentSha256
+    || createHash('sha256').update(row.content ?? '', 'utf8').digest('hex')
+      !== resolution.baseContentSha256
+    || canonicalRevisionDecisionsDigest(row.decisions_json) !== resolution.decisionsSha256
+  ) throw nativeError('RECOVERY_REQUIRED', 'Revision resolution base changed before target DML');
+}
+
+function installTargetRows(
+  database,
+  target,
+  context,
+  beforeSeq,
+  expectedRoute = 'migrating',
+  transactionHooks = null,
+) {
   let began = false;
+  let commitAttempted = false;
+  let commitReturned = false;
   try {
     database.exec('BEGIN IMMEDIATE');
     began = true;
+    if (expectedRoute === 'files') {
+      assertExactSchema12ProjectionBase(database, target, context, beforeSeq);
+    }
+    assertRevisionResolutionBase(database, target);
     assertCandidateChange(
       runCandidate(database, 'INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)'),
       'Opening schema12 publication gate',
@@ -1332,13 +1478,19 @@ function installTargetRows(database, target, context, beforeSeq, expectedRoute =
       insertControlled.finalize();
     }
 
-    database.exec('DELETE FROM manuscript_ignored_resources');
     const insertIgnored = database.query(`
       INSERT INTO manuscript_ignored_resources (
         resource_kind, resource_uid, ignore_status, opaque_container_kind,
         opaque_container_uid, is_currently_referenced, member_snapshot_json,
         projection_generation
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(resource_kind, resource_uid) DO UPDATE SET
+        ignore_status = excluded.ignore_status,
+        opaque_container_kind = excluded.opaque_container_kind,
+        opaque_container_uid = excluded.opaque_container_uid,
+        is_currently_referenced = excluded.is_currently_referenced,
+        member_snapshot_json = excluded.member_snapshot_json,
+        projection_generation = excluded.projection_generation
     `);
     try {
       for (const row of target.ignoredLedger) {
@@ -1372,10 +1524,31 @@ function installTargetRows(database, target, context, beforeSeq, expectedRoute =
     measurements.controlledBytes,
     target.targetGeneration), 'Installing schema12 capacity snapshot');
 
+    if (target.revisionResolution !== undefined) {
+      const resolution = target.revisionResolution;
+      assertCandidateChange(runCandidate(
+        database,
+        `UPDATE chapter_revisions
+         SET status = 'accepted', updated_at = ?, resolved_at = ?
+         WHERE id = ? AND chapter_id = ? AND status = 'pending'`,
+        target.projectedAt,
+        target.projectedAt,
+        resolution.revisionId,
+        resolution.chapterId,
+      ), `Accepting revision ${resolution.revisionId}`);
+      assertCandidateChange(runCandidate(
+        database,
+        'INSERT INTO project_meta (key, value) VALUES (?, ?)',
+        revisionRequestKey(resolution.logicalRequestId),
+        revisionResolutionReceiptValue(resolution),
+      ), `Recording revision resolution ${resolution.revisionId}`);
+    }
+
     for (const invalidation of target.proposalInvalidations) {
       assertCandidateChange(runCandidate(
         database,
-        "UPDATE chapter_revisions SET status = 'stale', updated_at = ? WHERE id = ? AND chapter_id = ? AND status = 'pending'",
+        "UPDATE chapter_revisions SET status = 'stale', updated_at = ?, resolved_at = ? WHERE id = ? AND chapter_id = ? AND status = 'pending'",
+        target.projectedAt,
         target.projectedAt,
         invalidation.revisionId,
         invalidation.chapterId,
@@ -1421,13 +1594,661 @@ function installTargetRows(database, target, context, beforeSeq, expectedRoute =
       'Closing schema12 publication gate',
     );
     assertCandidateProjection(database, target, context, beforeSeq + 1);
+    transactionHooks?.beforeCommit?.();
+    commitAttempted = true;
     database.exec('COMMIT');
+    commitReturned = true;
     began = false;
+    transactionHooks?.afterCommit?.();
   } catch (error) {
-    if (began || database.inTransaction) {
+    if (!commitReturned && (began || database.inTransaction)) {
       try { database.exec('ROLLBACK'); } catch (rollbackError) {
         throw nativeError('RECOVERY_REQUIRED', 'Schema12 candidate rollback is uncertain', rollbackError);
       }
+      markKnownRolledBackTargetInstall(error);
+    } else if (!commitAttempted) {
+      markKnownRolledBackTargetInstall(error);
+    }
+    throw error;
+  }
+}
+
+const AUXILIARY_ACTION_KINDS = new Set([
+  'revision.create',
+  'revision.update_decisions',
+  'revision.reject',
+  'revision.mark_stale',
+  'revision.finalize_noop',
+]);
+const REVISION_DECISIONS = new Set(['accepted', 'rejected']);
+const REVISION_STATUSES = new Set([
+  'pending',
+  'accepted',
+  'rejected',
+  'superseded',
+  'stale',
+]);
+const AUXILIARY_RESULT_STATES = new Set([
+  'accepted',
+  'conflict',
+  'created',
+  'rejected',
+  'stale',
+  'unchanged',
+  'updated',
+]);
+
+function positiveAuxiliaryInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0 || Object.is(value, -0)) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function auxiliaryText(value, label) {
+  if (typeof value !== 'string') throw new TypeError(`${label} must be a string`);
+  return value;
+}
+
+function auxiliaryStableUid(value, label) {
+  if (typeof value !== 'string' || !UUID_V4_PATTERN.test(value)) {
+    throw new TypeError(`${label} must be a canonical lowercase UUIDv4`);
+  }
+  return value;
+}
+
+function auxiliaryTimestamp(value) {
+  if (
+    typeof value !== 'string'
+    || !ISO_MILLISECOND_PATTERN.test(value)
+    || Number.isNaN(Date.parse(value))
+    || new Date(value).toISOString() !== value
+  ) throw new TypeError('auxiliary projectedAt must be a canonical UTC millisecond timestamp');
+  return value;
+}
+
+function auxiliaryLogicalRequestId(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 512) {
+    throw new TypeError('auxiliary logicalRequestId must be a non-empty bounded string');
+  }
+  return value;
+}
+
+function auxiliaryDecisionMap(value, label) {
+  if (!isPlainObject(value)) throw new TypeError(`${label} must be a plain object`);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== 'string' || key.length === 0)) {
+    throw new TypeError(`${label} keys must be non-empty strings`);
+  }
+  const result = {};
+  for (const key of keys.sort((left, right) => Buffer.compare(
+    Buffer.from(left, 'utf8'),
+    Buffer.from(right, 'utf8'),
+  ))) {
+    const descriptor = descriptors[key];
+    if (
+      descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')
+      || !REVISION_DECISIONS.has(descriptor.value)
+    ) throw new TypeError(`${label} must contain own enumerable revision decisions`);
+    result[key] = descriptor.value;
+  }
+  return Object.freeze(result);
+}
+
+function snapshotAuxiliaryAction(value) {
+  if (!isPlainObject(value)) throw new TypeError('auxiliary action must be a plain object');
+  const kindDescriptor = Object.getOwnPropertyDescriptor(value, 'kind');
+  if (
+    kindDescriptor === undefined
+    || kindDescriptor.enumerable !== true
+    || !Object.hasOwn(kindDescriptor, 'value')
+    || !AUXILIARY_ACTION_KINDS.has(kindDescriptor.value)
+  ) throw new TypeError('auxiliary action kind is unsupported');
+  const kind = kindDescriptor.value;
+  if (kind === 'revision.create') {
+    const input = exactDataValues(
+      value,
+      ['kind', 'chapterUid', 'baseContent', 'proposedContent'],
+      'revision.create auxiliary action',
+    );
+    return Object.freeze({
+      kind,
+      chapterUid: auxiliaryStableUid(input.chapterUid, 'revision.create chapterUid'),
+      baseContent: auxiliaryText(input.baseContent, 'revision.create baseContent'),
+      proposedContent: auxiliaryText(input.proposedContent, 'revision.create proposedContent'),
+    });
+  }
+  if (kind === 'revision.update_decisions') {
+    const input = exactDataValues(
+      value,
+      ['kind', 'revisionId', 'expectedBaseContent', 'decisions'],
+      'revision.update_decisions auxiliary action',
+    );
+    return Object.freeze({
+      kind,
+      revisionId: positiveAuxiliaryInteger(input.revisionId, 'revision.update_decisions revisionId'),
+      expectedBaseContent: auxiliaryText(
+        input.expectedBaseContent,
+        'revision.update_decisions expectedBaseContent',
+      ),
+      decisions: auxiliaryDecisionMap(input.decisions, 'revision.update_decisions decisions'),
+    });
+  }
+  if (kind === 'revision.mark_stale') {
+    const input = exactDataValues(
+      value,
+      ['kind', 'revisionId'],
+      'revision.mark_stale auxiliary action',
+    );
+    return Object.freeze({
+      kind,
+      revisionId: positiveAuxiliaryInteger(input.revisionId, 'revision.mark_stale revisionId'),
+    });
+  }
+  if (kind === 'revision.finalize_noop') {
+    const input = exactDataValues(
+      value,
+      ['kind', 'revisionId', 'content', 'expectedBaseContent', 'expectedDecisions'],
+      'revision.finalize_noop auxiliary action',
+    );
+    return Object.freeze({
+      kind,
+      revisionId: positiveAuxiliaryInteger(input.revisionId, 'revision.finalize_noop revisionId'),
+      content: auxiliaryText(input.content, 'revision.finalize_noop content'),
+      expectedBaseContent: auxiliaryText(
+        input.expectedBaseContent,
+        'revision.finalize_noop expectedBaseContent',
+      ),
+      expectedDecisions: auxiliaryDecisionMap(
+        input.expectedDecisions,
+        'revision.finalize_noop expectedDecisions',
+      ),
+    });
+  }
+  const input = exactDataValues(
+    value,
+    ['kind', 'revisionId', 'expectedBaseContent'],
+    'revision.reject auxiliary action',
+  );
+  return Object.freeze({
+    kind,
+    revisionId: positiveAuxiliaryInteger(input.revisionId, 'revision.reject revisionId'),
+    expectedBaseContent: auxiliaryText(
+      input.expectedBaseContent,
+      'revision.reject expectedBaseContent',
+    ),
+  });
+}
+
+function snapshotAuxiliaryInput(value) {
+  const input = exactDataValues(
+    value,
+    ['action', 'currentProjection', 'logicalRequestId', 'projectedAt'],
+    'applyAuxiliaryAction input',
+  );
+  const projectionStore = new SQLiteProjectionStore();
+  projectionStore.validateCurrentProjection(input.currentProjection);
+  return Object.freeze({
+    action: snapshotAuxiliaryAction(input.action),
+    currentProjection: input.currentProjection,
+    logicalRequestId: auxiliaryLogicalRequestId(input.logicalRequestId),
+    projectedAt: auxiliaryTimestamp(input.projectedAt),
+  });
+}
+
+function parseRevisionDecisionJson(value) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch (cause) {
+    throw nativeError('RECOVERY_REQUIRED', 'Revision decisions JSON is malformed', cause);
+  }
+  try {
+    return auxiliaryDecisionMap(parsed, 'stored revision decisions');
+  } catch (cause) {
+    throw nativeError('RECOVERY_REQUIRED', 'Stored revision decisions are invalid', cause);
+  }
+}
+
+function serializeAuxiliaryRevision(row) {
+  if (row === null || row === undefined) return null;
+  if (
+    !positiveAuxiliaryInteger(row.id, 'stored revision id')
+    || !positiveAuxiliaryInteger(row.chapter_id, 'stored revision chapter id')
+    || typeof row.base_content !== 'string'
+    || typeof row.proposed_content !== 'string'
+    || !REVISION_STATUSES.has(row.status)
+    || typeof row.created_at !== 'string'
+    || typeof row.updated_at !== 'string'
+    || !(row.resolved_at === null || typeof row.resolved_at === 'string')
+    || !(row.previous_chapter_status === null || typeof row.previous_chapter_status === 'string')
+  ) throw nativeError('RECOVERY_REQUIRED', 'Stored revision row is invalid');
+  return Object.freeze({
+    id: row.id,
+    chapterId: row.chapter_id,
+    chapterUid: auxiliaryStableUid(row.chapter_uid, 'stored revision chapter uid'),
+    baseContent: row.base_content,
+    proposedContent: row.proposed_content,
+    decisions: parseRevisionDecisionJson(row.decisions_json),
+    status: row.status,
+    previousChapterStatus: row.previous_chapter_status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    resolvedAt: row.resolved_at,
+  });
+}
+
+function auxiliaryRevisionRow(database, revisionId) {
+  return database.query(`
+    SELECT r.id, r.chapter_id, c.chapter_uid, r.base_content, r.proposed_content,
+           r.decisions_json, r.status, r.previous_chapter_status, r.created_at,
+           r.updated_at, r.resolved_at
+    FROM chapter_revisions AS r
+    JOIN chapters AS c ON c.id = r.chapter_id
+    WHERE r.id = ?
+  `).get(revisionId) ?? null;
+}
+
+function auxiliaryActionDigest(projectUid, projectInstanceId, action) {
+  return createHash('sha256').update(JSON.stringify({
+    domain: 'mythpen.native.auxiliary-action',
+    version: 1,
+    projectUid,
+    projectInstanceId,
+    action,
+  }), 'utf8').digest('hex');
+}
+
+function validateStoredAuxiliaryResult(value) {
+  if (!isPlainObject(value)) throw nativeError('RECOVERY_REQUIRED', 'Auxiliary result is malformed');
+  if (
+    (value.disposition !== 'after' && value.disposition !== 'before')
+    || !Number.isSafeInteger(value.generation)
+    || value.generation < 0
+    || !AUXILIARY_RESULT_STATES.has(value.state)
+  ) throw nativeError('RECOVERY_REQUIRED', 'Auxiliary result disposition is invalid');
+  return deepFreeze(value);
+}
+
+function readAuxiliaryReceipt(database, requestKey, expectedDigest) {
+  const row = database.query('SELECT value FROM project_meta WHERE key = ?').get(requestKey);
+  if (row === null || row === undefined) return null;
+  let receipt;
+  try {
+    receipt = JSON.parse(row.value);
+  } catch (cause) {
+    throw nativeError('RECOVERY_REQUIRED', 'Auxiliary request receipt is malformed', cause);
+  }
+  if (!exactKeys(receipt, ['version', 'inputDigest', 'result']) || receipt.version !== 1) {
+    throw nativeError('RECOVERY_REQUIRED', 'Auxiliary request receipt shape is invalid');
+  }
+  if (receipt.inputDigest !== expectedDigest) {
+    throw nativeError('RECOVERY_REQUIRED', 'Auxiliary logical request was rebound');
+  }
+  return validateStoredAuxiliaryResult(receipt.result);
+}
+
+function auxiliaryConflict(generation, reason, revision = null) {
+  return Object.freeze({
+    disposition: 'before',
+    generation,
+    state: 'conflict',
+    reason,
+    revision,
+  });
+}
+
+function auxiliaryAfter(generation, state, revision = null) {
+  return Object.freeze({
+    disposition: 'after',
+    generation,
+    state,
+    revision,
+  });
+}
+
+function auxiliaryBasisChapter(currentProjection, chapterIdentity) {
+  return currentProjection.basis.chapters.find((row) => (
+    (typeof chapterIdentity === 'string'
+      ? row.uid === chapterIdentity
+      : row.id === chapterIdentity)
+    && row.isPresent === 1
+  )) ?? null;
+}
+
+function currentAuxiliaryChapter(database, currentProjection, chapterIdentity) {
+  const basis = auxiliaryBasisChapter(currentProjection, chapterIdentity);
+  if (basis === null) return null;
+  const row = database.query(`
+    SELECT id, content, status, word_count, data_version, body_raw_sha256
+    FROM chapters WHERE id = ? AND is_present = 1
+  `).get(basis.id);
+  if (
+    row === null
+    || row === undefined
+    || row.status !== basis.status
+    || row.body_raw_sha256 !== basis.bodyRawSha256
+    || createHash('sha256').update(row.content ?? '', 'utf8').digest('hex') !== basis.bodyRawSha256
+  ) throw nativeError('RECOVERY_REQUIRED', 'Auxiliary chapter differs from the exact projection basis');
+  return row;
+}
+
+function applyRevisionCreateAction(database, action, input) {
+  const generation = input.currentProjection.basis.baseGeneration;
+  const chapter = currentAuxiliaryChapter(database, input.currentProjection, action.chapterUid);
+  if (chapter === null) return auxiliaryConflict(generation, 'chapter_missing');
+  if ((chapter.content ?? '') === action.proposedContent) {
+    return auxiliaryAfter(generation, 'unchanged');
+  }
+  const baseMatches = (chapter.content ?? '') === action.baseContent;
+  if (baseMatches) {
+    database.query(`
+      UPDATE chapter_revisions
+      SET status = 'superseded', updated_at = ?, resolved_at = ?
+      WHERE chapter_id = ? AND status = 'pending'
+    `).run(input.projectedAt, input.projectedAt, chapter.id);
+  }
+  const status = baseMatches ? 'pending' : 'stale';
+  const inserted = database.query(`
+    INSERT INTO chapter_revisions (
+      chapter_id, base_content, proposed_content, decisions_json, status,
+      previous_chapter_status, created_at, updated_at, resolved_at
+    ) VALUES (?, ?, ?, '{}', ?, ?, ?, ?, ?)
+  `).run(
+    chapter.id,
+    action.baseContent,
+    action.proposedContent,
+    status,
+    chapter.status,
+    input.projectedAt,
+    input.projectedAt,
+    status === 'stale' ? input.projectedAt : null,
+  );
+  const revisionId = Number(inserted.lastInsertRowid);
+  positiveAuxiliaryInteger(revisionId, 'inserted revision id');
+  return auxiliaryAfter(
+    generation,
+    status === 'stale' ? 'stale' : 'created',
+    serializeAuxiliaryRevision(auxiliaryRevisionRow(database, revisionId)),
+  );
+}
+
+function requirePendingAuxiliaryRevision(database, currentProjection, action) {
+  const row = auxiliaryRevisionRow(database, action.revisionId);
+  const revision = serializeAuxiliaryRevision(row);
+  if (row === null) return { outcome: auxiliaryConflict(
+    currentProjection.basis.baseGeneration,
+    'revision_missing',
+  ) };
+  if (row.status !== 'pending') return { outcome: auxiliaryConflict(
+    currentProjection.basis.baseGeneration,
+    `revision_${row.status}`,
+    revision,
+  ) };
+  if (!currentProjection.basis.pendingProposals.some((proposal) => (
+    proposal.revisionId === row.id && proposal.chapterId === row.chapter_id
+  ))) throw nativeError('RECOVERY_REQUIRED', 'Pending revision is absent from the exact projection basis');
+  const chapter = currentAuxiliaryChapter(database, currentProjection, row.chapter_id);
+  if (chapter === null) throw nativeError('RECOVERY_REQUIRED', 'Pending revision chapter is not active');
+  const currentContent = chapter.content ?? '';
+  if (row.base_content !== currentContent) {
+    return { chapter, revision, row, stale: true };
+  }
+  if (action.expectedBaseContent !== row.base_content) {
+    return { outcome: auxiliaryConflict(
+      currentProjection.basis.baseGeneration,
+      'expected_base_mismatch',
+      revision,
+    ) };
+  }
+  return { chapter, revision, row, stale: false };
+}
+
+function markAuxiliaryRevisionStale(database, row, input) {
+  assertCandidateChange(runCandidate(
+    database,
+    `UPDATE chapter_revisions
+     SET status = 'stale', updated_at = ?, resolved_at = ?
+     WHERE id = ? AND chapter_id = ? AND status = 'pending'`,
+    input.projectedAt,
+    input.projectedAt,
+    row.id,
+    row.chapter_id,
+  ), `Marking revision ${row.id} stale`);
+  return auxiliaryAfter(
+    input.currentProjection.basis.baseGeneration,
+    'stale',
+    serializeAuxiliaryRevision(auxiliaryRevisionRow(database, row.id)),
+  );
+}
+
+function applyRevisionUpdateAction(database, action, input) {
+  const pending = requirePendingAuxiliaryRevision(database, input.currentProjection, action);
+  if (pending.outcome !== undefined) return pending.outcome;
+  if (pending.stale) return markAuxiliaryRevisionStale(database, pending.row, input);
+  const merged = auxiliaryDecisionMap({
+    ...pending.revision.decisions,
+    ...action.decisions,
+  }, 'merged revision decisions');
+  assertCandidateChange(runCandidate(
+    database,
+    `UPDATE chapter_revisions SET decisions_json = ?, updated_at = ?
+     WHERE id = ? AND status = 'pending'`,
+    JSON.stringify(merged),
+    input.projectedAt,
+    pending.row.id,
+  ), `Updating revision ${pending.row.id} decisions`);
+  return auxiliaryAfter(
+    input.currentProjection.basis.baseGeneration,
+    'updated',
+    serializeAuxiliaryRevision(auxiliaryRevisionRow(database, pending.row.id)),
+  );
+}
+
+function applyRevisionRejectAction(database, action, input) {
+  const pending = requirePendingAuxiliaryRevision(database, input.currentProjection, action);
+  if (pending.outcome !== undefined) return pending.outcome;
+  if (pending.stale) return markAuxiliaryRevisionStale(database, pending.row, input);
+  assertCandidateChange(runCandidate(
+    database,
+    `UPDATE chapter_revisions
+     SET status = 'rejected', updated_at = ?, resolved_at = ?
+     WHERE id = ? AND status = 'pending'`,
+    input.projectedAt,
+    input.projectedAt,
+    pending.row.id,
+  ), `Rejecting revision ${pending.row.id}`);
+  return Object.freeze({
+    disposition: 'after',
+    generation: input.currentProjection.basis.baseGeneration,
+    state: 'rejected',
+    revision: serializeAuxiliaryRevision(auxiliaryRevisionRow(database, pending.row.id)),
+    chapter: Object.freeze({
+      id: pending.chapter.id,
+      content: pending.chapter.content ?? '',
+      wordCount: Number.isSafeInteger(pending.chapter.word_count)
+        ? pending.chapter.word_count
+        : 0,
+      status: pending.chapter.status,
+      dataVersion: Number.isSafeInteger(pending.chapter.data_version)
+        ? pending.chapter.data_version
+        : 0,
+    }),
+  });
+}
+
+function applyRevisionMarkStaleAction(database, action, input) {
+  const row = auxiliaryRevisionRow(database, action.revisionId);
+  if (row === null) return auxiliaryConflict(
+    input.currentProjection.basis.baseGeneration,
+    'revision_missing',
+  );
+  const revision = serializeAuxiliaryRevision(row);
+  if (row.status !== 'pending') return auxiliaryConflict(
+    input.currentProjection.basis.baseGeneration,
+    `revision_${row.status}`,
+    revision,
+  );
+  if (!input.currentProjection.basis.pendingProposals.some((proposal) => (
+    proposal.revisionId === row.id && proposal.chapterId === row.chapter_id
+  ))) throw nativeError('RECOVERY_REQUIRED', 'Pending stale revision is absent from the exact basis');
+  const chapter = currentAuxiliaryChapter(database, input.currentProjection, row.chapter_id);
+  if (chapter === null) throw nativeError('RECOVERY_REQUIRED', 'Pending stale revision chapter is inactive');
+  if (row.base_content === (chapter.content ?? '')) return auxiliaryConflict(
+    input.currentProjection.basis.baseGeneration,
+    'revision_not_stale',
+    revision,
+  );
+  return markAuxiliaryRevisionStale(database, row, input);
+}
+
+function applyRevisionFinalizeNoopAction(database, action, input) {
+  const pending = requirePendingAuxiliaryRevision(database, input.currentProjection, action);
+  if (pending.outcome !== undefined) return pending.outcome;
+  if (pending.stale) return markAuxiliaryRevisionStale(database, pending.row, input);
+  if (!isDeepStrictEqual(action.expectedDecisions, pending.revision.decisions)) {
+    return auxiliaryConflict(
+      input.currentProjection.basis.baseGeneration,
+      'expected_decisions_mismatch',
+      pending.revision,
+    );
+  }
+  const currentContent = pending.chapter.content ?? '';
+  const basisChapter = auxiliaryBasisChapter(
+    input.currentProjection,
+    pending.row.chapter_id,
+  );
+  if (
+    basisChapter === null
+    || pending.chapter.status !== 'accepted'
+    || action.content !== currentContent
+    || action.content !== pending.row.base_content
+    || basisChapter.status !== 'accepted'
+    || basisChapter.bodyRawSha256
+      !== createHash('sha256').update(action.content, 'utf8').digest('hex')
+  ) return auxiliaryConflict(
+    input.currentProjection.basis.baseGeneration,
+    'revision_finalize_not_noop',
+    pending.revision,
+  );
+  assertCandidateChange(runCandidate(
+    database,
+    `UPDATE chapter_revisions
+     SET status = 'accepted', updated_at = ?, resolved_at = ?
+     WHERE id = ? AND chapter_id = ? AND status = 'pending'`,
+    input.projectedAt,
+    input.projectedAt,
+    pending.row.id,
+    pending.row.chapter_id,
+  ), `Accepting no-op revision ${pending.row.id}`);
+  return Object.freeze({
+    disposition: 'after',
+    generation: input.currentProjection.basis.baseGeneration,
+    state: 'accepted',
+    revision: serializeAuxiliaryRevision(auxiliaryRevisionRow(database, pending.row.id)),
+    chapter: Object.freeze({
+      id: pending.chapter.id,
+      chapterUid: pending.revision.chapterUid,
+      content: currentContent,
+      wordCount: Number.isSafeInteger(pending.chapter.word_count)
+        ? pending.chapter.word_count
+        : 0,
+      status: pending.chapter.status,
+      dataVersion: Number.isSafeInteger(pending.chapter.data_version)
+        ? pending.chapter.data_version
+        : 0,
+    }),
+  });
+}
+
+function applyAuxiliaryActionRows(database, input) {
+  if (input.action.kind === 'revision.create') {
+    return applyRevisionCreateAction(database, input.action, input);
+  }
+  if (input.action.kind === 'revision.update_decisions') {
+    return applyRevisionUpdateAction(database, input.action, input);
+  }
+  if (input.action.kind === 'revision.reject') {
+    return applyRevisionRejectAction(database, input.action, input);
+  }
+  if (input.action.kind === 'revision.mark_stale') {
+    return applyRevisionMarkStaleAction(database, input.action, input);
+  }
+  if (input.action.kind === 'revision.finalize_noop') {
+    return applyRevisionFinalizeNoopAction(database, input.action, input);
+  }
+  throw new TypeError('auxiliary action kind is unsupported');
+}
+
+function installAuxiliaryAction(
+  database,
+  input,
+  context,
+  beforeSeq,
+  requestKey,
+  inputDigest,
+  transactionHooks = null,
+) {
+  let began = false;
+  let commitAttempted = false;
+  let commitReturned = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    began = true;
+    const live = captureSchema12ProjectionBase(database, context.baseGeneration);
+    const meta = candidateMeta(database);
+    if (
+      canonicalCandidateSequence(meta) !== beforeSeq
+      || meta.get('manuscript_route') !== 'files'
+      || meta.get('manuscript_project_uid') !== context.projectUid
+      || meta.get('project_instance_id') !== context.projectInstanceId
+      || meta.get('manuscript_projection_generation') !== String(context.baseGeneration)
+      || live.ignoredLedger.some((row) => row.projection_generation !== context.baseGeneration)
+      || !isDeepStrictEqual(live.basis, input.currentProjection.basis)
+    ) throw nativeError('RECOVERY_REQUIRED', 'Auxiliary projection base changed before action DML');
+    assertCandidateChange(
+      runCandidate(database, 'INSERT INTO "_durability_write_gate" ("gate_id") VALUES (1)'),
+      'Opening auxiliary write gate',
+    );
+    const result = applyAuxiliaryActionRows(database, input);
+    const receipt = JSON.stringify({ version: 1, inputDigest, result });
+    assertCandidateChange(runCandidate(
+      database,
+      'INSERT INTO project_meta (key, value) VALUES (?, ?)',
+      requestKey,
+      receipt,
+    ), 'Recording auxiliary request receipt');
+    assertCandidateChange(runCandidate(
+      database,
+      "UPDATE project_meta SET value = ? WHERE key = 'durability_commit_seq' AND value = ?",
+      String(beforeSeq + 1),
+      String(beforeSeq),
+    ), 'Advancing auxiliary durability sequence');
+    assertCandidateChange(
+      runCandidate(database, 'DELETE FROM "_durability_write_gate" WHERE "gate_id" = 1'),
+      'Closing auxiliary write gate',
+    );
+    const stored = readAuxiliaryReceipt(database, requestKey, inputDigest);
+    if (!isDeepStrictEqual(stored, result)) {
+      throw nativeError('RECOVERY_REQUIRED', 'Auxiliary request receipt changed before commit');
+    }
+    transactionHooks?.beforeCommit?.();
+    commitAttempted = true;
+    database.exec('COMMIT');
+    commitReturned = true;
+    began = false;
+    transactionHooks?.afterCommit?.();
+    return result;
+  } catch (error) {
+    if (!commitReturned && (began || database.inTransaction)) {
+      try { database.exec('ROLLBACK'); } catch (rollbackError) {
+        throw nativeError('RECOVERY_REQUIRED', 'Auxiliary action rollback is uncertain', rollbackError);
+      }
+      markKnownRolledBackAuxiliaryAction(error);
+    } else if (!commitAttempted) {
+      markKnownRolledBackAuxiliaryAction(error);
     }
     throw error;
   }
@@ -1493,6 +2314,170 @@ function assertJsonEqual(actual, expected, label) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw nativeError('RECOVERY_REQUIRED', `${label} differs from the projection target`);
   }
+}
+
+function captureSchema12ProjectionBase(database, generation) {
+  const volumes = database.query(`
+    SELECT id, volume_uid, sort_order, is_present, deleted_at
+    FROM volumes ORDER BY id
+  `).all().map((row) => ({
+    id: row.id,
+    uid: row.volume_uid,
+    sortOrder: row.sort_order,
+    isPresent: row.is_present,
+    deletedAt: row.deleted_at,
+  }));
+  const chapters = database.query(`
+    SELECT id, chapter_uid, volume_id, num, is_present, deleted_at,
+           chapter_position, manuscript_position, body_raw_sha256, status
+    FROM chapters ORDER BY id
+  `).all().map((row) => ({
+    id: row.id,
+    uid: row.chapter_uid,
+    volumeId: row.volume_id,
+    num: row.num,
+    isPresent: row.is_present,
+    deletedAt: row.deleted_at,
+    chapterPosition: row.chapter_position,
+    manuscriptPosition: row.manuscript_position,
+    bodyRawSha256: row.body_raw_sha256,
+    status: row.status,
+  }));
+  const sqliteSequence = database.query(`
+    SELECT name, seq FROM sqlite_sequence
+    WHERE name IN ('chapters', 'volumes') ORDER BY name
+  `).all().map((row) => ({ name: row.name, seq: row.seq }));
+  for (const name of ['chapters', 'volumes']) {
+    if (!sqliteSequence.some((row) => row.name === name)) {
+      sqliteSequence.push({ name, seq: 0 });
+    }
+  }
+  sqliteSequence.sort((left, right) => Buffer.compare(
+    Buffer.from(left.name, 'utf8'),
+    Buffer.from(right.name, 'utf8'),
+  ));
+  const ignoredLedger = database.query(`
+    SELECT resource_kind, resource_uid, ignore_status, opaque_container_kind,
+           opaque_container_uid, is_currently_referenced, member_snapshot_json,
+           projection_generation
+    FROM manuscript_ignored_resources ORDER BY resource_kind, resource_uid
+  `).all();
+  const pendingProposals = database.query(`
+    SELECT id AS revisionId, chapter_id AS chapterId
+    FROM chapter_revisions WHERE status = 'pending' ORDER BY id
+  `).all();
+  const basis = {
+    domain: 'mythpen.manuscript.projection-basis',
+    version: 1,
+    sourceKind: 'schema12',
+    baseGeneration: generation,
+    volumes,
+    chapters,
+    sqliteSequence,
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest(ignoredLedger),
+    pendingProposals,
+    basisDigest: '0'.repeat(64),
+  };
+  basis.basisDigest = canonicalProjectionBasisDigest(basis);
+  return { basis, ignoredLedger };
+}
+
+function exactSchema12ProjectionBase(database, target, context, expectedFinalSeq) {
+  const meta = candidateMeta(database);
+  const finalSeq = canonicalCandidateSequence(meta);
+  if (finalSeq !== expectedFinalSeq) return null;
+  inspectSchema12Contract(database, { expectedFinalSeq: finalSeq });
+  assertCandidateMeta(meta, context, 'files', context.baseGeneration);
+  const live = captureSchema12ProjectionBase(database, context.baseGeneration);
+  if (
+    live.ignoredLedger.some((row) => row.projection_generation !== context.baseGeneration)
+    || !isDeepStrictEqual(live.basis.volumes, target.basis.volumes)
+    || !isDeepStrictEqual(live.basis.chapters, target.basis.chapters)
+    || !isDeepStrictEqual(live.basis.sqliteSequence, target.basis.sqliteSequence)
+    || !isDeepStrictEqual(live.basis.pendingProposals, target.basis.pendingProposals)
+    || live.basis.ignoredBeforeDigest !== target.basis.ignoredBeforeDigest
+    || live.basis.basisDigest !== target.basisDigest
+  ) return null;
+  return live;
+}
+
+function assertExactSchema12ProjectionBase(database, target, context, expectedFinalSeq) {
+  const live = exactSchema12ProjectionBase(
+    database,
+    target,
+    context,
+    expectedFinalSeq,
+  );
+  if (live === null) {
+    throw nativeError('RECOVERY_REQUIRED', 'Schema12 projection base changed before publication');
+  }
+  return live;
+}
+
+function schema12DesiredProjectionMatches(database, target, generation) {
+  const volumes = database.query(`
+    SELECT id, sort_order, title, summary, volume_uid, is_present, deleted_at
+    FROM volumes ORDER BY id
+  `).all().map(comparableVolume);
+  const chapters = database.query(`
+    SELECT id, volume_id, num, title, outline, content, summary, word_count,
+           status, cognitive_frame, emotional_anchor, world_texture,
+           concrete_mystery, interpersonal_tension, chapter_uid, is_present,
+           deleted_at, chapter_position, manuscript_position, body_raw_sha256,
+           sidecar_raw_sha256, content_available
+    FROM chapters ORDER BY id
+  `).all().map(comparableChapter);
+  const controlled = database.query(`
+    SELECT file_role, resource_uid, raw_sha256, byte_size,
+           file_identity_json, projection_generation
+    FROM manuscript_controlled_files
+    ORDER BY file_role, COALESCE(resource_uid, '')
+  `).all();
+  const expectedControlled = target.controlledFiles.map((row) => ({
+    file_role: row.role,
+    resource_uid: row.resourceUid,
+    raw_sha256: row.rawSha256,
+    byte_size: row.byteSize,
+    file_identity_json: controlledIdentityJson(row),
+    projection_generation: generation,
+  })).sort((left, right) => (
+    left.file_role.localeCompare(right.file_role, 'en')
+    || String(left.resource_uid ?? '').localeCompare(String(right.resource_uid ?? ''), 'en')
+  ));
+  const ignored = database.query(`
+    SELECT resource_kind, resource_uid, ignore_status, opaque_container_kind,
+           opaque_container_uid, is_currently_referenced, member_snapshot_json,
+           projection_generation
+    FROM manuscript_ignored_resources ORDER BY resource_kind, resource_uid
+  `).all();
+  const expectedIgnored = target.ignoredLedger.map((row) => ({
+    ...row,
+    projection_generation: generation,
+  }));
+  const measurements = target.capacitySnapshot.measurements;
+  const capacity = database.query(`
+    SELECT singleton_id, chapter_identities, volume_identities, controlled_files,
+           chapter_directory_entries, controlled_bytes, projection_generation
+    FROM manuscript_capacity_snapshot
+  `).get();
+  const sequences = database.query(
+    "SELECT name, seq FROM sqlite_sequence WHERE name IN ('chapters', 'volumes') ORDER BY name",
+  ).all();
+  return target.proposalInvalidations.length === 0
+    && isDeepStrictEqual(volumes, target.volumes.map(comparableVolume))
+    && isDeepStrictEqual(chapters, target.chapters.map(comparableChapter))
+    && isDeepStrictEqual(controlled, expectedControlled)
+    && isDeepStrictEqual(ignored, expectedIgnored)
+    && isDeepStrictEqual(capacity, {
+      singleton_id: 1,
+      chapter_identities: measurements.chapterIdentities,
+      volume_identities: measurements.volumeIdentities,
+      controlled_files: measurements.controlledFiles,
+      chapter_directory_entries: measurements.chapterDirectoryEntries,
+      controlled_bytes: measurements.controlledBytes,
+      projection_generation: generation,
+    })
+    && isDeepStrictEqual(sequences, target.sqliteSequence);
 }
 
 function assertCandidateProjection(database, target, context, expectedFinalSeq) {
@@ -1562,6 +2547,21 @@ function assertCandidateProjection(database, target, context, expectedFinalSeq) 
     ).get(invalidation.revisionId, invalidation.chapterId)?.status;
     if (status !== 'stale') {
       throw nativeError('RECOVERY_REQUIRED', 'Schema12 proposal invalidation is missing');
+    }
+  }
+  if (target.revisionResolution !== undefined) {
+    const resolution = target.revisionResolution;
+    const status = database.query(
+      'SELECT status FROM chapter_revisions WHERE id = ? AND chapter_id = ?',
+    ).get(resolution.revisionId, resolution.chapterId)?.status;
+    if (status !== 'accepted') {
+      throw nativeError('RECOVERY_REQUIRED', 'Schema12 revision resolution is missing');
+    }
+    const receipt = database.query(
+      'SELECT value FROM project_meta WHERE key = ?',
+    ).get(revisionRequestKey(resolution.logicalRequestId))?.value;
+    if (receipt !== revisionResolutionReceiptValue(resolution)) {
+      throw nativeError('RECOVERY_REQUIRED', 'Schema12 revision resolution receipt is missing');
     }
   }
   const sequences = database.query(
@@ -3018,6 +4018,7 @@ function createProofBoundSchema12ProjectStore(options) {
   let database;
   let state = 'active';
   let activeOperation = false;
+  const fullRefreshDispositionOwner = Object.freeze({});
 
   function recoveryRequiredHere(message, cause) {
     return nativeError('RECOVERY_REQUIRED', message, cause);
@@ -3084,9 +4085,19 @@ function createProofBoundSchema12ProjectStore(options) {
     });
   }
 
-  function disposition(target) {
+  function validateOwnedProjectionTarget(target) {
     const validated = new SQLiteProjectionStore().validateTarget(target);
     if (validated !== target) throw new TypeError('Projection target validation changed object identity');
+    const facts = admission.databaseFacts;
+    if (
+      target.projectUid !== facts.projectUid
+      || target.projectInstanceId !== facts.projectInstanceId
+    ) throw new TypeError('Projection target project instance is foreign');
+    return validated;
+  }
+
+  function disposition(target) {
+    validateOwnedProjectionTarget(target);
     const current = inspectContract();
     if (current.contract.projectionGeneration === target.baseGeneration) return 'base';
     if (current.contract.projectionGeneration !== target.targetGeneration) return 'unknown';
@@ -3097,6 +4108,44 @@ function createProofBoundSchema12ProjectStore(options) {
       current.finalSeq,
     );
     return 'target';
+  }
+
+  function mintFullRefreshDisposition(disposition, generation, target) {
+    const authority = Object.freeze(function fullRefreshDispositionAuthority() {});
+    fullRefreshDispositionRecords.set(authority, Object.freeze({
+      owner: fullRefreshDispositionOwner,
+      description: Object.freeze({ disposition, generation }),
+      target,
+    }));
+    return authority;
+  }
+
+  function inspectFullRefreshDisposition(target) {
+    validateOwnedProjectionTarget(target);
+    const current = inspectContract();
+    if (current.contract.projectionGeneration !== target.baseGeneration) {
+      return mintFullRefreshDisposition('other', current.contract.projectionGeneration, target);
+    }
+    const live = exactSchema12ProjectionBase(
+      database,
+      target,
+      targetContext(target),
+      current.finalSeq,
+    );
+    if (live === null) {
+      return mintFullRefreshDisposition(
+        'base_changed',
+        current.contract.projectionGeneration,
+        target,
+      );
+    }
+    return mintFullRefreshDisposition(
+      schema12DesiredProjectionMatches(database, target, target.baseGeneration)
+        ? 'already_current'
+        : 'target',
+      current.contract.projectionGeneration,
+      target,
+    );
   }
 
   try {
@@ -3128,16 +4177,138 @@ function createProofBoundSchema12ProjectStore(options) {
       }
       return withOperation('schema12 projection inspection', () => disposition(input.target));
     },
-    publishProjectionTarget(input) {
-      if (!exactKeys(input, ['target'])) {
-        throw new TypeError('publishProjectionTarget input must contain exact target');
+    inspectFullRefreshTarget(input) {
+      const target = exactDataValue(
+        input,
+        ['target'],
+        'target',
+        'inspectFullRefreshTarget input',
+      );
+      return withOperation('schema12 full refresh inspection', () => {
+        options.assertWriterLease();
+        return inspectFullRefreshDisposition(target);
+      });
+    },
+    describeFullRefreshDisposition(authority, expectedTarget) {
+      const record = (
+        (typeof authority === 'object' || typeof authority === 'function')
+        && authority !== null
+      ) ? fullRefreshDispositionRecords.get(authority) : undefined;
+      if (record?.owner !== fullRefreshDispositionOwner) {
+        throw new TypeError('full refresh disposition authority is foreign');
       }
+      if (arguments.length > 1 && record.target !== expectedTarget) {
+        throw new TypeError('full refresh disposition authority target is foreign');
+      }
+      return record.description;
+    },
+    applyAuxiliaryAction(inputValue) {
+      const input = snapshotAuxiliaryInput(inputValue);
+      return withOperation('schema12 auxiliary action', () => {
+        options.assertWriterLease();
+        const facts = admission.databaseFacts;
+        if (
+          input.currentProjection.projectUid !== facts.projectUid
+          || input.currentProjection.projectInstanceId !== facts.projectInstanceId
+        ) throw new TypeError('Auxiliary action project instance is foreign');
+        const inputDigest = auxiliaryActionDigest(
+          facts.projectUid,
+          facts.projectInstanceId,
+          input.action,
+        );
+        const requestKey = revisionRequestKey(input.logicalRequestId);
+        const prior = readAuxiliaryReceipt(database, requestKey, inputDigest);
+        if (prior !== null) return prior;
+        const before = inspectContract();
+        if (before.contract.projectionGeneration !== input.currentProjection.basis.baseGeneration) {
+          throw recoveryRequiredHere('Auxiliary action generation differs from the admitted projection');
+        }
+        const context = Object.freeze({
+          migrationId: facts.routeJournal,
+          projectUid: facts.projectUid,
+          projectInstanceId: facts.projectInstanceId,
+          baseGeneration: input.currentProjection.basis.baseGeneration,
+        });
+        let result;
+        try {
+          result = installAuxiliaryAction(
+            database,
+            input,
+            context,
+            before.finalSeq,
+            requestKey,
+            inputDigest,
+            Object.freeze({
+              beforeCommit() {
+                faultPoint(FAULT_POINTS.NATIVE_AUXILIARY_BEFORE_COMMIT_INVOKE, {
+                  actionKind: input.action.kind,
+                  databasePath,
+                });
+              },
+              afterCommit() {
+                faultPoint(FAULT_POINTS.NATIVE_AUXILIARY_AFTER_COMMIT_RETURN, {
+                  actionKind: input.action.kind,
+                  databasePath,
+                });
+              },
+            }),
+          );
+          fsyncFile(databasePath);
+          faultPoint(FAULT_POINTS.NATIVE_AUXILIARY_AFTER_FILE_FSYNC, {
+            actionKind: input.action.kind,
+            databasePath,
+          });
+          fsyncDirectory(parentPath);
+          faultPoint(FAULT_POINTS.NATIVE_AUXILIARY_AFTER_DIRECTORY_FSYNC, {
+            actionKind: input.action.kind,
+            databasePath,
+          });
+          guard.assertCurrent();
+          faultPoint(FAULT_POINTS.NATIVE_AUXILIARY_AFTER_GUARD_RECHECK, {
+            actionKind: input.action.kind,
+            databasePath,
+          });
+          const observed = readAuxiliaryReceipt(database, requestKey, inputDigest);
+          if (observed === null || !isDeepStrictEqual(observed, result)) {
+            throw recoveryRequiredHere('Auxiliary action is not durably observable');
+          }
+          faultPoint(FAULT_POINTS.NATIVE_AUXILIARY_AFTER_RECEIPT_RECHECK, {
+            actionKind: input.action.kind,
+            databasePath,
+          });
+        } catch (cause) {
+          if (knownRolledBackAuxiliaryActionErrors.has(cause)) throw cause;
+          let closeError = null;
+          try {
+            closeResources('disposition_unknown');
+          } catch (error) {
+            closeError = error;
+          }
+          const error = recoveryRequiredHere(
+            'Schema12 auxiliary action disposition is unknown',
+            cause,
+          );
+          if (closeError !== null) {
+            Object.defineProperty(error, 'closeError', {
+              configurable: true,
+              value: closeError,
+            });
+          }
+          throw error;
+        }
+        return result;
+      });
+    },
+    publishProjectionTarget(input) {
+      const inputTarget = exactDataValue(
+        input,
+        ['target'],
+        'target',
+        'publishProjectionTarget input',
+      );
       return withOperation('schema12 projection publication', () => {
         options.assertWriterLease();
-        const target = new SQLiteProjectionStore().validateTarget(input.target);
-        if (target !== input.target) {
-          throw new TypeError('Projection target validation changed object identity');
-        }
+        const target = validateOwnedProjectionTarget(inputTarget);
         const before = inspectContract();
         const beforeDisposition = disposition(target);
         if (beforeDisposition === 'target') {
@@ -3150,12 +4321,69 @@ function createProofBoundSchema12ProjectStore(options) {
         if (beforeDisposition !== 'base') {
           throw recoveryRequiredHere('Schema12 projection disposition is not the exact base');
         }
-        installTargetRows(database, target, targetContext(target), before.finalSeq, 'files');
-        fsyncFile(databasePath);
-        fsyncDirectory(parentPath);
-        guard.assertCurrent();
-        if (disposition(target) !== 'target') {
-          throw recoveryRequiredHere('Schema12 projection publication is not durably observable');
+        try {
+          installTargetRows(
+            database,
+            target,
+            targetContext(target),
+            before.finalSeq,
+            'files',
+            Object.freeze({
+              beforeCommit() {
+                faultPoint(FAULT_POINTS.NATIVE_FULL_REFRESH_BEFORE_COMMIT_INVOKE, {
+                  databasePath,
+                  targetGeneration: target.targetGeneration,
+                });
+              },
+              afterCommit() {
+                faultPoint(FAULT_POINTS.NATIVE_FULL_REFRESH_AFTER_COMMIT_RETURN, {
+                  databasePath,
+                  targetGeneration: target.targetGeneration,
+                });
+              },
+            }),
+          );
+          fsyncFile(databasePath);
+          faultPoint(FAULT_POINTS.NATIVE_FULL_REFRESH_AFTER_FILE_FSYNC, {
+            databasePath,
+            targetGeneration: target.targetGeneration,
+          });
+          fsyncDirectory(parentPath);
+          faultPoint(FAULT_POINTS.NATIVE_FULL_REFRESH_AFTER_DIRECTORY_FSYNC, {
+            databasePath,
+            targetGeneration: target.targetGeneration,
+          });
+          guard.assertCurrent();
+          faultPoint(FAULT_POINTS.NATIVE_FULL_REFRESH_AFTER_GUARD_RECHECK, {
+            databasePath,
+            targetGeneration: target.targetGeneration,
+          });
+          if (disposition(target) !== 'target') {
+            throw recoveryRequiredHere('Schema12 projection publication is not durably observable');
+          }
+          faultPoint(FAULT_POINTS.NATIVE_FULL_REFRESH_AFTER_TARGET_RECHECK, {
+            databasePath,
+            targetGeneration: target.targetGeneration,
+          });
+        } catch (cause) {
+          if (knownRolledBackTargetInstallErrors.has(cause)) throw cause;
+          let closeError = null;
+          try {
+            closeResources('disposition_unknown');
+          } catch (error) {
+            closeError = error;
+          }
+          const error = recoveryRequiredHere(
+            'Schema12 projection publication disposition is unknown',
+            cause,
+          );
+          if (closeError !== null) {
+            Object.defineProperty(error, 'closeError', {
+              configurable: true,
+              value: closeError,
+            });
+          }
+          throw error;
         }
         return Object.freeze({
           disposition: 'after',

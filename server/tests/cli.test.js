@@ -247,6 +247,143 @@ test('native data-root rejection happens before target, migration, and path-stor
   assert.equal(fs.existsSync(target), false);
 });
 
+test('default Task14 authority rejects a schema12 files root before leases or copy', async () => {
+  const SQL = await require('sql.js')();
+  const source = tempDir('files-policy-source');
+  const projects = path.join(source, 'projects');
+  const targetParent = tempDir('files-policy-target-parent');
+  const target = path.join(targetParent, 'target');
+  fs.mkdirSync(projects);
+  const projectPath = path.join(projects, 'files.mythpen.db');
+  writeProjectFixture(SQL, projectPath, [
+    ['schema_version', '12'],
+    ['manuscript_route', 'files'],
+  ]);
+  writeConfigFixture(SQL, source, [projectPath]);
+  const store = memoryStore({ DataDir: source });
+  const sourceBefore = fileManifest(source);
+  const targetBefore = fileManifest(targetParent);
+  let leaseCalls = 0;
+  let migrationCalls = 0;
+  let storeSetCalls = 0;
+  store.set = () => { storeSetCalls += 1; };
+  const stderr = output();
+
+  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+    store,
+    env: {},
+    acquireConfigLifecycleLeaseSet: () => {
+      leaseCalls += 1;
+      return { release() {} };
+    },
+    copyAndVerifyDirectory: async () => { migrationCalls += 1; },
+    stdout: output(),
+    stderr,
+  });
+
+  assert.equal(code, 1);
+  assert.equal(leaseCalls, 0);
+  assert.equal(migrationCalls, 0);
+  assert.equal(storeSetCalls, 0);
+  assert.deepEqual(fileManifest(source), sourceBefore);
+  assert.deepEqual(fileManifest(targetParent), targetBefore);
+  assert.equal(fs.existsSync(target), false);
+  assert.match(stderr.lines.join('\n'), /NATIVE_DATA_ROOT_MIGRATION_UNSUPPORTED/);
+});
+
+test('data-dir migration forwards one frozen intent to the Task14 policy on every guard pass', async () => {
+  const source = tempDir('policy-intent-source');
+  const target = path.resolve(tempDir('policy-intent-target-parent'), 'target');
+  const store = memoryStore({ DataDir: source });
+  const policyAuthority = Object.freeze({
+    assertChangeAllowed() {
+      throw new Error('the storage guard, not CLI, owns policy invocation');
+    },
+  });
+  const observed = [];
+
+  const code = await runStorageCli(['data-dir', 'set', target, '--migrate'], {
+    store,
+    env: {},
+    dataRootPolicyAuthority: policyAuthority,
+    assertDataRootMigrationSupported: async (sourceRoot, options) => {
+      observed.push({ sourceRoot, options });
+    },
+    acquireConfigLifecycleLeaseSet: () => ({ release() {} }),
+    copyAndVerifyDirectory: async () => ({
+      source,
+      target,
+      fileCount: 0,
+      totalBytes: 0,
+      cleanupWarnings: [],
+    }),
+    stdout: output(),
+    stderr: output(),
+  });
+
+  assert.equal(code, 0);
+  assert.equal(observed.length, 2);
+  for (const call of observed) {
+    assert.equal(call.sourceRoot, path.resolve(source));
+    assert.equal(Object.isFrozen(call.options), true);
+    assert.deepEqual(call.options, {
+      migrate: true,
+      policyAuthority,
+      requirePolicyAuthority: true,
+      targetRoot: target,
+    });
+  }
+});
+
+test('an explicitly missing production data-root policy fails closed before leases or target effects', async () => {
+  const source = tempDir('missing-policy-source');
+  const target = path.resolve(tempDir('missing-policy-target-parent'), 'target');
+  const store = memoryStore({ DataDir: source });
+  let leaseCalls = 0;
+  let migrationCalls = 0;
+  let storeSetCalls = 0;
+  store.set = () => { storeSetCalls += 1; };
+  const stderr = output();
+
+  const code = await runCli(['data-dir', 'set', target, '--migrate'], {
+    store,
+    env: {},
+    dataRootPolicyAuthority: null,
+    acquireConfigLifecycleLeaseSet: () => {
+      leaseCalls += 1;
+      return { release() {} };
+    },
+    copyAndVerifyDirectory: async () => { migrationCalls += 1; },
+    stdout: output(),
+    stderr,
+  });
+
+  assert.equal(code, 1);
+  assert.equal(leaseCalls, 0);
+  assert.equal(migrationCalls, 0);
+  assert.equal(storeSetCalls, 0);
+  assert.equal(fs.existsSync(target), false);
+  assert.match(stderr.lines.join('\n'), /policy authority is unavailable/);
+});
+
+test('data-dir set uses the production policy authority when no test authority is injected', async () => {
+  const source = tempDir('default-policy-source');
+  const target = path.resolve(tempDir('default-policy-target-parent'), 'target');
+  const store = memoryStore({ DataDir: source });
+
+  const code = await runCli(['data-dir', 'set', target], {
+    store,
+    env: {},
+    acquireConfigLifecycleLeaseSet: () => ({ release() {} }),
+    stdout: output(),
+    stderr: output(),
+  });
+
+  assert.equal(code, 0);
+  assert.equal(store.values.DataDir, target);
+  assert.equal(fs.statSync(target).isDirectory(), true);
+});
+
 test('a fixed port-3001 probe is not used as migration correctness mutex', async () => {
   const source = tempDir('port-source');
   const target = path.join(tempDir('port-target-parent'), 'target');

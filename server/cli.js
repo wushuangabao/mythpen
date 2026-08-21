@@ -12,6 +12,9 @@ const {
   copyAndVerifyDirectory,
 } = require('./storage-migration');
 const { acquireConfigLifecycleLeaseSet } = require('./config-lifecycle-lease');
+const {
+  createProductionDataRootPolicyAuthority,
+} = require('./manuscript/production-data-root-policy');
 
 const HELP = `Mythpen storage CLI
 
@@ -31,6 +34,9 @@ async function runCli(argv, dependencies = {}) {
   const migrateDirectory = dependencies.copyAndVerifyDirectory || copyAndVerifyDirectory;
   const assertMigrationSupported = dependencies.assertDataRootMigrationSupported
     || inspectDataRootMigrationSupport;
+  const dataRootPolicyAuthority = Object.hasOwn(dependencies, 'dataRootPolicyAuthority')
+    ? dependencies.dataRootPolicyAuthority
+    : createProductionDataRootPolicyAuthority();
   const acquireConfigLeases = dependencies.acquireConfigLifecycleLeaseSet
     || acquireConfigLifecycleLeaseSet;
   const [scope, action, ...arguments_] = argv;
@@ -68,8 +74,16 @@ async function runCli(argv, dependencies = {}) {
   let migrationResult = null;
   let configLeases = null;
   let resultCode = 0;
+  const migrationGuardOptions = Object.freeze({
+    migrate,
+    policyAuthority: dataRootPolicyAuthority,
+    requirePolicyAuthority: true,
+    targetRoot: target,
+  });
   try {
-    if (scope === 'data-dir') await assertMigrationSupported(before.dataDir);
+    if (scope === 'data-dir') {
+      await assertMigrationSupported(before.dataDir, migrationGuardOptions);
+    }
     const configPaths = [before.configDbPath];
     if (scope === 'data-dir') configPaths.push(path.join(target, 'config.db'));
     configLeases = acquireConfigLeases(configPaths, {
@@ -77,7 +91,9 @@ async function runCli(argv, dependencies = {}) {
         ? { controlRoot: dependencies.applicationControlRoot }
         : {}),
     });
-    if (scope === 'data-dir') await assertMigrationSupported(before.dataDir);
+    if (scope === 'data-dir') {
+      await assertMigrationSupported(before.dataDir, migrationGuardOptions);
+    }
 
     if (migrate) {
       migrationResult = await migrateDirectory(before[definition.field], target);

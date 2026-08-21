@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  cancelAndDrainTitleHostQueues,
   discardProjectTitleSaves,
   discardTitleSave,
   flushTitleSave,
   getTitleSaveDraft,
   getTitleSaveFailure,
+  getTitleHostMigrationState,
   getTitleSaveQueueSnapshot,
   stageTitleSave,
+  releaseTitleHostQueueDrain,
   titleSaveKey,
   type TitleSaveEntry,
 } from '../src/lib/titleSaveQueue.ts'
@@ -262,5 +265,41 @@ test('a recovery-required title failure stays recoverable and settles its dirty 
   } finally {
     discardTitleSave(project, chapterId)
     discardManuscriptDirtyResource(dirtyBinding)
+  }
+})
+
+test('host drain preserves a failed frozen title entry as unresolved until release', async () => {
+  const project = 'title-host-drain-failure'
+  const chapterId = 1001
+  const write = createDeferred()
+  let writes = 0
+
+  try {
+    stageTitleSave(project, chapterId, 10, 'recoverable title')
+    const save = flushTitleSave(project, chapterId, () => {
+      writes += 1
+      return write.promise
+    })
+    const expectedFailure = assert.rejects(save, /host drain failure/u)
+    await waitFor(() => writes === 1)
+    const drain = cancelAndDrainTitleHostQueues(project)
+    write.reject(new Error('host drain failure'))
+    await expectedFailure
+
+    assert.deepEqual(await drain, [{
+      resourceUid: `sqlite-chapter-${chapterId}`,
+      domain: 'sidecar',
+      disposition: 'unresolved',
+    }])
+    const state = getTitleHostMigrationState(project)
+    assert.equal(state.resources.length, 1)
+    assert.equal(state.queues.length, 1)
+    assert.equal(state.queues[0]?.state, 'cancelled_and_drained')
+
+    releaseTitleHostQueueDrain(project)
+    assert.equal(getTitleHostMigrationState(project).queues[0]?.state, 'active')
+  } finally {
+    releaseTitleHostQueueDrain(project)
+    discardProjectTitleSaves(project)
   }
 })

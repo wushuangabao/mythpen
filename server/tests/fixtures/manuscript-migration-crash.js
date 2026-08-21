@@ -1,6 +1,8 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
 const path = require('node:path');
+const { deriveManuscriptLifecycleLockPath } = require('../../manuscript/lifecycle-lock');
 
 const PROJECT_UID = '11111111-1111-4111-8111-111111111111';
 const PROJECT_INSTANCE_ID = '22222222-2222-4222-8222-222222222222';
@@ -60,13 +62,30 @@ function projectBinding(dataRoot) {
   });
 }
 
-function migrationReservation() {
+function lifecycleLockPreflight(dataRoot) {
+  const plannedControlDirectory = path.join(
+    dataRoot,
+    'control',
+    'manuscripts',
+    PROJECT_UID,
+    PROJECT_INSTANCE_ID,
+  );
+  return Object.freeze({
+    version: 1,
+    disposition: 'absent',
+    plannedControlDirectory,
+    plannedLifecycleLockPath: deriveManuscriptLifecycleLockPath(plannedControlDirectory),
+  });
+}
+
+function migrationReservation(dataRoot) {
   return Object.freeze({
     domain: 'mythpen.manuscript.migration-uid-reservation',
     version: 1,
     migrationId: MIGRATION_ID,
     projectInstanceId: PROJECT_INSTANCE_ID,
     sourceBasisDigest: DIGEST_A,
+    lifecycleLockPreflight: lifecycleLockPreflight(dataRoot),
     projectReservation: Object.freeze({
       reservationId: 'project-reservation-a',
       uid: PROJECT_UID,
@@ -91,21 +110,28 @@ function migrationReservation() {
   });
 }
 
-function reserveInput() {
+function reserveInput(dataRoot = path.join('E:\\', 'data')) {
   return Object.freeze({
     migrationId: MIGRATION_ID,
     logicalRequestId: 'migration-request-a',
     baseGeneration: 0,
     targetGeneration: 1,
     sourceBasisDigest: DIGEST_A,
-    migrationReservation: migrationReservation(),
+    migrationReservation: migrationReservation(dataRoot),
   });
 }
 
-function directoryPlan() {
+function directoryPlan(dataRoot) {
   return Object.freeze({
     digest: DIGEST_B,
-    lifecycleLock: Object.freeze({ before: 'absent', after: DIGEST_A }),
+    lifecycleLockDerivation: 'canonical-real-control-directory-sibling-sha256-v1',
+    projectControlRoot: path.join(
+      dataRoot,
+      'control',
+      'manuscripts',
+      PROJECT_UID,
+      PROJECT_INSTANCE_ID,
+    ),
     directories: Object.freeze([
       Object.freeze({ name: 'project', before: 'absent', after: DIGEST_A }),
       Object.freeze({ name: 'mythpen', before: 'absent', after: DIGEST_B }),
@@ -113,6 +139,38 @@ function directoryPlan() {
       Object.freeze({ name: 'chapters', before: 'absent', after: DIGEST_A }),
     ]),
     fileAssets: Object.freeze({ before: 'absent', after: DIGEST_C }),
+  });
+}
+
+function lifecycleLockReceipt(dataRoot) {
+  const controlParentDirectoryIdentity = Object.freeze({ dev: '7', ino: '700' });
+  const lifecycleLockIdentity = Object.freeze({ dev: '7', ino: '701' });
+  return Object.freeze({
+    version: 1,
+    lifecycleLockBefore: Object.freeze({
+      disposition: 'absent',
+      parentIdentity: controlParentDirectoryIdentity,
+    }),
+    lifecycleLockAfter: Object.freeze({
+      byteSize: 0,
+      fileFsync: true,
+      identity: lifecycleLockIdentity,
+      parentFsync: true,
+      parentIdentity: controlParentDirectoryIdentity,
+      sha256: createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+    }),
+    lifecyclePlatformIdentity: Object.freeze({
+      canonicalRealControlDirectory: path.join(
+        dataRoot,
+        'control',
+        'manuscripts',
+        PROJECT_UID,
+        PROJECT_INSTANCE_ID,
+      ),
+      controlDirectoryIdentity: Object.freeze({ dev: '7', ino: '702' }),
+      controlParentDirectoryIdentity,
+      lifecycleLockIdentity,
+    }),
   });
 }
 
@@ -137,6 +195,8 @@ module.exports = {
   PROJECT_UID,
   createMemoryControlStore,
   directoryPlan,
+  lifecycleLockReceipt,
+  lifecycleLockPreflight,
   migrationReservation,
   projectBinding,
   reserveInput,

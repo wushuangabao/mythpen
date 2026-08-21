@@ -383,6 +383,34 @@ function classifySqlWrite(sql) {
   return unknown ? 'unknown-protected-write' : null
 }
 
+function classifyProductSqlBypass(sql) {
+  const value = maskSql(sql)
+  if (/\bcreate\s+(?:index|table|trigger)\b/.test(value)) return null
+  const quotedIdentifier = `${QUOTED_IDENTIFIER_OPEN}[a-z_$][\\w$]*${QUOTED_IDENTIFIER_CLOSE}`
+  const identifier = `(?:[a-z_$][\\w$]*|${quotedIdentifier})`
+  const articleTable = `(?:chapters|volumes|${QUOTED_IDENTIFIER_OPEN}(?:chapters|volumes)${QUOTED_IDENTIFIER_CLOSE})`
+  const qualifiedArticleTable = `(?:${identifier}\\s*\\.\\s*)?${articleTable}`
+
+  if (new RegExp(`\\bdelete\\s+from\\s+${qualifiedArticleTable}(?![\\w$])`).test(value)) {
+    return 'physical-delete'
+  }
+  if (
+    new RegExp(`\\bupdate\\s+(?:or\\s+\\w+\\s+)?${qualifiedArticleTable}(?![\\w$])`).test(value)
+    || new RegExp(`\\b(?:insert(?:\\s+or\\s+\\w+)?|replace)\\s+into\\s+${qualifiedArticleTable}(?![\\w$])`).test(value)
+  ) return 'article-truth-write'
+  if (/\bmax\s*\(\s*(?:(?:[a-z_$][\w$]*|\u0001[a-z_$][\w$]*\u0002)\s*\.\s*)?num\s*\)/.test(value)) {
+    return 'legacy-max-num'
+  }
+  if (/\bexpected_resolve_chapter\b/.test(value)) {
+    return 'legacy-expected-resolve-chapter'
+  }
+  if (
+    /\bselect\b/.test(value)
+    && new RegExp(`\\b(?:from|join)\\s+${qualifiedArticleTable}(?![\\w$])`).test(value)
+  ) return 'freshness-bypass-read'
+  return null
+}
+
 function parseJavaScript(sourceText, fileName) {
   return ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
 }
@@ -417,6 +445,25 @@ function propertyCallName(call) {
 
 function lineOf(sourceFile, node) {
   return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
+}
+
+function functionScopeName(scope) {
+  let current = scope
+  while (current) {
+    if (ts.isFunctionDeclaration(current) && current.name) return current.name.text
+    if (ts.isMethodDeclaration(current) && current.name) {
+      if (ts.isIdentifier(current.name) || ts.isStringLiteralLike(current.name)) {
+        return current.name.text
+      }
+    }
+    if (
+      (ts.isFunctionExpression(current) || ts.isArrowFunction(current))
+      && ts.isVariableDeclaration(current.parent)
+      && ts.isIdentifier(current.parent.name)
+    ) return current.parent.name.text
+    current = current.parent
+  }
+  return null
 }
 
 function assignmentIdentifier(text) {
@@ -602,7 +649,7 @@ function scanSource(sourceText, fileName) {
   const matches = []
   for (const { node, text } of sqlExpressions) {
     const scope = scopeOf(node)
-    const functionName = ts.isFunctionDeclaration(scope) && scope.name ? scope.name.text : null
+    const functionName = functionScopeName(scope)
     if (text.includes('${}')) {
       const targetNames = dynamicSetTargetNames(text)
       if (targetNames?.length) {
@@ -625,8 +672,31 @@ function scanSource(sourceText, fileName) {
         continue
       }
     }
-    const kind = classifySqlWrite(text)
+    const kind = classifySqlWrite(text) || classifyProductSqlBypass(text)
     if (kind) matches.push({ functionName, kind, line: lineOf(sourceFile, node), text })
+  }
+  for (const call of calls) {
+    if (!ts.isIdentifier(call.expression) || call.expression.text !== 'publishGeneratedProjectFile') {
+      continue
+    }
+    const input = call.arguments[0]
+    if (!input || !ts.isObjectLiteralExpression(input)) continue
+    for (const property of input.properties) {
+      if (!ts.isPropertyAssignment(property)) continue
+      const name = property.name && (
+        ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)
+      ) ? property.name.text : null
+      if (name !== 'finalPath') continue
+      if (/\b(?:req|request|body|query|params)\b/.test(property.initializer.getText(sourceFile))) {
+        const scope = scopeOf(call)
+        matches.push({
+          functionName: functionScopeName(scope),
+          kind: 'caller-controlled-path',
+          line: lineOf(sourceFile, call),
+          text: call.getText(sourceFile),
+        })
+      }
+    }
   }
   return matches
 }
@@ -660,14 +730,97 @@ function isExactMigration(match) {
     && match.text.replace(/\s+/g, ' ').trim() === "UPDATE chapters SET content = '' WHERE content IS NULL"
 }
 
+function isExactSchemaMigrationRead(match) {
+  return match.kind === 'freshness-bypass-read'
+    && match.text.replace(/\s+/g, ' ').trim()
+      === 'SELECT status FROM chapters WHERE id = ?'
+}
+
+const EXACT_INTERNAL_PRODUCT_OWNERS = new Map([
+  ['server/chapter-revisions.js', new Set([
+    'getPendingRevision',
+    'rebasePendingRevision',
+    'ensureRevisionBase',
+    'getActiveRevision',
+    'createPendingRevision',
+    'updateRevisionDecisions',
+    'applyRevision',
+    'applyInTransaction',
+  ])],
+  ['server/manuscript/active-projection.js', new Set([
+    'listVolumes',
+    'listChapters',
+    'getChapter',
+    'resolveLegacyChapterNumber',
+    'exportSnapshot',
+  ])],
+  ['server/index.js', new Set(['readAiChapter'])],
+  ['server/manuscript-service.js', new Set([
+    'readLegacyPromptContext',
+    'resolveChapter',
+    'writeChapterBodyInTransaction',
+    'appendChapterBody',
+    'createChapter',
+  ])],
+  ['server/manuscript/production-runtime.js', new Set([
+    'dataVersionFor',
+    'witnessFor',
+    'statsView',
+    'publishRevisionResolution',
+    'readCommittedRevisionResolution',
+  ])],
+  ['server/manuscript/projection-store.js', new Set(['captureInstalledOrphanBaseline'])],
+  ['server/recent-projects.js', new Set(['readLegacyRecentProject'])],
+  ['server/routes/api.js', new Set([
+    'createLegacySqliteProject',
+    'listLegacySqliteChapters',
+    'readLegacySqliteChapter',
+    'resolveLegacySqliteChapter',
+    'updateLegacySqliteChapter',
+    'createLegacySqliteChapter',
+    'deleteLegacySqliteChapter',
+    'listLegacySqliteVolumes',
+    'createLegacySqliteVolume',
+    'updateLegacySqliteVolume',
+    'deleteLegacySqliteVolume',
+    'readLegacySqliteCharacterAssociations',
+    'createLegacySqliteForeshadow',
+    'readLegacySqliteStats',
+    'readLegacySqliteExportSnapshot',
+  ])],
+  ['server/tools.js', new Set([
+    'executeLegacySqliteTool',
+    'executeLegacySqliteResolveChapter',
+    'executeLegacySqliteUpdateById',
+    'executeLegacySqliteDeleteById',
+  ])],
+  ['server/native/durability-schema.js', new Set(['installSchema12Candidate'])],
+  ['server/native/native-project-store.js', new Set([
+    'installTargetRows',
+    'assertRevisionResolutionBase',
+    'captureSchema12ProjectionBase',
+    'schema12DesiredProjectionMatches',
+    'assertCandidateProjection',
+    'auxiliaryBasisChapter',
+    'currentAuxiliaryChapter',
+    'auxiliaryRevisionRow',
+  ])],
+  ['server/db.js', new Set(['captureProjection', 'captureMigrationSource', 'updateProjectWordCount'])],
+])
+
+function isExactInternalProductOwner(file, match) {
+  return EXACT_INTERNAL_PRODUCT_OWNERS.get(file)?.has(match.functionName) === true
+}
+
 export function scanManuscriptWriteBoundary({ repositoryRoot = defaultRepositoryRoot } = {}) {
   const offenders = []
   for (const filePath of productionServerFiles(repositoryRoot)) {
     const file = repositoryPath(repositoryRoot, filePath)
     if (file === 'server/seed.js') continue
     for (const match of scanSource(readFileSync(filePath, 'utf8'), file)) {
-      if (file === 'server/manuscript-service.js') continue
       if (file === 'server/db.js' && isExactMigration(match)) continue
+      if (file === 'server/db.js' && isExactSchemaMigrationRead(match)) continue
+      if (isExactInternalProductOwner(file, match)) continue
       offenders.push({ file, line: match.line, kind: match.kind })
     }
   }

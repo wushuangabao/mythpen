@@ -51,6 +51,7 @@ function fixture({
   policyInput = Object.freeze({ kind: 'chapter.replace_body' }),
   readableError = null,
   readableResult = Object.freeze({ projection: 'readable' }),
+  intentFamily = 'non_create',
 } = {}) {
   const events = [];
   const calls = {
@@ -58,6 +59,8 @@ function fixture({
     callback: 0,
     capture: 0,
     current: 0,
+    intentDescriptions: 0,
+    orphanAdmission: 0,
     policy: 0,
     readable: 0,
     writer: 0,
@@ -67,7 +70,27 @@ function fixture({
   const writerTurn = Object.freeze({});
   const admissionBrands = new WeakSet([admission]);
   const writerBrands = new WeakMap([[writerTurn, admission]]);
-  const writeRequest = Object.freeze({ logicalRequestId: LOGICAL_REQUEST_ID, policyInput });
+  const writeIntent = Object.freeze({});
+  const intentBrands = new WeakSet([writeIntent]);
+  let productWriteIntentAuthority;
+  productWriteIntentAuthority = Object.freeze({
+    assert(intent) {
+      assert.strictEqual(this, productWriteIntentAuthority);
+      if (!intentBrands.has(intent)) throw new TypeError('foreign product write intent');
+      return intent;
+    },
+    describe(intent) {
+      this.assert(intent);
+      calls.intentDescriptions += 1;
+      if (intentFamily === 'orphan_resolution') events.push('intent:describe:orphan');
+      return Object.freeze({ family: intentFamily, logicalInputDigest: null });
+    },
+  });
+  const writeRequest = Object.freeze({
+    logicalRequestId: LOGICAL_REQUEST_ID,
+    policyInput,
+    writeIntent,
+  });
   const seen = {};
 
   const defaultAdmission = async function defaultAdmission(receivedSelector, operation) {
@@ -89,6 +112,15 @@ function fixture({
         );
       }
       return Reflect.apply(defaultAdmission, this, [receivedSelector, operation]);
+    },
+    async withOrphanAdmission(receivedSelector, operation) {
+      calls.orphanAdmission += 1;
+      events.push('admission:orphan:enter');
+      assert.strictEqual(this, projectSessionAdmission);
+      assert.strictEqual(receivedSelector, selector);
+      const result = await operation(admission);
+      events.push('admission:orphan:release');
+      return result;
     },
   };
 
@@ -115,12 +147,15 @@ function fixture({
   };
 
   const freshness = {
-    async ensureProjectionCurrent(receivedAdmission, receivedTurn) {
+    async ensureProjectionCurrentForWrite(receivedAdmission, receivedTurn, input) {
       calls.current += 1;
       events.push('freshness:current');
       assert.strictEqual(this, freshness);
       assert.equal(admissionBrands.has(receivedAdmission), true);
       assert.strictEqual(writerBrands.get(receivedTurn), receivedAdmission);
+      exactKeys(input, ['logicalRequestId', 'writeIntent']);
+      assert.equal(input.logicalRequestId, LOGICAL_REQUEST_ID);
+      assert.strictEqual(input.writeIntent, writeIntent);
       if (freshnessError) throw freshnessError;
     },
     async ensureReadableProjection(receivedAdmission, query) {
@@ -148,6 +183,18 @@ function fixture({
       if (captureError) throw captureError;
       return context;
     },
+    async captureOrphanBaseline(input) {
+      if (intentFamily !== 'orphan_resolution') {
+        throw new Error('ordinary write must not capture an orphan baseline');
+      }
+      calls.capture += 1;
+      events.push('context:capture:orphan');
+      exactKeys(input, ['admission', 'writerTurn', 'logicalRequestId']);
+      assert.strictEqual(input.admission, admission);
+      assert.strictEqual(input.writerTurn, writerTurn);
+      assert.equal(input.logicalRequestId, LOGICAL_REQUEST_ID);
+      return context;
+    },
   };
 
   const policy = {
@@ -173,6 +220,7 @@ function fixture({
     freshness,
     turnContextSource,
     policy,
+    productWriteIntentAuthority,
   };
 
   return {
@@ -188,6 +236,7 @@ function fixture({
     selector,
     writeRequest,
     writerTurn,
+    writeIntent,
   };
 }
 
@@ -211,7 +260,7 @@ function invalidPortVariants(valid, methods) {
   return variants;
 }
 
-test('factory validates five exact own-data method ports before any lifecycle side effect', () => {
+test('factory validates six exact own-data method ports before any lifecycle side effect', () => {
   const baseline = fixture();
   const sideEffectsBefore = { ...baseline.calls };
   exactKeys(baseline.gates, [
@@ -236,11 +285,12 @@ test('factory validates five exact own-data method ports before any lifecycle si
   assert.equal(optionsGetterCalls, 0);
 
   const surfaces = [
-    ['projectSessionAdmission', ['withAdmission']],
+    ['projectSessionAdmission', ['withAdmission', 'withOrphanAdmission']],
     ['writerTurns', ['withWriterTurn']],
-    ['freshness', ['ensureProjectionCurrent', 'ensureReadableProjection']],
-    ['turnContextSource', ['capture']],
+    ['freshness', ['ensureProjectionCurrentForWrite', 'ensureReadableProjection']],
+    ['turnContextSource', ['capture', 'captureOrphanBaseline']],
     ['policy', ['authorizeWrite']],
+    ['productWriteIntentAuthority', ['assert', 'describe']],
   ];
   for (const [name, methods] of surfaces) {
     for (const variant of invalidPortVariants(baseline.ports[name], methods)) {
@@ -287,10 +337,32 @@ test('write turn preserves authority identity and the only allowed order through
     callback: 1,
     capture: 1,
     current: 1,
+    intentDescriptions: 1,
+    orphanAdmission: 0,
     policy: 1,
     readable: 0,
     writer: 1,
   });
+});
+
+test('orphan intent is described twice before only the private orphan admission path is selected', async () => {
+  const current = fixture({ intentFamily: 'orphan_resolution' });
+
+  await current.gates.withCurrentManuscriptWriteTurn(
+    current.selector,
+    current.writeRequest,
+    async () => undefined,
+  );
+
+  assert.equal(current.calls.intentDescriptions, 2);
+  assert.equal(current.calls.admission, 0);
+  assert.equal(current.calls.orphanAdmission, 1);
+  assert.deepEqual(current.events.slice(0, 3), [
+    'intent:describe:orphan',
+    'intent:describe:orphan',
+    'admission:orphan:enter',
+  ]);
+  assert.equal(current.events.includes('context:capture:orphan'), true);
 });
 
 test('writeRequest is an exact frozen own-data envelope and never evaluates policyInput', async () => {

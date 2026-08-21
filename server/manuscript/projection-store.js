@@ -102,6 +102,10 @@ const RESOLUTION_BUILD_TARGET_KEYS = Object.freeze([
   ...BUILD_TARGET_KEYS,
   'resolutionTransition',
 ]);
+const REVISION_BUILD_TARGET_KEYS = Object.freeze([
+  ...BUILD_TARGET_KEYS,
+  'revisionResolution',
+]);
 const TARGET_KEYS = Object.freeze([
   'domain', 'version', 'projectUid', 'projectInstanceId', 'basis',
   'basisDigest', 'baseGeneration', 'targetGeneration', 'projectedAt',
@@ -109,8 +113,17 @@ const TARGET_KEYS = Object.freeze([
   'ignoredLedger', 'capacitySnapshot', 'proposalInvalidations',
   'localIdentityPlan',
 ]);
+const REVISION_TARGET_KEYS = Object.freeze([...TARGET_KEYS, 'revisionResolution']);
+const REVISION_RESOLUTION_KEYS = Object.freeze([
+  'revisionId', 'chapterId', 'chapterUid', 'from', 'to',
+  'baseContentSha256', 'proposedContentSha256', 'acceptedContentSha256',
+  'decisionsSha256', 'logicalRequestId', 'commandKind', 'commandDigest',
+]);
 const ignoredIdentityLedger = new IgnoredIdentityLedger();
 const BUILT_TARGET_AUTHORITY = Symbol('built projection target authority');
+const installedBaselineAuthorities = new WeakMap();
+const installedBaselineAuthorityOwners = new WeakMap();
+const installedBaselineReceiptRecords = new WeakMap();
 
 function invalid(message) {
   throw new TypeError(message);
@@ -938,7 +951,7 @@ function targetSequence(basis, rows) {
     .sort((left, right) => utf8Compare(left.name, right.name));
 }
 
-function deriveProposalInvalidations(basis, candidateValue, assignments) {
+function deriveProposalInvalidations(basis, candidateValue, assignments, resolvedRevisionId = null) {
   if (basis.pendingProposals.length === 0) return [];
   const assignmentById = new Map(
     assignments.filter((row) => row.objectKind === 'chapter').map((row) => [row.id, row]),
@@ -947,6 +960,7 @@ function deriveProposalInvalidations(basis, candidateValue, assignments) {
   const basisById = new Map(basis.chapters.map((row) => [row.id, row]));
   const invalidations = [];
   for (const proposal of basis.pendingProposals) {
+    if (proposal.revisionId === resolvedRevisionId) continue;
     const oldRow = basisById.get(proposal.chapterId);
     const assignment = assignmentById.get(proposal.chapterId);
     if (oldRow === undefined || assignment === undefined) invalid('pending proposal chapter mapping is incomplete');
@@ -969,6 +983,47 @@ function deriveProposalInvalidations(basis, candidateValue, assignments) {
     }
   }
   return invalidations.sort((left, right) => left.revisionId - right.revisionId);
+}
+
+function normalizeRevisionResolution(value, basis, targetCandidate, assignments) {
+  const row = normalizeRow(value, REVISION_RESOLUTION_KEYS, 'revision resolution');
+  positiveInteger(row.revisionId, 'revision resolution revisionId');
+  positiveInteger(row.chapterId, 'revision resolution chapterId');
+  canonicalUuid(row.chapterUid, 'revision resolution chapterUid');
+  if (row.from !== 'pending' || row.to !== 'accepted') {
+    invalid('revision resolution transition is invalid');
+  }
+  if (
+    typeof row.logicalRequestId !== 'string'
+    || row.logicalRequestId.length === 0
+    || row.logicalRequestId.length > 512
+  ) invalid('revision resolution logicalRequestId is invalid');
+  if (row.commandKind !== 'revision.accept' && row.commandKind !== 'revision.finalize') {
+    invalid('revision resolution commandKind is invalid');
+  }
+  for (const key of [
+    'baseContentSha256',
+    'proposedContentSha256',
+    'acceptedContentSha256',
+    'decisionsSha256',
+    'commandDigest',
+  ]) sha256(row[key], `revision resolution ${key}`);
+  if (!basis.pendingProposals.some((proposal) => (
+    proposal.revisionId === row.revisionId && proposal.chapterId === row.chapterId
+  ))) invalid('revision resolution is absent from the projection basis');
+  const assignment = assignments.find((entry) => (
+    entry.objectKind === 'chapter'
+    && entry.id === row.chapterId
+    && entry.uid === row.chapterUid
+  ));
+  const chapter = targetCandidate.chapters.find((entry) => entry.chapterUid === row.chapterUid);
+  if (
+    assignment === undefined
+    || chapter === undefined
+    || chapter.bodyRawSha256 !== row.acceptedContentSha256
+    || chapter.status !== 'accepted'
+  ) invalid('revision resolution does not match the accepted target chapter');
+  return row;
 }
 
 function validateTargetRowVariants(rows, options) {
@@ -1144,7 +1199,13 @@ function normalizeTarget(target, authority = null) {
     label: 'projection target',
     trustedValues,
   });
-  const descriptors = assertExactKeys(target, TARGET_KEYS, 'projection target');
+  const rawDescriptors = dataDescriptors(target, 'projection target');
+  const revisionTarget = Object.hasOwn(rawDescriptors, 'revisionResolution');
+  const descriptors = assertExactKeys(
+    target,
+    revisionTarget ? REVISION_TARGET_KEYS : TARGET_KEYS,
+    'projection target',
+  );
   if (
     authority === BUILT_TARGET_AUTHORITY
     && descriptors.ignoredLedger.value !== trustedIgnoredLedger
@@ -1255,14 +1316,351 @@ function normalizeTarget(target, authority = null) {
     if (row.from !== 'pending' || row.to !== 'stale') invalid('proposal invalidation transition is invalid');
     return row;
   });
-  const expectedInvalidations = deriveProposalInvalidations(basis, targetCandidate, localIdentityPlan);
+  const revisionResolution = revisionTarget
+    ? normalizeRevisionResolution(
+      descriptors.revisionResolution.value,
+      basis,
+      targetCandidate,
+      localIdentityPlan,
+    )
+    : null;
+  const expectedInvalidations = deriveProposalInvalidations(
+    basis,
+    targetCandidate,
+    localIdentityPlan,
+    revisionResolution?.revisionId ?? null,
+  );
   if (JSON.stringify(proposalInvalidations) !== JSON.stringify(expectedInvalidations)) {
     invalid('projection target proposalInvalidations are inconsistent');
   }
   return target;
 }
 
+function currentProjectionAfterTarget(target) {
+  normalizeTarget(target);
+  const baseVolumes = new Map(target.basis.volumes.map((row) => [row.id, row]));
+  const baseChapters = new Map(target.basis.chapters.map((row) => [row.id, row]));
+  const invalidatedRevisionIds = new Set(
+    target.proposalInvalidations.map((row) => row.revisionId),
+  );
+  if (Object.hasOwn(target, 'revisionResolution')) {
+    invalidatedRevisionIds.add(target.revisionResolution.revisionId);
+  }
+  const basis = {
+    domain: PROJECTION_BASIS_DOMAIN,
+    version: PROJECTION_BASIS_VERSION,
+    sourceKind: 'schema12',
+    baseGeneration: target.targetGeneration,
+    volumes: target.volumes.map((row) => {
+      if (row.is_present === 1) {
+        return {
+          id: row.id,
+          uid: row.volume_uid,
+          sortOrder: row.sort_order,
+          isPresent: 1,
+          deletedAt: null,
+        };
+      }
+      const before = baseVolumes.get(row.id);
+      if (before === undefined) invalid('projection target tombstone volume has no base row');
+      return {
+        id: row.id,
+        uid: row.volume_uid,
+        sortOrder: before.sortOrder,
+        isPresent: 0,
+        deletedAt: row.deleted_at,
+      };
+    }),
+    chapters: target.chapters.map((row) => {
+      if (row.is_present === 1) {
+        return {
+          id: row.id,
+          uid: row.chapter_uid,
+          volumeId: row.volume_id,
+          num: row.num,
+          isPresent: 1,
+          deletedAt: null,
+          chapterPosition: row.chapter_position,
+          manuscriptPosition: row.manuscript_position,
+          bodyRawSha256: row.body_raw_sha256,
+          status: row.status,
+        };
+      }
+      const before = baseChapters.get(row.id);
+      if (before === undefined) invalid('projection target tombstone chapter has no base row');
+      return {
+        id: row.id,
+        uid: row.chapter_uid,
+        volumeId: null,
+        num: row.num,
+        isPresent: 0,
+        deletedAt: row.deleted_at,
+        chapterPosition: null,
+        manuscriptPosition: null,
+        bodyRawSha256: before.bodyRawSha256,
+        status: before.status,
+      };
+    }),
+    sqliteSequence: target.sqliteSequence.map((row) => ({ ...row })),
+    ignoredBeforeDigest: canonicalIgnoredLedgerDigest(target.ignoredLedger),
+    pendingProposals: target.basis.pendingProposals
+      .filter((row) => !invalidatedRevisionIds.has(row.revisionId))
+      .map((row) => ({ ...row })),
+    basisDigest: '0'.repeat(64),
+  };
+  basis.basisDigest = canonicalProjectionBasisDigest(basis);
+  return deepFreeze({
+    projectUid: target.projectUid,
+    projectInstanceId: target.projectInstanceId,
+    basis,
+  });
+}
+
+function installedBaselineAuthority(store) {
+  const authority = installedBaselineAuthorities.get(store);
+  if (authority === undefined) invalid('installed baseline authority receiver is invalid');
+  return authority;
+}
+
+function installedBaselineRecord(authority, receipt) {
+  if (installedBaselineAuthorityOwners.get(authority) === undefined) {
+    invalid('installed baseline authority receiver is invalid');
+  }
+  const record = (
+    receipt !== null
+    && typeof receipt === 'object'
+    && installedBaselineReceiptRecords.get(receipt)
+  );
+  if (record === undefined || record.store !== installedBaselineAuthorityOwners.get(authority)) {
+    invalid('installed baseline receipt is foreign or forged');
+  }
+  return record;
+}
+
+function assertInstalledOrphanBaselineAuthority(authority) {
+  if (installedBaselineAuthorityOwners.get(authority) === undefined) {
+    invalid('installed orphan baseline authority is not module-branded');
+  }
+  return authority;
+}
+
+function ownReadAll(projectStore) {
+  const descriptors = dataDescriptors(projectStore, 'installed baseline projectStore');
+  const descriptor = descriptors.readAll;
+  if (
+    descriptor === undefined
+    || descriptor.enumerable !== true
+    || !Object.hasOwn(descriptor, 'value')
+    || typeof descriptor.value !== 'function'
+  ) invalid('installed baseline projectStore must expose an own readAll method');
+  return descriptor.value;
+}
+
+function readInstalledRows(projectStore, readAll, sql, label) {
+  const rows = Reflect.apply(readAll, projectStore, [sql]);
+  return assertDenseArray(rows, label);
+}
+
+function normalizeInstalledControlledRows(rows, generation) {
+  const facts = rows.map((entry, index) => {
+    const label = `installed controlled files[${index}]`;
+    const row = normalizeRow(entry, [
+      'file_role', 'resource_uid', 'raw_sha256', 'byte_size',
+      'file_identity_json', 'projection_generation',
+    ], label);
+    if (row.projection_generation !== generation) {
+      invalid(`${label}.projection_generation is stale`);
+    }
+    if (typeof row.file_identity_json !== 'string') {
+      invalid(`${label}.file_identity_json must be a string`);
+    }
+    let identities;
+    try {
+      identities = JSON.parse(row.file_identity_json);
+    } catch {
+      invalid(`${label}.file_identity_json is invalid`);
+    }
+    const normalizedIdentities = normalizeRow(
+      identities,
+      ['fileIdentity', 'parentIdentity'],
+      `${label}.file_identity_json`,
+    );
+    return {
+      byteSize: row.byte_size,
+      fileIdentity: normalizedIdentities.fileIdentity,
+      parentIdentity: normalizedIdentities.parentIdentity,
+      rawSha256: row.raw_sha256,
+      resourceUid: row.resource_uid,
+      role: row.file_role,
+    };
+  });
+  return normalizeControlledFileFacts(facts, 'installed controlled files');
+}
+
+function assertInstalledRowsMatchBasis(current, volumes, chapters) {
+  const activeVolumes = current.basis.volumes
+    .filter((row) => row.isPresent === 1)
+    .sort((left, right) => left.sortOrder - right.sortOrder || left.id - right.id);
+  if (
+    volumes.length !== activeVolumes.length
+    || volumes.some((row, index) => {
+      const basis = activeVolumes[index];
+      return row.id !== basis.id
+        || row.volume_uid !== basis.uid
+        || row.sort_order !== basis.sortOrder;
+    })
+  ) invalid('installed active volumes do not match the projection basis');
+
+  const activeChapters = current.basis.chapters
+    .filter((row) => row.isPresent === 1)
+    .sort((left, right) => (
+      left.manuscriptPosition - right.manuscriptPosition || left.id - right.id
+    ));
+  if (
+    chapters.length !== activeChapters.length
+    || chapters.some((row, index) => {
+      const basis = activeChapters[index];
+      return row.id !== basis.id
+        || row.chapter_uid !== basis.uid
+        || row.volume_id !== basis.volumeId
+        || row.num !== basis.num
+        || row.chapter_position !== basis.chapterPosition
+        || row.manuscript_position !== basis.manuscriptPosition
+        || row.body_raw_sha256 !== basis.bodyRawSha256
+        || row.status !== basis.status;
+    })
+  ) invalid('installed active chapters do not match the projection basis');
+}
+
+function normalizeInstalledCapacity(rows, generation) {
+  if (rows.length !== 1) invalid('installed capacity snapshot must contain one row');
+  const row = normalizeRow(rows[0], [
+    'singleton_id', 'chapter_identities', 'volume_identities', 'controlled_files',
+    'chapter_directory_entries', 'controlled_bytes', 'projection_generation',
+  ], 'installed capacity snapshot');
+  if (row.singleton_id !== 1 || row.projection_generation !== generation) {
+    invalid('installed capacity snapshot generation is stale');
+  }
+  for (const key of [
+    'chapter_identities', 'volume_identities', 'controlled_files',
+    'chapter_directory_entries', 'controlled_bytes',
+  ]) nonNegativeInteger(row[key], `installed capacity snapshot.${key}`);
+  return canonicalRow(row, [
+    'singleton_id', 'chapter_identities', 'volume_identities', 'controlled_files',
+    'chapter_directory_entries', 'controlled_bytes', 'projection_generation',
+  ]);
+}
+
 class SQLiteProjectionStore {
+  constructor() {
+    const store = this;
+    const authority = Object.freeze({
+      assert(receipt) {
+        if (this !== authority) invalid('installed baseline authority receiver is invalid');
+        installedBaselineRecord(authority, receipt);
+        return receipt;
+      },
+      describe(receipt) {
+        if (this !== authority) invalid('installed baseline authority receiver is invalid');
+        return installedBaselineRecord(authority, receipt).description;
+      },
+    });
+    installedBaselineAuthorities.set(store, authority);
+    installedBaselineAuthorityOwners.set(authority, store);
+  }
+
+  installedOrphanBaselineAuthority() {
+    return installedBaselineAuthority(this);
+  }
+
+  captureInstalledOrphanBaseline(input) {
+    const descriptors = assertExactKeys(
+      input,
+      ['projectStore', 'currentProjection', 'ignoredLedger'],
+      'captureInstalledOrphanBaseline input',
+    );
+    const current = normalizeCurrentProjection(descriptors.currentProjection.value);
+    if (current.basis.sourceKind !== 'schema12') {
+      invalid('installed orphan baseline requires schema12');
+    }
+    const generation = current.basis.baseGeneration;
+    const ignoredRows = normalizeIgnoredLedgerRows(
+      descriptors.ignoredLedger.value,
+      'installed baseline ignoredLedger',
+    );
+    const ignoredDigest = canonicalIgnoredLedgerDigest(ignoredRows);
+    if (ignoredDigest !== current.basis.ignoredBeforeDigest) {
+      invalid('installed baseline ignoredLedger does not match the projection basis');
+    }
+    if (ignoredRows.some((row) => row.projection_generation !== generation)) {
+      invalid('installed baseline ignoredLedger generation is stale');
+    }
+    const projectStore = descriptors.projectStore.value;
+    const readAll = ownReadAll(projectStore);
+    const volumeRows = readInstalledRows(projectStore, readAll, `
+      SELECT id, sort_order, title, summary, volume_uid, is_present, deleted_at
+      FROM volumes WHERE is_present = 1 ORDER BY sort_order, id
+    `, 'installed active volumes');
+    const chapterRows = readInstalledRows(projectStore, readAll, `
+      SELECT id, volume_id, num, title, outline, content, summary, word_count,
+             status, cognitive_frame, emotional_anchor, world_texture,
+             concrete_mystery, interpersonal_tension, chapter_uid, is_present,
+             deleted_at, chapter_position, manuscript_position, body_raw_sha256,
+             sidecar_raw_sha256, content_available
+      FROM chapters WHERE is_present = 1 ORDER BY manuscript_position, id
+    `, 'installed active chapters');
+    const controlledRows = readInstalledRows(projectStore, readAll, `
+      SELECT file_role, resource_uid, raw_sha256, byte_size,
+             file_identity_json, projection_generation
+      FROM manuscript_controlled_files
+      ORDER BY file_role, COALESCE(resource_uid, '')
+    `, 'installed controlled files');
+    const capacityRows = readInstalledRows(projectStore, readAll, `
+      SELECT singleton_id, chapter_identities, volume_identities, controlled_files,
+             chapter_directory_entries, controlled_bytes, projection_generation
+      FROM manuscript_capacity_snapshot
+    `, 'installed capacity snapshot rows');
+    const volumes = validateTargetRowVariants(volumeRows, {
+      activeKeys: ACTIVE_VOLUME_KEYS,
+      tombstoneKeys: TOMBSTONE_VOLUME_KEYS,
+      kind: 'volume',
+      label: 'installed active volumes',
+    }).sort((left, right) => left.sort_order - right.sort_order || left.id - right.id);
+    const chapters = validateTargetRowVariants(chapterRows, {
+      activeKeys: ACTIVE_CHAPTER_KEYS,
+      tombstoneKeys: TOMBSTONE_CHAPTER_KEYS,
+      kind: 'chapter',
+      label: 'installed active chapters',
+    }).sort((left, right) => (
+      left.manuscript_position - right.manuscript_position || left.id - right.id
+    ));
+    if (volumes.some((row) => row.is_present !== 1) || chapters.some((row) => row.is_present !== 1)) {
+      invalid('installed baseline queries returned tombstones');
+    }
+    validateTargetPositions(volumes, chapters);
+    assertInstalledRowsMatchBasis(current, volumes, chapters);
+    const controlledFiles = normalizeInstalledControlledRows(controlledRows, generation);
+    validateControlledFileCoverage(controlledFiles, volumes, chapters);
+    const capacity = normalizeInstalledCapacity(capacityRows, generation);
+    const description = deepFreeze({
+      projectUid: current.projectUid,
+      projectInstanceId: current.projectInstanceId,
+      baseGeneration: generation,
+      basisDigest: current.basis.basisDigest,
+      ignoredDigest,
+      volumes: volumes.map((row) => canonicalRow(row, ACTIVE_VOLUME_KEYS)),
+      chapters: chapters.map((row) => canonicalRow(row, ACTIVE_CHAPTER_KEYS)),
+      controlledFiles,
+      capacity,
+    });
+    const receipt = Object.freeze({});
+    installedBaselineReceiptRecords.set(receipt, Object.freeze({
+      description,
+      store: this,
+    }));
+    return receipt;
+  }
+
   buildTarget(input) {
     const descriptors = assertExactKeys(input, BUILD_TARGET_KEYS, 'buildTarget input');
     const current = normalizeCurrentProjection(descriptors.currentProjection.value);
@@ -1331,6 +1729,43 @@ class SQLiteProjectionStore {
       localIdentityPlan,
     };
     return normalizeTarget(deepFreeze(target), BUILT_TARGET_AUTHORITY);
+  }
+
+  buildRevisionTarget(input) {
+    const descriptors = assertExactKeys(
+      input,
+      REVISION_BUILD_TARGET_KEYS,
+      'buildRevisionTarget input',
+    );
+    const target = this.buildTarget(Object.freeze({
+      candidate: descriptors.candidate.value,
+      currentProjection: descriptors.currentProjection.value,
+      targetGeneration: descriptors.targetGeneration.value,
+      projectedAt: descriptors.projectedAt.value,
+      ignoredLedger: descriptors.ignoredLedger.value,
+      localIdentityPlan: descriptors.localIdentityPlan.value,
+    }));
+    const resolutionInput = descriptors.revisionResolution.value;
+    const resolutionDescriptors = assertExactKeys(
+      resolutionInput,
+      REVISION_RESOLUTION_KEYS,
+      'revision resolution',
+    );
+    const revisionId = positiveInteger(
+      resolutionDescriptors.revisionId.value,
+      'revision resolution revisionId',
+    );
+    const revisionTarget = {
+      ...target,
+      proposalInvalidations: target.proposalInvalidations.filter((row) => (
+        row.revisionId !== revisionId
+      )),
+      revisionResolution: Object.fromEntries(REVISION_RESOLUTION_KEYS.map((key) => [
+        key,
+        resolutionDescriptors[key].value,
+      ])),
+    };
+    return normalizeTarget(deepFreeze(revisionTarget), BUILT_TARGET_AUTHORITY);
   }
 
   buildResolutionTarget(input) {
@@ -1418,6 +1853,11 @@ class SQLiteProjectionStore {
     return normalizeTarget(target);
   }
 
+  validateCurrentProjection(currentProjection) {
+    normalizeCurrentProjection(currentProjection);
+    return currentProjection;
+  }
+
   publish(input) {
     const allowed = Object.hasOwn(input ?? {}, 'routeCas')
       ? ['projectStore', 'target', 'routeCas']
@@ -1484,7 +1924,9 @@ class SQLiteProjectionStore {
 
 module.exports = {
   SQLiteProjectionStore,
+  assertInstalledOrphanBaselineAuthority,
   canonicalIgnoredLedgerDigest,
   canonicalProjectionBasisDigest,
   canonicalSchema12ReuseIdentityPlan,
+  currentProjectionAfterTarget,
 };

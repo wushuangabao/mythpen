@@ -2394,6 +2394,38 @@ class FilePublicationJournal {
     return Object.freeze({ recovered: Object.freeze(recovered), status: 'clean' });
   }
 
+  inspectDisposition(input) {
+    const record = journalRecords.get(this);
+    if (record === undefined) throw new TypeError('invalid FilePublicationJournal receiver');
+    if (!Object.isFrozen(input)) {
+      throw new TypeError('disposition inspection request must be frozen');
+    }
+    const descriptors = assertExactKeys(
+      input,
+      ['journalId', 'parent'],
+      'disposition inspection request',
+    );
+    const journalId = assertCanonicalUuid(descriptors.journalId.value, 'journal_id');
+    const expectedParent = snapshotParent(descriptors.parent.value);
+    const parsed = parseJournal(record, journalId);
+    if (parsed.state === null) {
+      throw recoveryRequired('file publication journal does not exist for disposition inspection');
+    }
+    if (
+      parsed.reservation === null
+      || canonicalJson(parsed.reservation.parent) !== canonicalJson(expectedParent)
+    ) {
+      throw recoveryRequired('file publication parent does not match disposition inspection');
+    }
+    if (parsed.terminalDisposition === 'after') {
+      return Object.freeze({ disposition: 'after' });
+    }
+    if (parsed.terminalDisposition === 'before') {
+      return Object.freeze({ disposition: 'before' });
+    }
+    return Object.freeze({ disposition: 'pending' });
+  }
+
   async collectAssets(journalId, { parentGcAuthority } = {}) {
     const record = journalRecords.get(this);
     const safeJournalId = assertCanonicalUuid(journalId, 'journal_id');

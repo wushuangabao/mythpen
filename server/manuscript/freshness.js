@@ -21,6 +21,7 @@ const CLOSED = Object.freeze({ disposition: 'CLOSED' });
 const lifecycleRecords = new WeakMap();
 const ownerRecords = new WeakMap();
 const admissionRecords = new WeakMap();
+const productFreshnessRecords = new WeakMap();
 
 function invalid(message) {
   throw new TypeError(message);
@@ -898,6 +899,226 @@ async function ensureReadableProjection(freshnessAdmission, query) {
     : readDegraded(admissionRecordValue, query);
 }
 
+function productIntentDescriptor(value) {
+  const values = exactDataObject(
+    value,
+    ['family', 'logicalInputDigest'],
+    'product write intent descriptor',
+    true,
+  );
+  if (values.family === 'ordinary_create') {
+    if (typeof values.logicalInputDigest !== 'string' || !SHA256_PATTERN.test(values.logicalInputDigest)) {
+      invalid('ordinary_create intent requires a lowercase SHA-256 logical digest');
+    }
+  } else if (values.family === 'non_create' || values.family === 'orphan_resolution') {
+    if (values.logicalInputDigest !== null) {
+      invalid(`${values.family} intent must not provide a logical digest`);
+    }
+  } else {
+    invalid('product write intent family is invalid');
+  }
+  return Object.freeze({
+    family: values.family,
+    logicalInputDigest: values.logicalInputDigest,
+  });
+}
+
+function productWriteInput(value) {
+  const values = exactDataObject(
+    value,
+    ['logicalRequestId', 'writeIntent'],
+    'product freshness write input',
+    true,
+  );
+  if (typeof values.logicalRequestId !== 'string' || values.logicalRequestId.length === 0) {
+    invalid('product freshness logicalRequestId must be non-empty');
+  }
+  return values;
+}
+
+function productRecoveryRequired(message) {
+  return manuscriptError('RECOVERY_REQUIRED', { reason: message });
+}
+
+function assertMatchingLogicalChain(descriptor, logicalRequestId, lookup) {
+  if (lookup === null) return null;
+  if (descriptor.family !== 'ordinary_create') {
+    throw productRecoveryRequired('logical_request_collides_with_ordinary_create');
+  }
+  try {
+    const chain = exactDataObject(lookup, [
+      'state',
+      'outcome',
+      'identityReservation',
+      'reservationBinding',
+    ], 'ordinary logical request lookup', true);
+    if (
+      typeof chain.state !== 'string'
+      || chain.state.length === 0
+      || !['early', 'advanced', 'after', 'before'].includes(chain.outcome)
+      || chain.identityReservation === null
+      || typeof chain.identityReservation !== 'object'
+      || !Object.isFrozen(chain.identityReservation)
+    ) invalid('ordinary logical request lookup is not one classified create chain');
+    const binding = exactDataObject(chain.reservationBinding, [
+      'projectUid',
+      'projectInstanceId',
+      'journalId',
+      'logicalRequestId',
+      'baseGeneration',
+      'targetGeneration',
+      'basisDigest',
+      'logicalInputDigest',
+      'inputDigest',
+      'reservationDigest',
+    ], 'ordinary reservation binding', true);
+    assertUuid(binding.projectUid, 'ordinary reservation binding.projectUid');
+    assertUuid(binding.projectInstanceId, 'ordinary reservation binding.projectInstanceId');
+    assertUuid(binding.journalId, 'ordinary reservation binding.journalId');
+    nonNegativeSafeInteger(binding.baseGeneration, 'ordinary reservation binding.baseGeneration');
+    nonNegativeSafeInteger(binding.targetGeneration, 'ordinary reservation binding.targetGeneration');
+    if (
+      binding.targetGeneration !== binding.baseGeneration + 1
+      || binding.logicalRequestId !== logicalRequestId
+      || binding.logicalInputDigest !== descriptor.logicalInputDigest
+      || !SHA256_PATTERN.test(binding.basisDigest)
+      || !SHA256_PATTERN.test(binding.inputDigest)
+      || !SHA256_PATTERN.test(binding.reservationDigest)
+    ) invalid('ordinary reservation binding differs from this create intent');
+    return Object.freeze({
+      binding: Object.freeze({ ...binding }),
+      outcome: chain.outcome,
+      state: chain.state,
+    });
+  } catch (cause) {
+    if (cause?.code === 'RECOVERY_REQUIRED') throw cause;
+    throw productRecoveryRequired('ordinary_create_logical_binding_mismatch');
+  }
+}
+
+function sameOrdinaryBinding(left, right) {
+  return [
+    'projectUid',
+    'projectInstanceId',
+    'journalId',
+    'logicalRequestId',
+    'baseGeneration',
+    'targetGeneration',
+    'basisDigest',
+    'logicalInputDigest',
+    'inputDigest',
+    'reservationDigest',
+  ].every((key) => left[key] === right[key]);
+}
+
+function createProductWriteFreshness(options) {
+  const values = exactDataObject(options, [
+    'productWriteIntentAuthority',
+    'journalRecovery',
+    'projectionFreshness',
+  ], 'product write freshness options');
+  const productWriteIntentAuthority = exactMethodSurface(
+    values.productWriteIntentAuthority,
+    ['assert', 'describe'],
+    'productWriteIntentAuthority',
+  );
+  const journalRecovery = exactMethodSurface(
+    values.journalRecovery,
+    ['lookupCommittedRequest', 'lookupOrdinaryRequest', 'recoverPendingOrdinary'],
+    'journalRecovery',
+  );
+  const projectionFreshness = exactMethodSurface(
+    values.projectionFreshness,
+    ['ensureProjectionCurrent', 'ensureReadableProjection'],
+    'projectionFreshness',
+  );
+  const freshness = Object.freeze({
+    async ensureProjectionCurrentForWrite(admission, writerTurn, input) {
+      const record = productFreshnessRecords.get(this);
+      if (record === undefined) invalid('product write freshness receiver is invalid');
+      const write = productWriteInput(input);
+      const asserted = invoke(record.productWriteIntentAuthority.assert, [write.writeIntent]);
+      if (asserted !== write.writeIntent) {
+        invalid('product write intent authority must return the original intent');
+      }
+      const descriptor = productIntentDescriptor(invoke(
+        record.productWriteIntentAuthority.describe,
+        [write.writeIntent],
+      ));
+      const committed = await invoke(record.journalRecovery.lookupCommittedRequest, [
+        write.writeIntent,
+        write.logicalRequestId,
+      ]);
+      if (committed !== null) {
+        let replay;
+        try {
+          replay = exactDataObject(
+            committed,
+            ['disposition'],
+            'committed product request replay',
+            true,
+          );
+        } catch (cause) {
+          throw productRecoveryRequired('committed_product_request_is_malformed');
+        }
+        if (descriptor.family !== 'non_create' || replay.disposition !== 'after') {
+          throw productRecoveryRequired('committed_product_request_binding_mismatch');
+        }
+        return invoke(record.projectionFreshness.ensureProjectionCurrent, [
+          admission,
+          writerTurn,
+        ]);
+      }
+      const beforeLookup = await invoke(record.journalRecovery.lookupOrdinaryRequest, [
+        write.logicalRequestId,
+      ]);
+      const before = assertMatchingLogicalChain(
+        descriptor,
+        write.logicalRequestId,
+        beforeLookup,
+      );
+      if (descriptor.family === 'orphan_resolution') return undefined;
+      if (before?.outcome === 'before') {
+        throw productRecoveryRequired('ordinary_create_is_known_before');
+      }
+      await invoke(record.journalRecovery.recoverPendingOrdinary, []);
+      const afterLookup = await invoke(record.journalRecovery.lookupOrdinaryRequest, [
+        write.logicalRequestId,
+      ]);
+      const after = assertMatchingLogicalChain(
+        descriptor,
+        write.logicalRequestId,
+        afterLookup,
+      );
+      if (before === null && after !== null) {
+        throw productRecoveryRequired('logical_request_appeared_during_recovery');
+      }
+      if (before !== null) {
+        if (after === null || !sameOrdinaryBinding(before.binding, after.binding)) {
+          throw productRecoveryRequired('ordinary_create_binding_changed_during_recovery');
+        }
+        if (
+          (before.outcome === 'early' && after.outcome !== 'after')
+          || (before.outcome === 'advanced' && after.outcome !== 'after')
+          || after.outcome === 'before'
+        ) throw productRecoveryRequired('ordinary_create_recovery_disposition_is_invalid');
+      }
+      return invoke(record.projectionFreshness.ensureProjectionCurrent, [admission, writerTurn]);
+    },
+    async ensureReadableProjection(admission, query) {
+      const record = productFreshnessRecords.get(this);
+      if (record === undefined) invalid('product write freshness receiver is invalid');
+      return invoke(record.projectionFreshness.ensureReadableProjection, [admission, query]);
+    },
+  });
+  productFreshnessRecords.set(freshness, Object.freeze({
+    journalRecovery,
+    productWriteIntentAuthority,
+    projectionFreshness,
+  }));
+  return freshness;
+}
+
 function fenceOwner(record, error) {
   if (!record.fencedError) record.fencedError = error;
   record.accepting = false;
@@ -1025,6 +1246,84 @@ function createManuscriptFreshnessLifecycle(options) {
     withWriterTurn: writerTurns.withWriterTurn,
   });
 
+  async function startOwner(ownerRecordValue, exactIdentity, performStartupRefresh) {
+    if (ownerRecordValue.startCalled) invalid('freshness owner start is exact-once');
+    if (ownerRecordValue.state !== 'inert') invalid('freshness owner is not inert');
+    if (ownerRecordValue.identity.exactIdentity !== exactIdentity) {
+      invalid('first start must consume the original registry identity reference');
+    }
+    ownerRecordValue.startCalled = true;
+    ownerRecordValue.state = 'starting';
+    const startupAdmission = mintAdmission(ownerRecordValue, true);
+    const startupAdmissionRecord = admissionRecords.get(startupAdmission);
+    startupAdmissionRecord.authority = startupAdmission;
+    try {
+      const verifiedBasis = await invoke(
+        record.verifyBeforeFeedStart,
+        [exactIdentity],
+      );
+      const exactFeedIdentity = startBasis(verifiedBasis);
+      const assertedIdentity = invoke(
+        record.assertFeedIdentity,
+        [exactFeedIdentity],
+      );
+      if (assertedIdentity !== exactFeedIdentity) {
+        invalid('feedAdapter.assertIdentity must return the same identity reference');
+      }
+      ownerRecordValue.feedIdentity = exactFeedIdentity;
+
+      const capability = invoke(record.notificationRead, []);
+      if (typeof capability !== 'boolean') {
+        invalid('notificationCapability.read must synchronously return boolean');
+      }
+      if (!capability) {
+        ownerRecordValue.feedState.enterDegraded('CAPABILITY_DISABLED');
+        ownerRecordValue.mode = 'degraded';
+      } else {
+        let opened;
+        try {
+          opened = validateOpenResult(invoke(
+            record.tryOpen,
+            [exactFeedIdentity],
+          ));
+        } catch (error) {
+          throw fenceOwner(ownerRecordValue, error);
+        }
+        if (opened.outcome === 'OPENED') {
+          armDirectOwner(ownerRecordValue, opened.owner);
+        } else if (opened.outcome === 'NO_SLOT') {
+          ownerRecordValue.feedState.enterDegraded('NO_SLOT');
+          ownerRecordValue.mode = 'degraded';
+        } else if (
+          opened.closeDisposition === 'KNOWN_CLOSED'
+          && !ownUnknownDisposition(opened.error)
+        ) {
+          ownerRecordValue.feedState.enterDegraded('KNOWN_UNAVAILABLE');
+          ownerRecordValue.mode = 'degraded';
+        } else {
+          throw fenceOwner(ownerRecordValue, opened.error);
+        }
+      }
+
+      if (performStartupRefresh) {
+        await invoke(record.withWriterTurn, [
+          startupAdmission,
+          (writerTurn) => ensureProjectionCurrentInternal(startupAdmissionRecord, writerTurn),
+        ]);
+      }
+      ownerRecordValue.state = 'active';
+      ownerRecordValue.accepting = true;
+    } catch (error) {
+      if (!ownerRecordValue.fencedError) {
+        ownerRecordValue.fatalError = ownerRecordValue.fatalError || error;
+        ownerRecordValue.state = 'failed';
+      }
+      throw error;
+    } finally {
+      releaseAdmission(startupAdmission);
+    }
+  }
+
   const lifecycle = {
     createOwner(exactIdentity) {
       const lifecycleRecordValue = lifecycleRecord(this);
@@ -1055,79 +1354,13 @@ function createManuscriptFreshnessLifecycle(options) {
     async start(owner, exactIdentity) {
       const lifecycleRecordValue = lifecycleRecord(this);
       const ownerRecordValue = ownerRecord(lifecycleRecordValue, owner);
-      if (ownerRecordValue.startCalled) invalid('freshness owner start is exact-once');
-      if (ownerRecordValue.state !== 'inert') invalid('freshness owner is not inert');
-      if (ownerRecordValue.identity.exactIdentity !== exactIdentity) {
-        invalid('first start must consume the original registry identity reference');
-      }
-      ownerRecordValue.startCalled = true;
-      ownerRecordValue.state = 'starting';
-      const startupAdmission = mintAdmission(ownerRecordValue, true);
-      const startupAdmissionRecord = admissionRecords.get(startupAdmission);
-      startupAdmissionRecord.authority = startupAdmission;
-      try {
-        const verifiedBasis = await invoke(
-          lifecycleRecordValue.verifyBeforeFeedStart,
-          [exactIdentity],
-        );
-        const exactFeedIdentity = startBasis(verifiedBasis);
-        const assertedIdentity = invoke(
-          lifecycleRecordValue.assertFeedIdentity,
-          [exactFeedIdentity],
-        );
-        if (assertedIdentity !== exactFeedIdentity) {
-          invalid('feedAdapter.assertIdentity must return the same identity reference');
-        }
-        ownerRecordValue.feedIdentity = exactFeedIdentity;
+      return startOwner(ownerRecordValue, exactIdentity, true);
+    },
 
-        const capability = invoke(lifecycleRecordValue.notificationRead, []);
-        if (typeof capability !== 'boolean') {
-          invalid('notificationCapability.read must synchronously return boolean');
-        }
-        if (!capability) {
-          ownerRecordValue.feedState.enterDegraded('CAPABILITY_DISABLED');
-          ownerRecordValue.mode = 'degraded';
-        } else {
-          let opened;
-          try {
-            opened = validateOpenResult(invoke(
-              lifecycleRecordValue.tryOpen,
-              [exactFeedIdentity],
-            ));
-          } catch (error) {
-            throw fenceOwner(ownerRecordValue, error);
-          }
-          if (opened.outcome === 'OPENED') {
-            armDirectOwner(ownerRecordValue, opened.owner);
-          } else if (opened.outcome === 'NO_SLOT') {
-            ownerRecordValue.feedState.enterDegraded('NO_SLOT');
-            ownerRecordValue.mode = 'degraded';
-          } else if (
-            opened.closeDisposition === 'KNOWN_CLOSED'
-            && !ownUnknownDisposition(opened.error)
-          ) {
-            ownerRecordValue.feedState.enterDegraded('KNOWN_UNAVAILABLE');
-            ownerRecordValue.mode = 'degraded';
-          } else {
-            throw fenceOwner(ownerRecordValue, opened.error);
-          }
-        }
-
-        await invoke(lifecycleRecordValue.withWriterTurn, [
-          startupAdmission,
-          (writerTurn) => ensureProjectionCurrentInternal(startupAdmissionRecord, writerTurn),
-        ]);
-        ownerRecordValue.state = 'active';
-        ownerRecordValue.accepting = true;
-      } catch (error) {
-        if (!ownerRecordValue.fencedError) {
-          ownerRecordValue.fatalError = ownerRecordValue.fatalError || error;
-          ownerRecordValue.state = 'failed';
-        }
-        throw error;
-      } finally {
-        releaseAdmission(startupAdmission);
-      }
+    async startOrphan(owner, exactIdentity) {
+      const lifecycleRecordValue = lifecycleRecord(this);
+      const ownerRecordValue = ownerRecord(lifecycleRecordValue, owner);
+      return startOwner(ownerRecordValue, exactIdentity, false);
     },
 
     async assertSameBinding(owner, exactIdentity) {
@@ -1197,6 +1430,7 @@ function createManuscriptFreshnessLifecycle(options) {
 
 module.exports = {
   createManuscriptFreshnessLifecycle,
+  createProductWriteFreshness,
   ensureProjectionCurrent,
   ensureReadableProjection,
 };

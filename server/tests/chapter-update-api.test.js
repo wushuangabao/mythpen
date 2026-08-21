@@ -75,13 +75,18 @@ test('chapter writes use stable ids and stale versions cannot overwrite accepted
     .filter((event) => event.type === 'sqlite.publish.prepared').length;
   const preciseUpdate = await callApi(baseUrl, `/${project}/chapters/1`, {
     method: 'PUT',
-    body: { chapter_id: first.body.id, title: 'Saved volume one chapter', content: 'Saved content' },
+    body: {
+      chapter_id: first.body.id,
+      title: 'Saved volume one chapter',
+      content: 'Saved content',
+      summary: 'Saved summary',
+    },
   });
   assert.equal(preciseUpdate.status, 200);
   assert.equal(preciseUpdate.body.id, first.body.id);
   assert.deepEqual(
-    projectDb.prepare('SELECT title, content FROM chapters WHERE id = ?').get(first.body.id),
-    { title: 'Saved volume one chapter', content: 'Saved content' },
+    projectDb.prepare('SELECT title, content, summary FROM chapters WHERE id = ?').get(first.body.id),
+    { title: 'Saved volume one chapter', content: 'Saved content', summary: 'Saved summary' },
   );
   assert.deepEqual(
     projectDb.prepare('SELECT title, content FROM chapters WHERE id = ?').get(second.body.id),

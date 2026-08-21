@@ -392,7 +392,7 @@ export function EditorToolbar() {
 
     try {
       const controller = aiApi.continueWriting(
-        ch.id,
+        ch.chapterUid || ch.id,
         context,
         project,
         () => {}, // chunk handler — no-op for toolbar (streaming handled server-side)
@@ -409,7 +409,7 @@ export function EditorToolbar() {
                 useChapterStore.getState().currentChapter?.id === ch.id
               const appliedSavedContent =
                 stillViewingTarget &&
-                data?.chapterId === ch.id &&
+                (data?.chapterId === ch.id || (ch.chapterUid !== undefined && data?.chapterUid === ch.chapterUid)) &&
                 typeof data.chapterContent === 'string' &&
                 applyPersistedChapterContent(
                   project,
@@ -571,7 +571,7 @@ export function EditorToolbar() {
 
     try {
       const controller = aiApi.polishChapter(
-        ch.id,
+        ch.chapterUid || ch.id,
         project,
         () => {},
         (data) => {
@@ -582,6 +582,7 @@ export function EditorToolbar() {
               const active = useChapterStore.getState().currentChapter
               if (
                 data?.revision &&
+                data.revision.status === 'pending' &&
                 active?.id === ch.id &&
                 useProjectStore.getState().currentProject === project &&
                 useChapterStore.getState().projectName === project

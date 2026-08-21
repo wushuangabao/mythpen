@@ -16,6 +16,7 @@ const {
   createCreationDirectoryPlan,
   createProjectRootProbe,
   ensureCreationDirectories,
+  verifyCreationDirectories,
 } = require('./production-project-roots');
 const { ProjectCreationRouteStore } = require('./route-store');
 const { ManuscriptStore } = require('./store');
@@ -108,6 +109,7 @@ function createProductionCreationAdapter({
               dataRoot,
               databaseDisposition: disposition,
             });
+            state.directoryPlan = state.journal.read()?.directoryPlan ?? state.directoryPlan;
             return state.journal;
           },
         }),
@@ -182,7 +184,23 @@ function createProductionCreationAdapter({
               fileBoundary: fileBoundary.readCapability,
               journalAuthority: state.childJournal.journalAuthority(),
             });
-            return state.manuscriptStore.enumerateAndClassify(roots.projectBinding);
+            return Object.freeze({
+              enumeration: await state.manuscriptStore.enumerateAndClassify(roots.projectBinding),
+              lifecycleLockReceipt: roots.lifecycleLockReceipt,
+              lifecyclePlatformIdentity: roots.lifecyclePlatformIdentity,
+            });
+          },
+          verifyExisting(lifecycleLockReceipt) {
+            if (state.directoryPlan === null) {
+              recoveryRequired('Creation directory plan is unavailable for lifecycle verification');
+            }
+            const view = requireJournal().read();
+            return verifyCreationDirectories({
+              dataRoot,
+              directoryPlan: state.directoryPlan,
+              lifecycleLockReceipt,
+              projectUid: view.projectUid,
+            });
           },
         }),
         store: Object.freeze({
@@ -199,6 +217,15 @@ function createProductionCreationAdapter({
         database: Object.freeze({
           build(candidateInput) { return databasePort.buildCreationCandidate(candidateInput); },
           activate(activationInput) { return databasePort.activateCreation(activationInput); },
+          verifyActivationAfter({ creationContext }) {
+            return databasePort.inspectMigrationActivation({
+              migrationId: creationContext.creationId,
+              projectUid: creationContext.projectUid,
+              projectInstanceId: creationContext.projectInstanceId,
+              sourcePath: creationContext.finalPath,
+              targetGeneration: creationContext.targetGeneration,
+            });
+          },
         }),
         route: Object.freeze({
           prepareAbsentInstall(context) {

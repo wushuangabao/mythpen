@@ -859,9 +859,13 @@ function mintIntent(record, aggregate) {
   return intent;
 }
 
-function assertIntent(record, intent, kind) {
+function assertIntent(record, intent, kind = null) {
   const intentRecord = intentRecords.get(intent);
-  if (!intentRecord || intentRecord.owner !== record.owner || intentRecord.kind !== kind) {
+  if (
+    !intentRecord
+    || intentRecord.owner !== record.owner
+    || (kind !== null && intentRecord.kind !== kind)
+  ) {
     throw recoveryRequired('draft conflict intent authority is foreign');
   }
   return intentRecord;
@@ -959,8 +963,26 @@ class DraftConflictJournal {
     if (typeof uuidV4 !== 'function' || typeof clock !== 'function') {
       throw new TypeError('uuidV4 and clock are required functions');
     }
-    journalRecords.set(this, Object.freeze({
-      owner: Object.freeze({}),
+    const owner = Object.freeze({});
+    let record;
+    let intentAuthority;
+    intentAuthority = Object.freeze({
+      assert(intent) {
+        if (this !== intentAuthority) {
+          throw recoveryRequired('draft conflict intent authority receiver is foreign');
+        }
+        assertIntent(record, intent);
+        return intent;
+      },
+      describe(intent) {
+        if (this !== intentAuthority) {
+          throw recoveryRequired('draft conflict intent authority receiver is foreign');
+        }
+        return assertIntent(record, intent).data;
+      },
+    });
+    record = Object.freeze({
+      owner,
       binding,
       controlDirectory,
       control,
@@ -969,7 +991,9 @@ class DraftConflictJournal {
       projectionDisposition,
       uuidV4,
       clock,
-    }));
+      intentAuthority,
+    });
+    journalRecords.set(this, record);
   }
 
   async createConflict(input) {
@@ -1058,6 +1082,10 @@ class DraftConflictJournal {
         || left.detected.conflictId.localeCompare(right.detected.conflictId)
       ))
       .map(viewOf));
+  }
+
+  intentAuthority() {
+    return journalRecords.get(this).intentAuthority;
   }
 
   async beginAccept(input) {

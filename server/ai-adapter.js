@@ -155,7 +155,7 @@ async function executeToolCallsWithAbort(toolCalls, streamContext, execute, call
 
     let result;
     try {
-      result = execute(toolCall);
+      result = await execute(toolCall);
     } catch (error) {
       if (isManuscriptPersistenceError(error)) throw error;
       result = { error: error.message };

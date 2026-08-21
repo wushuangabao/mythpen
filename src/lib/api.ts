@@ -7,6 +7,7 @@ import { runProjectRequest, suspendProjectRequests } from './projectRequestGate.
 import { parseWorldTags } from './worldTags.ts'
 
 const MANUSCRIPT_REQUEST_ID_HEADER = 'X-Mythpen-Request-Id'
+const MANUSCRIPT_UID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 export interface ManuscriptBaseWitness {
   expected_data_version: number
@@ -21,8 +22,56 @@ export interface FilesBetaProjectStatus {
   project_instance_id: string | null
 }
 
+export interface ManuscriptDraftConflict {
+  baseGeneration: number
+  baseRawSha256: string
+  childJournalId: string | null
+  conflictId: string
+  createdAt: number
+  decisionEpoch: number
+  decisionAvailable: boolean
+  draftByteSize: number
+  draftRawSha256: string
+  externalByteSize: number
+  externalRawSha256: string
+  fieldMask: string[]
+  resource: {
+    domain: 'body' | 'sidecar' | 'volume_metadata' | 'structure'
+    kind: 'chapter' | 'volume' | 'manuscript'
+    uid: string
+  }
+  state:
+    | 'backup_durable'
+    | 'decision_ready'
+    | 'resolve_accept_intent'
+    | 'resolve_apply_intent'
+    | 'resolve_apply_aborted'
+    | 'resolved_accept_external'
+    | 'resolved_apply_draft'
+    | 'superseded'
+    | 'archived'
+  supersedes: string | null
+  backupAvailable: boolean
+}
+
 function manuscriptRequestId(): string {
   return globalThis.crypto.randomUUID()
+}
+
+function manuscriptResourceIdentity(value: number | string, label: string): number | string {
+  if (typeof value === 'string') {
+    if (!MANUSCRIPT_UID_PATTERN.test(value)) throw new TypeError(`${label} must be a canonical lowercase UUIDv4`)
+    return value
+  }
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${label} must be a positive safe integer`)
+  return value
+}
+
+function stableManuscriptUid(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !MANUSCRIPT_UID_PATTERN.test(value)) {
+    throw new TypeError(`${label} must be a canonical lowercase UUIDv4`)
+  }
+  return value
 }
 
 async function projectManuscriptBaseWitness(project: string): Promise<ManuscriptBaseWitness | undefined> {
@@ -120,13 +169,20 @@ function projectDeleteRequest(project: string, expectedInstanceId: string) {
  */
 function chapterDeleteRequest(
   project: string,
-  num: number,
-  chapterId: number,
-  volumeId: number,
-  expectedInstanceId: string,
+  chapterIdentity: number | string,
+  chapterIdOrExpectedInstanceId: number | string,
+  volumeId?: number,
+  numericExpectedInstanceId?: string,
 ) {
+  const stable = typeof chapterIdentity === 'string'
+  const expectedInstanceId = stable ? chapterIdOrExpectedInstanceId : numericExpectedInstanceId
   if (typeof expectedInstanceId !== 'string' || !expectedInstanceId.trim()) {
     return Promise.reject(new Error('Project instance is not loaded'))
+  }
+  const identity = manuscriptResourceIdentity(chapterIdentity, 'chapter identity')
+  if (!stable) {
+    manuscriptResourceIdentity(chapterIdOrExpectedInstanceId as number, 'chapter id')
+    manuscriptResourceIdentity(volumeId as number, 'volume id')
   }
   return runProjectRequest(project, async () => {
     const headers = { [PROJECT_INSTANCE_HEADER]: expectedInstanceId }
@@ -134,7 +190,9 @@ function chapterDeleteRequest(
       base_witness?: ManuscriptBaseWitness | null
     }
     return performRequest(
-      `/${encodeURIComponent(project)}/chapters/${num}?chapter_id=${chapterId}&volume_id=${volumeId}`,
+      stable
+        ? `/${encodeURIComponent(project)}/chapters/${encodeURIComponent(String(identity))}`
+        : `/${encodeURIComponent(project)}/chapters/${identity}?chapter_id=${chapterIdOrExpectedInstanceId}&volume_id=${volumeId}`,
       {
         method: 'DELETE',
         headers: { ...headers, [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
@@ -212,31 +270,61 @@ export const projectsApi = {
 
 // ─── Chapters ───
 
+function deleteChapter(project: string, chapterUid: string, expectedInstanceId: string): Promise<any>
+function deleteChapter(
+  project: string,
+  num: number,
+  chapterId: number,
+  volumeId: number,
+  expectedInstanceId: string,
+): Promise<any>
+function deleteChapter(
+  project: string,
+  chapterIdentity: number | string,
+  chapterIdOrExpectedInstanceId: number | string,
+  volumeId?: number,
+  expectedInstanceId?: string,
+): Promise<any> {
+  return chapterDeleteRequest(project, chapterIdentity, chapterIdOrExpectedInstanceId, volumeId, expectedInstanceId)
+}
+
 export const chaptersApi = {
   list: (project: string) => projectRequest(project, `/${encodeURIComponent(project)}/chapters`),
-  get: (project: string, num: number, volumeId?: number) =>
-    projectRequest(
+  get: (project: string, chapterIdentity: number | string, volumeId?: number) => {
+    const identity = manuscriptResourceIdentity(chapterIdentity, 'chapter identity')
+    if (typeof identity === 'string' && volumeId !== undefined) {
+      throw new TypeError('stable chapter identity does not accept volume id')
+    }
+    return projectRequest(
       project,
-      `/${encodeURIComponent(project)}/chapters/${num}${volumeId ? `?volume_id=${volumeId}` : ''}`,
-    ),
+      `/${encodeURIComponent(project)}/chapters/${encodeURIComponent(String(identity))}${volumeId ? `?volume_id=${manuscriptResourceIdentity(volumeId, 'volume id')}` : ''}`,
+    )
+  },
   update: (
     project: string,
-    num: number,
+    chapterIdentity: number | string,
     data: any,
     chapterId?: number,
     expectedDataVersion?: number,
     baseWitness?: ManuscriptBaseWitness,
-  ) =>
-    projectRequest(project, `/${encodeURIComponent(project)}/chapters/${num}`, {
+  ) => {
+    const identity = manuscriptResourceIdentity(chapterIdentity, 'chapter identity')
+    if (typeof identity === 'string' && chapterId !== undefined) {
+      throw new TypeError('stable chapter identity does not accept numeric chapter id')
+    }
+    return projectRequest(project, `/${encodeURIComponent(project)}/chapters/${encodeURIComponent(String(identity))}`, {
       method: 'PUT',
       headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
       body: {
         ...data,
-        ...(chapterId === undefined ? {} : { chapter_id: chapterId }),
+        ...(typeof identity === 'number' && chapterId !== undefined
+          ? { chapter_id: manuscriptResourceIdentity(chapterId, 'chapter id') }
+          : {}),
         ...(expectedDataVersion === undefined ? {} : { expected_data_version: expectedDataVersion }),
         ...(baseWitness === undefined ? {} : { base_witness: baseWitness }),
       },
-    }),
+    })
+  },
   create: async (project: string, data: any) => {
     const baseWitness = await projectManuscriptBaseWitness(project)
     return projectRequest(project, `/${encodeURIComponent(project)}/chapters`, {
@@ -245,32 +333,43 @@ export const chaptersApi = {
       body: { ...data, ...(baseWitness ? { base_witness: baseWitness } : {}) },
     })
   },
-  move: async (project: string, chapterId: number, targetVolumeId: number | null, targetPosition: number) => {
+  move: async (project: string, chapterUid: string, targetVolumeUid: string | null, targetPosition: number) => {
+    const identity = stableManuscriptUid(chapterUid, 'chapter uid')
+    if (!Number.isSafeInteger(targetPosition) || targetPosition < 0) {
+      throw new TypeError('target position must be a non-negative safe integer')
+    }
+    const targetIdentity = targetVolumeUid === null ? null : stableManuscriptUid(targetVolumeUid, 'target volume uid')
     const baseWitness = await projectManuscriptBaseWitness(project)
-    return projectRequest(project, `/${encodeURIComponent(project)}/chapters/${chapterId}/move`, {
-      method: 'PUT',
-      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
-      body: {
-        target_volume_id: targetVolumeId,
-        target_position: targetPosition,
-        ...(baseWitness ? { base_witness: baseWitness } : {}),
+    return projectRequest(
+      project,
+      `/${encodeURIComponent(project)}/chapters/${encodeURIComponent(String(identity))}/move`,
+      {
+        method: 'PUT',
+        headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+        body: {
+          target_volume_uid: targetIdentity,
+          target_position: targetPosition,
+          ...(baseWitness ? { base_witness: baseWitness } : {}),
+        },
       },
-    })
+    )
   },
-  reorder: async (project: string, containerVolumeId: number | null, chapterIds: number[]) => {
+  reorder: async (project: string, containerVolumeUid: string | null, chapterUids: string[]) => {
+    const containerIdentity =
+      containerVolumeUid === null ? null : stableManuscriptUid(containerVolumeUid, 'container volume uid')
+    const identities = chapterUids.map((uid) => stableManuscriptUid(uid, 'chapter uid'))
     const baseWitness = await projectManuscriptBaseWitness(project)
     return projectRequest(project, `/${encodeURIComponent(project)}/chapters/order`, {
       method: 'PUT',
       headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
       body: {
-        container_volume_id: containerVolumeId,
-        chapter_ids: chapterIds,
+        container_volume_uid: containerIdentity,
+        chapter_uids: identities,
         ...(baseWitness ? { base_witness: baseWitness } : {}),
       },
     })
   },
-  delete: (project: string, num: number, chapterId: number, volumeId: number, expectedInstanceId: string) =>
-    chapterDeleteRequest(project, num, chapterId, volumeId, expectedInstanceId),
+  delete: deleteChapter,
 }
 
 export type RevisionDecision = 'accepted' | 'rejected'
@@ -278,10 +377,11 @@ export type RevisionDecision = 'accepted' | 'rejected'
 export interface ChapterRevision {
   id: number
   chapterId: number
+  chapterUid?: string
   baseContent: string
   proposedContent: string
   decisions: Record<string, RevisionDecision>
-  status: 'pending' | 'accepted' | 'rejected' | 'superseded'
+  status: 'pending' | 'accepted' | 'rejected' | 'superseded' | 'stale'
   previousChapterStatus?: string | null
   createdAt: string
   updatedAt: string
@@ -291,12 +391,14 @@ export interface ChapterRevision {
 export interface ChapterRevisionResponse {
   revision: ChapterRevision | null
   rebased?: boolean
+  stale?: boolean
   chapterDataVersion?: number
 }
 
 export interface ChapterRevisionApplyResponse {
   success?: boolean
   chapterId?: number
+  chapterUid?: string
   content?: string
   wordCount?: number
   status?: string
@@ -309,49 +411,107 @@ export interface ChapterRevisionApplyResponse {
 export interface ContinuationDoneResponse {
   success: true
   content: string
-  chapterId: number
+  chapterId?: number
+  chapterUid?: string
   chapterContent: string
   wordCount: number
   dataVersion?: number
 }
 
 export const chapterRevisionsApi = {
-  getActive: (project: string, chapterId: number) =>
-    projectRequest(
+  getActive: (project: string, chapterIdentity: number | string) => {
+    const identity = manuscriptResourceIdentity(chapterIdentity, 'chapter identity')
+    return projectRequest(
       project,
-      `/${encodeURIComponent(project)}/chapters/${chapterId}/revisions/active`,
-    ) as Promise<ChapterRevisionResponse>,
-  updateDecisions: (
+      `/${encodeURIComponent(project)}/chapters/${encodeURIComponent(String(identity))}/revisions/active`,
+    ) as Promise<ChapterRevisionResponse>
+  },
+  create: async (project: string, chapterIdentity: number | string, baseContent: string, proposedContent: string) => {
+    const identity = manuscriptResourceIdentity(chapterIdentity, 'chapter identity')
+    // Keep the generation-start read and mutation inside one tracked project
+    // request and on the exact instance token captured before either request.
+    const instanceHeaders = getProjectInstanceHeaders(project)
+    return runProjectRequest(project, async () => {
+      const witnessPath =
+        typeof identity === 'string'
+          ? `/${encodeURIComponent(project)}/chapters/${encodeURIComponent(identity)}`
+          : `/${encodeURIComponent(project)}/manuscript/witness`
+      const witnessResult = (await performRequest(witnessPath, {
+        headers: instanceHeaders,
+      })) as { base_witness?: ManuscriptBaseWitness | null }
+      const baseWitness = witnessResult.base_witness ?? undefined
+      if (typeof identity === 'string' && baseWitness === undefined) {
+        throw new TypeError('files chapter response must include its chapter-scoped base witness')
+      }
+      return performRequest(
+        `/${encodeURIComponent(project)}/chapters/${encodeURIComponent(String(identity))}/revisions`,
+        {
+          method: 'POST',
+          headers: {
+            ...instanceHeaders,
+            [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId(),
+          },
+          body: {
+            baseContent,
+            proposedContent,
+            ...(baseWitness ? { base_witness: baseWitness } : {}),
+          },
+        },
+      ) as Promise<ChapterRevisionResponse>
+    })
+  },
+  updateDecisions: async (
     project: string,
     revisionId: number,
     decisions: Record<string, RevisionDecision>,
     expectedBaseContent: string,
-  ) =>
-    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}`, {
+  ) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}`, {
       method: 'PATCH',
-      body: { decisions, expectedBaseContent },
-    }) as Promise<ChapterRevisionResponse>,
-  acceptAll: (project: string, revisionId: number, expectedBaseContent: string) =>
-    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/accept-all`, {
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: {
+        decisions,
+        expectedBaseContent,
+        ...(baseWitness ? { base_witness: baseWitness } : {}),
+      },
+    }) as Promise<ChapterRevisionResponse>
+  },
+  acceptAll: async (project: string, revisionId: number, expectedBaseContent: string) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/accept-all`, {
       method: 'POST',
-      body: { expectedBaseContent },
-    }) as Promise<ChapterRevisionApplyResponse>,
-  rejectAll: (project: string, revisionId: number, expectedBaseContent: string) =>
-    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/reject-all`, {
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { expectedBaseContent, ...(baseWitness ? { base_witness: baseWitness } : {}) },
+    }) as Promise<ChapterRevisionApplyResponse>
+  },
+  rejectAll: async (project: string, revisionId: number, expectedBaseContent: string) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/reject-all`, {
       method: 'POST',
-      body: { expectedBaseContent },
-    }) as Promise<ChapterRevisionApplyResponse>,
-  finalize: (
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { expectedBaseContent, ...(baseWitness ? { base_witness: baseWitness } : {}) },
+    }) as Promise<ChapterRevisionApplyResponse>
+  },
+  finalize: async (
     project: string,
     revisionId: number,
     content: string,
     expectedBaseContent: string,
     expectedDecisions: Record<string, RevisionDecision>,
-  ) =>
-    projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/finalize`, {
+  ) => {
+    const baseWitness = await projectManuscriptBaseWitness(project)
+    return projectRequest(project, `/${encodeURIComponent(project)}/revisions/${revisionId}/finalize`, {
       method: 'POST',
-      body: { content, expectedBaseContent, expectedDecisions },
-    }) as Promise<ChapterRevisionApplyResponse>,
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: {
+        content,
+        expectedBaseContent,
+        expectedDecisions,
+        ...(baseWitness ? { base_witness: baseWitness } : {}),
+      },
+    }) as Promise<ChapterRevisionApplyResponse>
+  },
 }
 
 // ─── Volumes ───
@@ -366,28 +526,145 @@ export const volumesApi = {
       body: { ...data, ...(baseWitness ? { base_witness: baseWitness } : {}) },
     })
   },
-  update: async (project: string, volumeId: number, data: { title?: string; summary?: string }) => {
+  update: async (project: string, volumeIdentity: number | string, data: { title?: string; summary?: string }) => {
+    const identity = manuscriptResourceIdentity(volumeIdentity, 'volume identity')
     const baseWitness = await projectManuscriptBaseWitness(project)
-    return projectRequest(project, `/${encodeURIComponent(project)}/volumes/${volumeId}`, {
+    return projectRequest(project, `/${encodeURIComponent(project)}/volumes/${encodeURIComponent(String(identity))}`, {
       method: 'PUT',
       headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
       body: { ...data, ...(baseWitness ? { base_witness: baseWitness } : {}) },
     })
   },
-  reorder: async (project: string, volumeIds: number[]) => {
+  reorder: async (project: string, volumeUids: string[]) => {
+    const identities = volumeUids.map((uid) => stableManuscriptUid(uid, 'volume uid'))
     const baseWitness = await projectManuscriptBaseWitness(project)
     return projectRequest(project, `/${encodeURIComponent(project)}/volumes/order`, {
       method: 'PUT',
       headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
-      body: { volume_ids: volumeIds, ...(baseWitness ? { base_witness: baseWitness } : {}) },
+      body: {
+        volume_uids: identities,
+        ...(baseWitness ? { base_witness: baseWitness } : {}),
+      },
     })
   },
-  delete: async (project: string, volumeId: number) => {
+  delete: async (project: string, volumeIdentity: number | string) => {
+    const identity = manuscriptResourceIdentity(volumeIdentity, 'volume identity')
     const baseWitness = await projectManuscriptBaseWitness(project)
-    return projectRequest(project, `/${encodeURIComponent(project)}/volumes/${volumeId}`, {
+    return projectRequest(project, `/${encodeURIComponent(project)}/volumes/${encodeURIComponent(String(identity))}`, {
       method: 'DELETE',
       headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
       body: baseWitness ? { base_witness: baseWitness } : {},
+    })
+  },
+}
+
+export type ManuscriptOrphanKind = 'chapter' | 'volume'
+
+export interface ManuscriptOrphanRequest {
+  kind: ManuscriptOrphanKind
+  uid: string
+}
+
+function exactManuscriptOrphanRequest(value: ManuscriptOrphanRequest): ManuscriptOrphanRequest {
+  if (!isPlainJsonObject(value)) throw new TypeError('orphan request must be an object')
+  const keys = Object.keys(value)
+  if (keys.length !== 2 || !keys.includes('kind') || !keys.includes('uid')) {
+    throw new TypeError('orphan request must contain only kind and uid')
+  }
+  if (value.kind !== 'chapter' && value.kind !== 'volume') {
+    throw new TypeError('orphan kind must be chapter or volume')
+  }
+  return Object.freeze({ kind: value.kind, uid: stableManuscriptUid(value.uid, 'orphan uid') })
+}
+
+async function postManuscriptOrphanAction(
+  project: string,
+  actionPath: 'ignore-in-place' | 'revoke-ignore',
+  requestBody: ManuscriptOrphanRequest,
+) {
+  const body = exactManuscriptOrphanRequest(requestBody)
+  return projectRequest(project, `/${encodeURIComponent(project)}/manuscript/orphans/${actionPath}`, {
+    method: 'POST',
+    headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+    body,
+  })
+}
+
+export const manuscriptOrphansApi = {
+  ignoreInPlace: (project: string, requestBody: ManuscriptOrphanRequest) =>
+    postManuscriptOrphanAction(project, 'ignore-in-place', requestBody),
+  revokeIgnore: (project: string, requestBody: ManuscriptOrphanRequest) =>
+    postManuscriptOrphanAction(project, 'revoke-ignore', requestBody),
+}
+
+function draftConflictDecisionEpoch(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
+    throw new TypeError('draft conflict decision epoch must be a non-negative safe integer')
+  }
+  return value
+}
+
+function draftConflictPath(project: string, conflictId: string, action?: string): string {
+  const stableConflictId = stableManuscriptUid(conflictId, 'draft conflict id')
+  const suffix = action === undefined ? '' : `/${action}`
+  return `/${encodeURIComponent(project)}/manuscript/draft-conflicts/${stableConflictId}${suffix}`
+}
+
+export const manuscriptDraftConflictsApi = {
+  list: (project: string) =>
+    projectRequest(project, `/${encodeURIComponent(project)}/manuscript/draft-conflicts`) as Promise<
+      ManuscriptDraftConflict[]
+    >,
+  copyBackup: (project: string, conflictId: string) =>
+    projectRequest(project, draftConflictPath(project, conflictId, 'copy-backup'), {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: {},
+    }) as Promise<{ filename: string }>,
+  acceptExternal: (project: string, conflictId: string, decisionEpoch: number) =>
+    projectRequest(project, draftConflictPath(project, conflictId, 'accept-external'), {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { decision_epoch: draftConflictDecisionEpoch(decisionEpoch) },
+    }),
+  applySavedDraft: (project: string, conflictId: string, decisionEpoch: number) =>
+    projectRequest(project, draftConflictPath(project, conflictId, 'apply-saved-draft'), {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body: { decision_epoch: draftConflictDecisionEpoch(decisionEpoch) },
+    }),
+}
+
+export type ManuscriptIgnoredReferenceAction = 'ignored.preserve_move_to_unassigned' | 'ignored.detach_reference'
+
+export interface ManuscriptIgnoredReferenceRequest {
+  action: ManuscriptIgnoredReferenceAction
+  uid: string
+}
+
+function exactManuscriptIgnoredReferenceRequest(
+  value: ManuscriptIgnoredReferenceRequest,
+): ManuscriptIgnoredReferenceRequest {
+  if (!isPlainJsonObject(value)) throw new TypeError('ignored reference request must be an object')
+  const keys = Object.keys(value)
+  if (keys.length !== 2 || !keys.includes('action') || !keys.includes('uid')) {
+    throw new TypeError('ignored reference request must contain only action and uid')
+  }
+  if (value.action !== 'ignored.preserve_move_to_unassigned' && value.action !== 'ignored.detach_reference')
+    throw new TypeError('ignored reference action is unsupported')
+  return Object.freeze({
+    action: value.action,
+    uid: stableManuscriptUid(value.uid, 'ignored chapter uid'),
+  })
+}
+
+export const manuscriptIgnoredApi = {
+  updateReference: async (project: string, requestBody: ManuscriptIgnoredReferenceRequest) => {
+    const body = exactManuscriptIgnoredReferenceRequest(requestBody)
+    return projectRequest(project, `/${encodeURIComponent(project)}/manuscript/ignored/reference`, {
+      method: 'POST',
+      headers: { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() },
+      body,
     })
   },
 }
@@ -651,7 +928,7 @@ export const aiApi = {
   },
 
   continueWriting: (
-    chapterId: number,
+    chapterIdentity: number | string,
     context: string,
     project: string,
     onChunk: (t: string) => void,
@@ -660,11 +937,21 @@ export const aiApi = {
   ) => {
     const controller = new AbortController()
     let finished = false
+    const identity = manuscriptResourceIdentity(chapterIdentity, 'AI chapter identity')
+    const stable = typeof identity === 'string'
     runProjectRequest(project, () =>
       backendFetch('/ai/continue', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
-        body: JSON.stringify({ chapterId, context, project }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...getProjectInstanceHeaders(project),
+          ...(stable ? { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() } : {}),
+        },
+        body: JSON.stringify({
+          ...(stable ? { chapterUid: identity } : { chapterId: identity }),
+          context,
+          project,
+        }),
         signal: controller.signal,
       }).then(async (response) => {
         await ensureResponseOk(response)
@@ -688,7 +975,7 @@ export const aiApi = {
   },
 
   polishChapter: (
-    chapterId: number,
+    chapterIdentity: number | string,
     project: string,
     onChunk: (t: string) => void,
     onEnd: (data?: { revision?: ChapterRevision; unchanged?: boolean; rebased?: boolean }) => void,
@@ -696,11 +983,17 @@ export const aiApi = {
   ) => {
     const controller = new AbortController()
     let finished = false
+    const identity = manuscriptResourceIdentity(chapterIdentity, 'AI chapter identity')
+    const stable = typeof identity === 'string'
     runProjectRequest(project, () =>
       backendFetch('/ai/polish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getProjectInstanceHeaders(project) },
-        body: JSON.stringify({ chapterId, project }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...getProjectInstanceHeaders(project),
+          ...(stable ? { [MANUSCRIPT_REQUEST_ID_HEADER]: manuscriptRequestId() } : {}),
+        },
+        body: JSON.stringify(stable ? { chapterUid: identity, project } : { chapterId: identity, project }),
         signal: controller.signal,
       }).then(async (response) => {
         await ensureResponseOk(response)
