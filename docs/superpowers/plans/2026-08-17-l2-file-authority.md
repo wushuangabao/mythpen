@@ -28,13 +28,13 @@
 Stage 0: Task 1A 安全建立 schema 11/native 基线
   └─ Task 2: 固定 L2 合同与 schema 12 离线描述
           ├─ Task 3: ManuscriptStore
-          ├─ Task 4: 路由与活跃投影
+          ├─ Task 4: 纯只读 ActiveManuscriptProjection
           Task 3 + Task 4
               └─ Task 5: SQLiteProjectionStore
           Task 3 + Task 5
               └─ Task 6: FilePublicationJournal
                   └─ Task 7: ManuscriptService 领域命令与共享 UID reservation
-          Task 4 + Task 6
+          Task 6
               └─ Task 8: lifecycle lease/session admission
           Task 3 + Task 5 + Task 6 + Task 8
               └─ Task 9: direct feed/freshness
@@ -259,21 +259,22 @@ function deriveVolumePath(paths, volumeUid) {}
 function deriveChapterPaths(paths, chapterUid) {}
 function deriveControlledFileRef({ role, projectUid, volumeUid, chapterUid }) {}
 function classifyTreeEntry({ directoryRole, actualName }) {}
+function createDirectoryNameIndex({ paths, directoryRole, parentIdentity, scanEpoch, actualNames }) {}
 function parseCanonicalJson({ role, bytes, expectedUid }) {}
 function serializeCanonicalJson(role, value) {}
 function inspectMarkdown(bytes) {}
 function createCapacityAccumulator(limits, observer) {}
 
 class ManuscriptStore {
+  constructor({ dataRoot, fileBoundary, journalAuthority, limits, capacityObserver }) {}
   async enumerateAndClassify(identity) {}
-  async validateFull(identity, ignoredLedger) {}
+  async validateFull(identity, { ignoredLedger, lifecycleBasis }) {}
   async readControlledFile(identity, controlledFileRef) {}
-  async buildProjectionCandidate(snapshot, previousProjection) {}
-  async buildClosure(operation, activeProjection, ignoredLedger) {}
+  async buildProjectionCandidate(snapshot) {}
 }
 ```
 
-- [ ] 写路径测试：只接受规范小写 UUID；校验实际实名逐字节相等、case-fold 无碰撞、目录与文件非 reparse、普通文件 link count=1、规范 real path/物理身份稳定。
+- [ ] 写路径合同测试：只接受规范小写 UUID；每个目录只枚举一次并建立 module-branded name index，在线性时间内校验实际实名逐字节相等、case-fold/NFKC/尾随点空格无碰撞，并把 index 绑定到同一 paths、目录物理身份和 scan epoch；逐文件身份复核只能 O(1) 消费该 index，plain clone、跨目录和跨 epoch token 全部拒绝。目录/文件非 reparse、普通文件 link count=1、规范 real path/物理身份稳定由注入的 opaque file boundary 合同提供。
 - [ ] `controlledFileRef` 只能由 `role = manuscript | unassigned | volume_index | chapter_body | chapter_sidecar` 加已经通过 `assertCanonicalUuid` 的 project/volume/chapter UID 构造，或者使用模块内部 branded reference；`readControlledFile()` 及所有调用方不得接收、拼接或透传相对路径、文件名、glob 或目录映射。负向测试把看似规范的 caller path、分隔符别名和错误角色/UID 组合全部拒绝。
 - [ ] 固定目录布局与五种规范形状；识别 `<canonical>.<journal_id>.tmp` 为 journal candidate；孤儿与非受控残留分开，残留不读、不哈希、不改、不删。
 - [ ] 实现四类 JSON 的稳定键序、UTF-8 无 BOM、LF、两空格、末尾单换行、未知字段拒绝、重复 UID/成员拒绝、`format_version` 过高专门报错。
@@ -281,6 +282,8 @@ class ManuscriptStore {
 - [ ] 容量 accumulator 流式计数，超过任何维度立即返回包含 `dimension/observed/allowed` 的 `MANUSCRIPT_CONTENT_TOO_LARGE`；ignored 文件仍验证身份、大小并计量。提供只读 observer/counter seam，分别记录目录枚举数、身份 probe 数、内容打开数与累计字节；每个边界测试都断言第一次 `observed > allowed` 后不再枚举下一项、不再打开任何内容，单文件大小可由身份/metadata 证明时不得先打开超限文件。
 - [ ] `validateFull()` 验证索引闭包、唯一归属、章节资源对完整、卷/章节生命周期 UID 合并计数、journal candidate 所有权；外部新 UID/孤儿返回 `EXTERNAL_RESOURCE_CREATION_UNSUPPORTED`。
 - [ ] 为 80% 身份阈值产生持久诊断 warning，不因 tombstone 删除、ignored 文件删除或 revoke 释放容量。
+- [ ] Task 3 只实现 fail-closed 的 Store/边界合同与内存 fixture：`fileBoundary`、`journalAuthority` 在构造时固定为 opaque branded capability；缺失时拒绝，绝不回退到按路径 `node:fs` 打开。候选只有在 authority 同时绑定 project、journal ID、target ref 与实际候选名时才升格，其他同形文件降为 residue 且不读、不哈希。真实 Windows no-delete-share、open-reparse、handle-bound read/identity boundary 与 FilePublisher 共用实现，明确后移到 Task 6；Task 14B 只负责产品接线。
+- [ ] `buildProjectionCandidate()` 只返回同一 validated snapshot 的文件事实、顺序、positions、raw hashes、Markdown availability、ignored member observations、capacity/warnings；不分配本机整数 ID，不决定 tombstone/proposal/route/generation。命令相关的确定性 before/after closure 由 Task 7 扩展同一个 `ManuscriptStore`，本任务不提前猜领域命令。
 - [ ] 运行并提交：
 
 ```powershell
@@ -292,29 +295,18 @@ git commit -m "feat: add canonical manuscript store"
 
 ---
 
-## Task 4: 建立 route 真值、缓存重建与 ActiveManuscriptProjection
+## Task 4: 实现纯只读 ActiveManuscriptProjection
 
 **Depends on:** Task 2。
 
 **Files:**
 
-- Create: `server/manuscript/route-store.js`
 - Create: `server/manuscript/active-projection.js`
-- Modify: `server/recent-projects.js`
-- Modify: `server/db.js`
-- Create: `server/tests/manuscript-route-store.test.js`
 - Create: `server/tests/active-manuscript-projection.test.js`
-- Modify: `server/tests/recent-projects.test.js`
 
 **Interfaces:**
 
 ```js
-class ManuscriptRouteStore {
-  readRoute(projectDb) {} // missing key => sqlite
-  compareAndSwap(projectDb, expected, next, binding) {}
-  rebuildConfigCache(projectRegistry) {}
-}
-
 class ActiveManuscriptProjection {
   listVolumes(db, options) {}
   listChapters(db, options) {}
@@ -324,19 +316,19 @@ class ActiveManuscriptProjection {
 }
 ```
 
-- [ ] 测试缺失 route 键等价 `sqlite`；重复、非法组合或 `migrating` 无有效 journal 时返回 `MIGRATION_STATE_MISMATCH`。
-- [ ] route CAS 同时绑定 project UID、project instance、数据库/文章根物理身份和 projection generation；保留键只允许内部 capability 修改。
-- [ ] `config.db` 缓存删除、损坏或陈旧后可从所有项目数据库重建，不能反向覆盖项目 route 真值。
-- [ ] 所有活跃查询强制 `volumes.is_present=1`、`chapters.is_present=1` 且父卷为空或活跃；诊断接口用单独 capability 读取 tombstone。
-- [ ] 主身份改为稳定本机 `chapter_id`；旧 `volume_id + num` 路由只查活跃行，歧义显式拒绝；未分卷章节具备完整 CRUD/导出查询能力。
-- [ ] 阅读顺序、进度和 overdue 改用 `manuscript_position`，断言 `currentMax >= expected` 即 overdue。
+- [ ] 本任务只实现同步、纯只读投影；每次调用只消费调用方已完成 schema 12 admission 与 freshness gate 后交付的精确只读 query facade `db`，不在实例上持有连接。不读取 route，不安装/检查 schema，不验证 digest/transition/freshness，也不执行任何写入。
+- [ ] `listVolumes()` 只返回 `volumes.is_present=1`；`listChapters()`、`getChapter()` 与旧编号解析只返回 `chapters.is_present=1` 且父卷为空或 `volumes.is_present=1` 的行，并按 `chapter_position`/`manuscript_position` 提供稳定顺序。主身份是本机稳定 `chapter_id`；旧 `volume_id + num` 只解析活跃行，歧义显式拒绝。
+- [ ] 未分卷章节在本任务只具备 list/get/metadata export；完整 create/edit/delete 领域语义归 Task 7，产品 CRUD 接线归 Task 14B。
+- [ ] 不暴露 `includeTombstones` 或调用方可切换的过滤选项；tombstone/恢复诊断后移为独立 capability，不能借 ActiveManuscriptProjection 绕过活跃过滤。
+- [ ] `exportSnapshot()` 只返回冻结的 active metadata manifest（稳定 ID/UID、卷归属、sidecar 字段、word count、positions、raw hashes 与 content availability），不选择、读取、返回或拼接 `chapters.content`/正文 raw bytes。
+- [ ] 产品读取接线以及 progress/overdue 语义统一后移到 Task 14B；本任务不修改 `recent-projects.js`、产品查询或兼容缓存。
 - [ ] 运行并提交：
 
 ```powershell
-bun test server/tests/manuscript-route-store.test.js server/tests/active-manuscript-projection.test.js server/tests/recent-projects.test.js
+bun test server/tests/active-manuscript-projection.test.js
 git diff --check
-git add server/manuscript/route-store.js server/manuscript/active-projection.js server/recent-projects.js server/db.js server/tests/manuscript-route-store.test.js server/tests/active-manuscript-projection.test.js server/tests/recent-projects.test.js
-git commit -m "feat: add manuscript routing and active projection"
+git add server/manuscript/active-projection.js server/tests/active-manuscript-projection.test.js
+git commit -m "feat: add active manuscript projection"
 ```
 
 ---
@@ -353,18 +345,42 @@ git commit -m "feat: add manuscript routing and active projection"
 **Interfaces:**
 
 ```js
+const PROJECTION_BASIS_DOMAIN = "mythpen.manuscript.projection-basis";
+const PROJECTION_BASIS_VERSION = 1;
+function canonicalProjectionBasisDigest(basis) {}
+function canonicalIgnoredLedgerDigest(rows) {}
+
 class SQLiteProjectionStore {
-  readGeneration(db) {}
-  buildTarget({ snapshot, ignoredLedger, capacitySnapshot, proposalInvalidations }) {}
-  publish({ projectStore, expectedGeneration, targetGeneration, target, routeCas }) {}
+  buildTarget({
+    candidate,
+    currentProjection,
+    targetGeneration,
+    projectedAt,
+    ignoredLedger,
+    localIdentityPlan,
+  }) {}
+  validateTarget(target) {}
+  publish({ projectStore, target, routeCas }) {}
 }
+
+module.exports = {
+  SQLiteProjectionStore,
+  canonicalProjectionBasisDigest,
+  canonicalIgnoredLedgerDigest,
+};
 ```
 
-- [ ] 使用只记录 transaction/CAS/commit disposition 的 fake `projectStore` 写聚焦失败测试，覆盖 generation CAS 失败、事务 preflight 失败、commit disposition unknown、代码/meta/schema trigger digest 不一致与 schema too new；本任务不打开真实 NativeProjectStore，也不把 fake 结果称为 schema 12 live admission 证据。
-- [ ] 一个 target 必须同时包含正文、sidecar 字段、UID、tombstone、positions、raw hashes、ignored ledger 及成员状态、容量快照、proposal stale 变化和 projection generation。
-- [ ] full refresh 复用既有整数 ID；新 UID 分配新 ID；移除对象 tombstone；同 UID 再现复活；用两阶段 position 更新规避部分唯一索引冲突。
-- [ ] `chapters.content`、hash、word count 与 sidecar 字段必须源自同一已验证 snapshot，并在一个 NativeProjectStore 事务中可见。
-- [ ] migration 最终 publish 可额外原子 CAS `migrating → files`，测试不存在“投影已提交但路由未切换”或反向中间态。
+- [ ] Task 5 只实现纯的完整 target 编译器、纯 `validateTarget(target)` 与注入的 `projectStore.publishProjectionTarget({ target, routeCas })` 原子发布 port；使用只记录 preflight/transaction/CAS/commit disposition 的内存 fake 写聚焦测试，绝不 import、打开或伪造真实 NativeProjectStore/schema 12。代码/meta/observed schema trigger digest 不一致、schema too new、generation CAS 失败、transaction preflight 失败和 commit disposition unknown 在本任务都只是由 fake port 注入并验证原样传播，不能称为 schema 12 live admission 或真实 DML 证据。
+- [ ] `projection-store.js` 唯一导出 `canonicalProjectionBasisDigest(basis)` 与 `canonicalIgnoredLedgerDigest(rows)`；Task 5 fake、Task 10 ledger 和 Task 12 真实 adapter 都必须 import/调用，禁止复制 canonicalizer、排序或摘要 material。basis 根对象 exact own keys 固定为 `domain, version, sourceKind, baseGeneration, volumes, chapters, sqliteSequence, ignoredBeforeDigest, pendingProposals, basisDigest`，其中 `domain = "mythpen.manuscript.projection-basis"`、`version = 1`、两个 digest 都只能是小写 64-hex SHA-256；basis 摘要 material 包含除 `basisDigest` 自身外的全部字段。卷/章按同表稳定整数 `id`、pending proposals 按稳定整数 `revisionId` 再按 `chapterId` 排序；ledger 行按 `resource_kind + resource_uid` 排序并覆盖其 exact schema 12 标量/JSON 字符串值。重复 key/ID、额外/缺失 key、错误 domain/version/sourceKind、非 plain data或非规范值全部拒绝；输入数组排列不影响摘要，任一 material 值变化必须改变对应摘要。
+- [ ] `currentProjection` 是 exact、plain、deep-frozen 的 `{ projectUid, projectInstanceId, basis }` 快照；前两者是已 admission 项目的规范 UUID 绑定但不进入 basis digest。basis 是**紧凑依赖快照**而非第二份数据库：`sourceKind` 只能为 `schema11 | schema12 | empty`；schema11 volume exact `{ id, sortOrder }`、chapter exact `{ id, volumeId, num, bodyRawSha256, status }`；schema12 volume exact `{ id, uid, sortOrder, isPresent, deletedAt }`、chapter exact `{ id, uid, volumeId, num, isPresent, deletedAt, chapterPosition, manuscriptPosition, bodyRawSha256, status }`。schema11 source reader 对 `content` UTF-8 bytes 只计算一次 SHA-256 后立即丢弃正文，basis/journal 不保存旧正文；未列出的 `created_at/updated_at/data_version` 等本机列由 Task 12 在真实事务内原位保留，Task 5 不复制也不验证。`sqliteSequence` 只含规范化后的 `volumes`/`chapters` 两个 non-negative safe integer 值；`ignoredBeforeDigest` 只保存完整 before ledger 的 canonical digest（schema11/empty 使用规范空 ledger digest）；`pendingProposals` 只含 exact `{ revisionId, chapterId }` pending rows；`baseGeneration` 在 schema12 取 live generation，schema11/empty 固定为 `0`。`buildTarget()` 重算并比较 `basisDigest`；plain basis/identity 只供确定性编译，不能授权发布。
+- [ ] target 只保存一份新正文：active rows 是来自 candidate 的完整文件派生投影字段与 ID/UID/num/最终 positions；当前 active→absent 及既有 tombstone→仍 absent 使用 compact tombstone/retain ref（卷：`id, uid, isPresent=0, deletedAt`；章再含 `num, chapterPosition=null, manuscriptPosition=null`），不复制旧 title/content/sidecar/local columns。Task 12 根据 ref 只更新 tombstone/presence/position 字段并原位保留其余旧列；复活/active 行则从同一 candidate 更新投影字段。target 仍冻结 exact `projectUid`/`projectInstanceId`、basis+digest、base/target generation、`projectedAt`、raw hashes、controlled-file facts、完整 ignored after ledger、同 generation 容量快照和派生 proposal invalidations。Task 5 focused 另断言总正文 UTF-8 bytes 只来自 active target 一次，basis/tombstone refs 中不存在 `content` 或其他旧大字段。
+- [ ] `candidate` 必须把 `chapters.content`、availability、hash、word count、全部 sidecar 字段、positions、controlled-file facts 与容量快照绑定到同一个 Task 3 validated snapshot；`buildTarget()` 不重新读文件，也不接受调用方分别覆盖这些派生字段。输出只含可序列化 plain data，递归快照并冻结；相同输入逐字节 canonical 等价，便于 Task 6 持久冻结与恢复重放。
+- [ ] `buildTarget()` 不接受 caller 传入 `proposalInvalidations`。它只从 compact basis 的 presence/body hash/status、candidate 的新 presence/body raw SHA-256/status 与 `pendingProposals` 派生 exact literal `pending → stale` 集：正文 bytes/hash 变化、章节删除或 sidecar `status` 变化才使该章节全部 pending revision stale；纯移动/重排以及其他 metadata 变化都不触发。schema11 old hash 已由 source reader 预计算进 basis；empty 不得有 pending rows。revision/chapter 不存在或映射不唯一时 fail-closed，输出按 `revisionId` 稳定排序并冻结。
+- [ ] `projectedAt` 只接受可解析且重新序列化逐字节相同的 canonical UTC ISO 字符串 `YYYY-MM-DDTHH:mm:ss.sssZ`；本地时区、偏移、无毫秒、额外小数位、无效日期或等价但非规范拼写全部拒绝。它只用于本次 target 的 tombstone 时间，不能在重放时重新取时钟。
+- [ ] `localIdentityPlan` 是按 `objectKind + uid` 排序的 exact discriminated assignment 数组；每项 exact keys 为 `{ assignmentKind, objectKind, uid, id }`，chapter 额外且必须有 `num`，只有需授权的分支额外且必须有 `reservationId`，volume 禁止 `num`。`assignmentKind` 仅允许：`reuse_uid`（schema12 已有 active/tombstone UID，逐项复用 basis 的稳定 ID/章节 `num`，禁止 `reservationId`）、`bind_legacy`（仅 schema11 migration，把 source row 的原 ID/章节 `num` 绑定到已预留规范 UID 与 `reservationId`）或 `reserved_new`（仅真正新行，携带已预留规范 UID、新整数 ID、章节 `num` 与 `reservationId`）。错 sourceKind、错 discriminator/exact keys、同一 `objectKind` 内重复 UID/整数 ID、缺 reservation、与同表 basis/对应 `sqliteSequence` 冲突或未覆盖全部新旧对象都在 `buildTarget()` fail-closed；卷与章节是独立 UID/整数 ID 命名空间，允许两表同时存在相同数值 ID。章节 `num` 只按 candidate 的最终 active 容器检查：已分卷按 `(volumeUid, num)` 唯一，未分卷按 `num` 唯一；跨卷同号与 tombstone 同号合法，tombstone 不占活跃编号。缺席对象产生带冻结 `projectedAt` 的 tombstone，同 UID 再现只走 `reuse_uid` 并复活；Task 5 不铸 reservation，也不把 plain plan 当授权，fake `projectStore` 在原子 preflight 内用私有测试 authority 重读 live basis/generation、调用唯一 digest helper，并逐项验证 `bind_legacy | reserved_new` reservation 后才允许 commit。
+- [ ] `validateTarget(target)` 与 `publish()` 必须复用同一个 module-private target validator，禁止复制第二套 exact-key、basis、identity-plan 或 row-variant 检查。纯验证成功返回原 `target` 引用，不 clone、不调用任何 project-store port，也不产生文件或数据库副作用；Task 6 必须在首个文章文件副作用前调用它，并在恢复资产反序列化、递归冻结后再次调用，不能把无效 target 留到 `files_published` 后才发现。
+- [ ] `publish()` 先调用同一个 `validateTarget()`，然后只把同一 target 引用与 `routeCas` 原样交给 `projectStore.publishProjectionTarget()`；不自行读取 live DB、分配 ID、解释 route、执行 SQL、clone target/token 或重试 commit-unknown。fake 在 basis/reservation/CAS 前先比较 target 的 `projectUid`/`projectInstanceId` 与该 fake store 的私有项目绑定，拒绝跨项目、跨实例或复制 target 重放。`routeCas` 缺失表示普通投影发布；存在时只能由同一 fake `projectStore` 的 module-private `WeakMap` brand 铸造并绑定同一事务意图。fake 同时拒绝 plain/clone/function/foreign-store route token、伪造/旧 basis、错误 generation 与无 authority 的新 ID，并证明合法 route CAS 与完整 target 同 commit、任一侧失败则整体不可见。
+- [ ] Task 5 只证明 deterministic final target、ID/num 复用、tombstone、同 UID 复活、带已冻结 reservation 的新 ID，以及 fake port 的单事务 before/after/commit-unknown 语义；不声称执行真实两阶段 SQL、真实 `chapter_revisions` DML、真实物理 DELETE barrier、真实 trigger/data-version 行为或 schema 12 admission。这些 production 义务全部由 Task 12 的唯一真实 adapter 完成，Task 16 再做最终 DDL/投影矩阵。
 - [ ] 运行并提交：
 
 ```powershell
@@ -384,39 +400,68 @@ git commit -m "feat: publish atomic manuscript projections"
 
 - Create: `server/manuscript/file-publication-journal.js`
 - Create: `server/manuscript/file-publisher.js`
+- Create: `server/platform/manuscript-file-boundary.js`
+- Modify: `server/platform/durability.js`
+- Modify: `server/platform/durability-win32.js`
+- Modify: `server/testing/fault-injection.js`
 - Create: `server/tests/file-publication-journal.test.js`
 - Create: `server/tests/file-publication-crash.test.js`
+- Create: `server/tests/manuscript-file-boundary.test.js`
+- Modify: `server/tests/durability-primitives.test.js`
 - Create: `server/tests/fixtures/file-publication-crash.js`
 
 **State model:**
 
 ```text
-prepared → files_published → projection_committed → completed
+full（ordinary 或 parent=draft_conflict）：
+  prepared → files_published → projection_committed → completed
+
+file_only（parent=migration | creation）：
+  prepared → files_published
 ```
 
 ```js
+// Task 6 用 fake；Task 12 提供唯一真实实现。
+const projectionDisposition = {
+  inspectTarget({ target, journalEvidence }) {}, // base | target | other
+};
+
 class FilePublicationJournal {
+  constructor({
+    controlStore,
+    filePublisher,
+    projectionStore,
+    projectStore,
+    projectionDisposition,
+    projectBinding,
+    assertWriteAuthority,
+  }) {}
   async prepare({ logicalRequestId, baseGeneration, targetGeneration, closure, projectionTarget, parent }) {}
   async publishFiles(journalId) {}
   async commitProjection(journalId) {}
   async complete(journalId) {}
   async recover(journalId) {}
+  journalAuthority() {} // 返回 Task 3 的 opaque resolveCandidate capability
 }
 ```
 
-- [ ] 写最小闭包表测试：正文更新=1 md，sidecar 更新=1 json，移动章节=源/目标索引，章节创建/删除=索引+资源对，卷结构操作只触及精确结构文件。
-- [ ] `prepared` 冻结 logical request、UID/整数 ID、before/after raw SHA-256、after-absent 谓词、候选相对路径、目标 generation 和 projection target。
-- [ ] 每个候选与目标路径校验普通文件身份、实名和链接计数；文件 flush、replace、目录 flush 的 disposition 必须可证明，持续外部占用返回 `MANUSCRIPT_TARGET_LOCKED`。
-- [ ] child journal 记录 parent ID 后不得自行提交父 projection/route；普通 journal 才可调用 projection store。
+- [ ] Task 6 只验证冻结 closure 的 exact 成员合同、branded controlled ref、before/after bytes/hash/identity、after-absent 谓词、无重复成员与规范发布顺序；绝不从 `projectionTarget.controlledFiles` 反推或扩大 closure。`controlledFiles` 是同 generation 的**全树文件事实**，本次 closure 是领域命令产生的**最小变化集**。正文更新=1 md、sidecar 更新=1 json、移动=源/目标索引、创建/删除=索引+资源对等 command→closure 矩阵以及 `ManuscriptStore.buildClosure()` 全部由 Task 7 实现和测试。
+- [ ] `prepared` 在首个文章文件副作用前调用 Task 5 唯一 `validateTarget()`，冻结 logical request、full/file-only mode、parent ID、project UID/instance、ControlStore incarnation/identity、base/target generation、closure predicates 和 exact target recovery-asset predicate。完整 target 只在固定恢复资产根中保存一份 exact bytes；ControlStore 只记录其规范 identity、length、SHA-256 和 fsync 后存在性，不内嵌或复制完整 target/正文。closure 的 durable before/after 资产只覆盖本次最小成员；basis/tombstone/retain refs 继续禁止旧正文或未覆盖本机列。恢复 rehydrate target 后先递归冻结并再次调用同一 validator；journal 不序列化 opaque authority，不重取时钟、不重算 identity plan/invalidation，也不由 caller 补字段。
+- [ ] FilePublisher 只按冻结 closure 的固定顺序执行「正文 → sidecar → 卷/未分卷索引 → manuscript.json」。每个候选与目标校验普通文件身份、逐字节实名、父目录身份、非 reparse 和 link count=1；文件 flush、verified replace/absent install、目录 flush 的 disposition 必须可证明，外部 CAS 改变返回 `EXTERNAL_CHANGE_CONFLICT`，持续占用返回 `MANUSCRIPT_TARGET_LOCKED`，不得解释领域命令或创建第二套恢复状态机。
+- [ ] 在本任务实现 Task 3 Store 与 FilePublisher 共用的 production-grade Windows boundary，但不做产品接线：复用 L1 `durability.js` 的 file/directory fsync、bounded retry/error mapping 和 verified-absent install，并在既有 `durability-win32.js` 内只补两者共同缺少的窄 verified-handle read/replace 原语；不得在 `manuscript-file-boundary.js` 复制第二套 Win32 FFI、重试、fsync、lease 或 durability profile。Windows 以不共享 delete 的 `OPEN_EXISTING | FILE_FLAG_OPEN_REPARSE_POINT` 句柄读取实名、volume/file ID、attributes、link count、size 与 bytes，实际 hash/read/publish 在已验证 capability 内完成并在关闭前后复核；不得返回验证后的裸路径再由调用方重新打开。只跑本机 Bun 1.3.14 Windows x64 focused integration，覆盖替换、改名、reparse、hard-link、parent identity 与 handle revision 竞态；本任务不置 production capability true、不接 composition root、不运行 VM/13/19，fixture boundary 不能进入 production factory。
+- [ ] `full` mode 只允许 `parent = null | draft_conflict`，可提交本 journal 的 projection 并到 `completed`；`file_only` 只允许 `parent = migration | creation`，projection/projectStore/route 调用次数为 0，parent 自己负责后续 projection、route 与终态。`files_published` 只是 file-only child 的协议终点，**绝不是 recovery asset GC 资格**：parent 必须在 child 首个文章候选/发布副作用前持久绑定并 pin exact target 与 closure recovery assets 的规范 identity、length、SHA-256 及 child/parent/journal binding，Task 6 只消费该 branded parent-pin authority；parent recovery 必须能不依赖 child 进程内对象而独立 reopen、rehydrate、递归冻结并调用 Task 5 `validateTarget()`。只有 parent 已到 migration `activated`、creation 成功终态，或已证明 safe abort，且 parent reference predicate 同时成立，才可授权 GC；`files_published`、parent 未终结或任一 pin/reference 无法证明时资产必须保留。child 永远不得写 parent 状态、提交 parent projection/route 或自行解除 pin。
+- [ ] Task 6 是 Task 3 `journalAuthority.resolveCandidate()` 的唯一 owner：从同一 ControlStore 冻结事件链验证 project UID、journal ID、target ref、实际候选名和 open/terminal state，再铸造 Task 3 opaque capability；caller self-proof、plain clone、错误 parent 或错误项目一律返回无 authority。已终结候选只有凭终态证据才可清理；不存在 journal 的同形文件继续作为 residue 保留不动。
 - [ ] FilePublicationJournal 只向已经由普通项目现场、MigrationJournal 或 ProjectCreationJournal 建立并验证的 `mythpen/`、`volumes/`、`chapters/` 目录发布文件；它不得创建、删除或接管这些目录，也不得把目录建立藏进 `prepared`。
-- [ ] 在状态追加前后、每个候选发布前后、projection commit 前后和 cleanup 前后注入强杀；恢复只能收敛完整 before、完整 after 或 `RECOVERY_REQUIRED`。
-- [ ] 对外部 CAS 变化返回 `EXTERNAL_CHANGE_CONFLICT`，不得覆盖现场；终态证据成立后才清理 journal candidates，无法归属的同形状候选保留为残留。
+- [ ] `projectionDisposition.inspectTarget()` 是必填只读 port，Task 6 用 exact observable fake 固定 `base | target | other` 三态；`base` 与 `target` 都是 exact full predicate，不是 generation 别名。`base` 必须逐项证明 project UID/instance、journal binding、base generation、canonical compact basis digest、basis rows、两表 sequence、`ignoredBeforeDigest` 与 pending proposals 全部等于冻结 before；`target` 必须逐项证明同一 project/instance/journal binding 与完整 target after。任一字段、row、digest、authority 或读取完整性无法证明均返回 `other`。若 publish 返回 commit disposition unknown，恢复必须先 inspect：`target` 只补写 `projection_committed`，`base` 才允许在重新验证 writer/project/journal authority 后重试一次，`other` 进入 `RECOVERY_REQUIRED`；禁止盲重试、仅凭 generation 猜 committed 或由 caller 声明结果。Task 12 提供唯一真实实现。
+- [ ] 聚焦强杀只覆盖协议线性化点：状态追加前后、单成员 candidate write/flush/replace/parent-flush、双成员闭包形成 before/after 混合、projection commit 前后、full terminal cleanup，以及 parent-authorized file-only asset GC 前后；同一状态机不按每种领域命令重复展开。恢复只能收敛完整 before、完整 after 或 `RECOVERY_REQUIRED`；完成时返回明确的 recovery disposition 与 `requiresFullValidation=true`，实际 connection epoch、feed full-dirty 和 session fencing 后移 Task 9/12，完整跨任务 crash join 后移 Task 16。
+- [ ] 对外部 CAS 变化不得覆盖现场；full journal 只有 `completed` 终态证据成立后才可清理其 assets，file-only journal 只有上一条 parent-pin/reference/终态或 safe-abort GC 谓词成立后才可清理 recovery assets；owned candidate cleanup 仍要求可证明 before/after，无法归属的同形状候选保留为残留。本任务不修改 API/CLI/产品 factory、route、build-info 或 capability，也不运行全量 suite、production build、VM 或候选验收。
 - [ ] 运行并提交：
 
 ```powershell
-bun test server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js
+bun test --test-name-pattern "manuscript verified handle" server/tests/durability-primitives.test.js
+bun test server/tests/manuscript-file-boundary.test.js server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js
 git diff --check
-git add server/manuscript/file-publication-journal.js server/manuscript/file-publisher.js server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js server/tests/fixtures/file-publication-crash.js
+git add server/manuscript/file-publication-journal.js server/manuscript/file-publisher.js server/platform/manuscript-file-boundary.js server/platform/durability.js server/platform/durability-win32.js server/testing/fault-injection.js server/tests/manuscript-file-boundary.test.js server/tests/file-publication-journal.test.js server/tests/file-publication-crash.test.js server/tests/durability-primitives.test.js server/tests/fixtures/file-publication-crash.js
 git commit -m "feat: add recoverable file publication journal"
 ```
 
@@ -429,15 +474,17 @@ git commit -m "feat: add recoverable file publication journal"
 **Files:**
 
 - Modify: `server/manuscript-service.js`
+- Modify: `server/manuscript/store.js`
 - Create: `server/manuscript/uid-reservation.js`
 - Create: `server/tests/manuscript-service-l2.test.js`
 - Create: `server/tests/manuscript-uid-reservation.test.js`
+- Modify: `server/tests/manuscript-store.test.js`
 
 **Interfaces:**
 
 ```js
 class ManuscriptUidReservation {
-  reserveNewIdentity({ kind, logicalRequestId, activeProjection, ignoredLedger, reservationSources, pathProbe }) {}
+  reserveNewIdentity({ kind, logicalRequestId, currentProjection, ignoredLedger, reservationSources, pathProbe }) {}
 }
 
 function createL2ManuscriptService({ manuscriptStore, fileJournal, projectionStore, uidReservation }) {
@@ -447,17 +494,18 @@ function createL2ManuscriptService({ manuscriptStore, fileJournal, projectionSto
 }
 ```
 
-- [ ] `command` 使用明确 discriminated kind 覆盖正文、sidecar、章节/卷创建、改名、移动、重排、删除；`turnContext` 只接收已经验证的 active projection、base generation、ignored ledger、logical request ID 和草稿冲突决定，不负责 session admission 或 freshness。
-- [ ] 在本任务建立全系统唯一的 `ManuscriptUidReservation`；章节/卷创建必须在 FilePublicationJournal `prepared` 之前，用 CSPRNG seam 产生规范 UUIDv4，并联合检查 active projection、tombstone、ignored ledger、规范路径和注入的未终结 migration/creation reservation sources。任一来源不能完整枚举即 fail-closed；同一 logical request 冻结并复用原 UID，碰撞不进入任何文件副作用。
-- [ ] 每个领域命令只生成精确 closure、before/after CAS、经共享 reservation 服务取得的 UID/整数 ID 与 projection target，再调用 FilePublicationJournal；不得直接取得 lifecycle/writer lease，也不得直接调用 REST、Zustand 或平台 feed。
+- [ ] `command` 使用明确 discriminated kind 覆盖正文、sidecar、章节/卷创建、改名、移动、重排、删除；`turnContext` 同时接收已经验证、只供产品读语义的 active projection，以及 Task 5 exact canonical `currentProjection = { projectUid, projectInstanceId, basis }`、与 `basis.baseGeneration` 相等的 base generation、ignored ledger、logical request ID 和草稿冲突决定，不负责 session admission 或 freshness。reserved-new 分配与完整 target 编译只能消费 `currentProjection`，不得从过滤 tombstone/sequence/pending 的 active projection 猜测 basis。
+- [ ] 在本任务建立全系统唯一的 `ManuscriptUidReservation`；章节/卷创建必须在 FilePublicationJournal `prepared` 之前，用 CSPRNG seam 产生规范 UUIDv4，并联合检查 canonical `currentProjection` 的完整 compact dependency basis（含 tombstone、两表 sequence、pending 与 `ignoredBeforeDigest`）、规范路径和注入的未终结 migration/creation reservation sources。任一来源不能完整枚举即 fail-closed；同一 logical request 冻结并复用原 UID，碰撞不进入任何文件副作用。普通新建由这个共享服务唯一铸造可序列化 `reserved_new` assignment，精确绑定 kind、logical request、规范 UID、新稳定整数 ID、章节 `num`（卷不得携带）、`reservationId` 与 source basis digest；Task 7 不得铸 `bind_legacy`，也不得把 plain assignment 当作 authority。
+- [ ] 每个领域命令只生成精确 closure、before/after CAS、经共享 reservation 服务取得的 `reserved_new` 或已由 basis 验证的 `reuse_uid` identity plan 与完整 projection target，再调用 FilePublicationJournal；不得直接取得 lifecycle/writer lease，也不得直接调用 REST、Zustand 或平台 feed。
+- [ ] 在本任务按领域命令扩展 Task 3 的同一个 `ManuscriptStore.buildClosure()`；只接受 branded controlled refs 与经过验证的 active projection/ignored ledger，返回不含路径的冻结 before/after bytes/hash/identity 成员及 publication order。这里完整固定 command→closure 表：正文更新=1 md，sidecar 更新=1 json，同时编辑=资源对，移动章节=源/目标索引，章节创建/删除=必要索引+资源对，单纯重排只含变化索引，卷结构操作只触及精确结构文件。Task 6 journal 只消费并验证该冻结 closure，不反向猜测命令语义，也不从 target 的全树 `controlledFiles` 扩大闭包。
 - [ ] 删除章节/卷只通过权威结构移除 + SQLite tombstone；卷仍承载 indexed ignored 章节时在任何文件副作用前返回 `IGNORED_REFERENCE_BLOCKS_CONTAINER_DELETE`。
 - [ ] 用 fake store/journal/projection/reservation source 写纯领域测试，证明各命令的闭包、UID 幂等/碰撞/不完整枚举与 tombstone/position/opaque ignored 语义；生产路由接线明确推迟到 Task 9B。
 - [ ] 运行并提交：
 
 ```powershell
-bun test server/tests/manuscript-service-l2.test.js server/tests/manuscript-uid-reservation.test.js server/tests/file-publication-journal.test.js
+bun test server/tests/manuscript-service-l2.test.js server/tests/manuscript-uid-reservation.test.js server/tests/manuscript-store.test.js server/tests/file-publication-journal.test.js
 git diff --check
-git add server/manuscript-service.js server/manuscript/uid-reservation.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-uid-reservation.test.js
+git add server/manuscript-service.js server/manuscript/store.js server/manuscript/uid-reservation.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-uid-reservation.test.js server/tests/manuscript-store.test.js
 git commit -m "feat: add L2 manuscript domain commands"
 ```
 
@@ -465,7 +513,7 @@ git commit -m "feat: add L2 manuscript domain commands"
 
 ## Task 8: 实现 Windows lifecycle lease 与 session admission
 
-**Depends on:** Task 4 + Task 6。
+**Depends on:** Task 6。
 
 **Files:**
 
@@ -489,6 +537,7 @@ function createWindowsManuscriptLifecycleLeaseAdapter(options) {
 }
 
 class ManuscriptSessionController {
+  constructor({ routeAdmissionVerifier }) {}
   async admit(projectIdentity, operation) {}
   async beginRetiring(projectIdentity) {}
   async drain(projectIdentity) {}
@@ -499,7 +548,8 @@ class ManuscriptSessionController {
 - [ ] `bun:ffi` adapter 只对规范 sibling `.manuscript-<sha256(canonical-real-control-directory)>.lifecycle.lock` 使用 `CreateFileW` + `LockFileEx`；`dwCreationDisposition` 固定为 `OPEN_EXISTING`，adapter 永不创建或补建锁文件；只有 Task 12 MigrationJournal 与 Task 13 ProjectCreationJournal 父协议可创建它。打开时读写共享、不共享 delete、锁 `[0,1)`、fail immediately。
 - [ ] 两进程测试 shared/shared 成功，shared/exclusive、exclusive/shared、exclusive/exclusive 稳定映射 `PROJECT_WRITE_BUSY`；真实路径与允许别名汇聚同一物理锁。
 - [ ] 强杀 owner 后可重新取得；Unlock/Close/符号缺失/身份变化/disposition unknown 注入时，只有 close 已知成功才证明释放，其余 fenced 或 `MANUSCRIPT_LIFECYCLE_UNAVAILABLE`。
-- [ ] session 进程内 ref-count shared handle；取得后重读 route、project UID/instance、数据库/文章根身份、generation 和父 journal 终态，再开放普通请求。
+- [ ] `ManuscriptSessionController` 必须注入精确的 `routeAdmissionVerifier.verifyAfterLease(projectIdentity)`，不得默认、可选或在 Task 8 导入未来的 RouteStore。session 进程内 ref-count shared handle；取得 shared lease 后、登记 admission/in-flight 或调用 operation 前，必须把 project identity 交给 verifier 重读并验证 route、project UID/instance、数据库/文章根身份、generation 和父 journal 终态，再开放普通请求。
+- [ ] Task 8 只用必填的可观察 fake verifier 测试顺序 `shared lease → verifyAfterLease → operation`：缺失/非法 verifier 在获取 lease 前拒绝；verifier 拒绝时 operation 调用数为 0、已取得 handle 按已知 disposition 释放，原始错误 code/cause 原样传播。测试不得构造、导入或声称验证 Task 12 RouteStore；Task 14B 才注入 Task 12 的真实实现。
 - [ ] 所有普通读取、写入、自动保存、导出、AI 上下文从 admission 到完成都计入 in-flight；禁止 shared→exclusive 原地升级。
 - [ ] capability 由精确 Bun 1.3.14 Windows x64 production adapter 实测后才设 true，启动自检任一失败均 false/fail-closed。
 - [ ] 运行并提交：
@@ -742,6 +792,7 @@ git commit -m "feat: recover external manuscript draft conflicts"
 - Modify: `server/db.js`
 - Modify: `server/manuscript-sql-guard.js`
 - Modify: `server/manuscript/uid-reservation.js`
+- Create: `server/manuscript/route-store.js`
 - Create: `server/manuscript/migration-journal.js`
 - Create: `server/manuscript/migration-service.js`
 - Modify: `server/manuscript-service.js`
@@ -751,9 +802,32 @@ git commit -m "feat: recover external manuscript draft conflicts"
 - Modify: `server/tests/native-project-store-crash.test.js`
 - Modify: `server/tests/manuscript-uid-reservation.test.js`
 - Modify: `server/tests/manuscript-service-l2.test.js`
+- Create: `server/tests/manuscript-route-store.test.js`
 - Create: `server/tests/manuscript-migration.test.js`
 - Create: `server/tests/manuscript-migration-crash.test.js`
 - Create: `server/tests/fixtures/manuscript-migration-crash.js`
+
+**Additional interface:**
+
+```js
+class ManuscriptRouteStore {
+  constructor({ journalAuthority }) {}
+  readRoute(projectDb) {}
+  verifyAfterLease(projectIdentity) {}
+  compareAndSwap(projectDb, expected, next, binding) {}
+  rebuildConfigCache(projectRegistry) {}
+}
+
+// 由真实 NativeProjectStore/内部 adapter 实现；Task 5 只依赖这个 port。
+class NativeManuscriptProjectStore {
+  publishProjectionTarget({ target, routeCas }) {}
+}
+
+// Task 6 projectionDisposition port 的唯一真实实现。
+class NativeProjectionDisposition {
+  inspectTarget({ target, journalEvidence }) {} // base | target | other
+}
+```
 
 **State model:**
 
@@ -767,13 +841,22 @@ before activation_intent, with child at complete files before:
 unprovable state: RECOVERY_REQUIRED
 ```
 
+- [ ] `ManuscriptRouteStore` 构造时固定注入 module-branded、只读 `journalAuthority`；`readRoute()`、`verifyAfterLease()` 与 CAS 授权都只能消费该 authority 的同一冻结观察，caller 不能逐次替换 journal 或传入 journal 状态自证。
+- [ ] schema 11 的 route/journal admission 冻结为四态矩阵：① 四个 L2 保留键全缺且无非终结 MigrationJournal，才是普通 implicit `sqlite`；② 四键全缺且存在唯一、精确匹配的 `migration_reserved`，只允许恢复安全终结 reservation，普通入口不接纳；③ 四键完整、route=`migrating` 且绑定同一 journal 的 `route_fenced` 或后续规范状态，普通入口稳定返回 `PROJECT_MIGRATION_BUSY`，只允许迁移/恢复/诊断；route CAS 已耐久但 journal 仍停在 `migration_reserved` 的崩溃窗口，只能由 `journalAuthority` 凭同一 CAS 证据先前滚为 `route_fenced` 后归入本项；④ 其余缺键、重复、显式 sqlite、非法组合、多个/错误 journal 或身份不符一律 `MIGRATION_STATE_MISMATCH`。schema 12 inspector 继续精确要求全部十个 `project_meta` 行，缺失 `manuscript_route` 或任一其他必需行都 fail-closed，绝不回退为 sqlite。
+- [ ] `verifyAfterLease()` 是 Task 8 verifier contract 的真实实现，复核 files route、project UID/instance、数据库/文章根物理身份、projection generation 与“存在则成功终态”的 parent journal；Task 14B 只能注入这一实例，不能用 live schema snapshot、caller facade 或产品侧 callback 替代。
+- [ ] `compareAndSwap()` 只能在真实 NativeProjectStore transition 中消费内部 branded capability，并同时绑定 project UID、project instance、数据库/文章根物理身份、projection generation 与精确 parent journal transition proof；live schema、route 当前值、caller 参数或普通 SQL 不能自证授权。协议化安全中止在相同 guard 下以一次 native 原子事务删除全部四个 L2 保留键，恢复 D7 的 legacy implicit sqlite；只有事务已知提交且 journal 已规范终结后才重建 config cache，不能把 cache 值反写项目数据库。
+- [ ] Task 12 同时安装 `config.db` route cache schema，并由 `rebuildConfigCache()` 从逐个已 admission 项目数据库的 route 真值重建；缓存删除、损坏、缺项或陈旧时可丢弃重建，枚举/项目 admission 不完整则 fail-closed，缓存永远不能反向覆盖项目数据库 route 真值，重建也不能写项目数据库。
 - [ ] “稍后升级”测试 route、journal、reservation、目标根与业务字节零变化；未显式实验启用时不弹默认迁移、不创建 files 项目。
 - [ ] 用户确认前完成 dirty draft 处理、云同步/reparse 风险说明、备份确认；确认后在 registry/config lease + writer lease 下写 `migration_reserved`。
-- [ ] 扩展 Task 7 的同一个 `ManuscriptUidReservation`，把 registry、现存 roots、未 GC MigrationJournal/ProjectCreationJournal 暴露为正式 reservation sources；不得在 migration service 内实现第二套扫描或抽号逻辑。CSPRNG seam 继续生成规范 UUIDv4，按 project/chapter/volume 命名空间扫描，任一来源不完整即 fail-closed。
-- [ ] 把这些正式 reservation sources 注入 `ManuscriptService`，验证普通章节/卷创建与 migration/creation 共享同一碰撞域；已有 logical request/migration ID 逐项复用冻结 UID。
+- [ ] 扩展 Task 7 的同一个 `ManuscriptUidReservation`，把 registry、现存 roots、未 GC MigrationJournal/ProjectCreationJournal 暴露为正式 reservation sources；不得在 migration service 内实现第二套扫描或抽号逻辑。CSPRNG seam 继续生成规范 UUIDv4，按 project/chapter/volume 命名空间扫描，任一来源不完整即 fail-closed。migration 在冻结 schema11 source basis 后，由本任务通过该共享 authority 唯一铸造 `bind_legacy` assignment：逐行保留 source volume/chapter ID 与章节 `num`，只为每个 legacy row 绑定新预留 UID、source basis digest 和 `reservationId`；不得把 legacy row 冒充 `reserved_new`，也不得重新分配本机 ID/num。
+- [ ] 把这些正式 reservation sources 注入 `ManuscriptService`，验证 Task 7 普通章节/卷创建铸造的 `reserved_new` 与 Task 12 migration 铸造的 `bind_legacy`、creation reservation 共享同一碰撞域；已有 logical request/migration ID 逐项复用冻结 UID/assignment/reservationId。
 - [ ] reservation 在 route fence 前落盘并冻结；同 migration ID 的重试逐项复用；落盘后碰撞返回 `UID_RESERVATION_COLLISION`，绝不重抽。
 - [ ] route fence 是 reservation 之后第一个目标副作用；`migrating` 下所有普通入口返回 `PROJECT_MIGRATION_BUSY`。
-- [ ] 在 Task 2 的 v2 descriptor/inspector 上只建立一套 schema 12 candidate builder/installer。它接收已冻结的 source contract、UID reservation、完整 target projection 与 `sourceKind = schema11 | empty`；migration 分支必须在唯一离线 candidate 上逐列保留业务行、整数 ID、`sqlite_sequence`、外键、视图与非冲突索引，重建 RESTRICT、物理 DELETE barrier、两个活跃编号部分唯一索引及全部 v2 canonical triggers，禁止 `CREATE TABLE AS SELECT`。UID、positions、raw hashes、ignored/容量快照和伏笔位置只能来自 frozen input，不得在 builder 内随机生成或从旧 `num` 猜测。
+- [ ] 本任务实现唯一真实 `projectStore.publishProjectionTarget({ target, routeCas })` adapter，供 Task 5 的稳定 port、普通 files 投影发布和迁移最终激活共同复用，并实现 Task 6 必填 `projectionDisposition.inspectTarget({ target, journalEvidence })` 的唯一真实只读 adapter；`projection-store.js` 不再修改。`inspectTarget()` 必须在已验证 writer/project/journal authority 下完整读取后精确返回 `base | target | other`：`base` 逐项比较 project UID/instance、journal binding、base generation、调用 Task 5 唯一 helper 重算的 canonical compact basis digest、basis rows、两表 sequence、`ignoredBeforeDigest` 和 pending `{revisionId, chapterId}`；`target` 逐项比较同一绑定与完整 target after predicate；任一字段、row、digest、authority 或读取完整性无法证明均为 `other`。它必须零业务 DML、零 route/cache 修改，禁止只凭 generation 相等推断任一 disposition 或接受 caller disposition。publish adapter 先把 target 的 `projectUid`/`projectInstanceId` 与已 admission 私有项目绑定逐项比较；随后 import Task 5 唯一的 `canonicalProjectionBasisDigest()`/`canonicalIgnoredLedgerDigest()`，在任何业务 DML 前只重读 compact basis 所需列、两表 sequence、完整 ignored-before、pending `{revisionId, chapterId}` 与 base generation；schema11 正文逐行流式算 UTF-8 hash后即释放，不建立第二份正文集合。adapter 用同一 helpers 构造 compact basis并比较 digest，禁止复制 material/排序/canonicalizer；未出现在 target active fields/tombstone refs 的 local columns 必须原位保留。再由注入的 journal/reservation authority 验证三类 `localIdentityPlan`；assignment/source/basis/reservation/ID/num、项目/实例、generation 或 target 重放任一错配都 fail-closed。`routeCas` 缺失只允许普通 files projection；存在时由同一 NativeProjectStore 私有 brand 消费并与 transition 同 commit。
+- [ ] 真实 schema 12 publish 在一个 NativeProjectStore 事务内完成 generation CAS 与全部 target DML。对会改变容器/编号/活跃状态的章节，第一阶段先让受影响 active 行退出两个活跃编号部分唯一索引并清空 `chapter_position`/`manuscript_position`，第二阶段再写最终 `volume_id`、保留或预留的 `num`、连续 positions、`is_present` 与 `deleted_at`；任何阶段都不得向外暴露中间态。章节、卷和不可物理删除的 ignored 身份账本只允许 insert/update/tombstone，真实路径禁止 `DELETE FROM chapters`、`DELETE FROM volumes` 或删除 ignored identity row。
+- [ ] 显式解决既有 `chapters_data_version_after_update` 与两阶段内部更新的冲突：schema 12 canonical trigger/内部 projection DML 必须使一次逻辑 projection 对每个受影响章节的 `data_version` 只发生零或一次可解释递增，技术性的 phase-1/phase-2 不能产生第二次 bump；普通业务更新的既有单次递增语义保持。聚焦真实事务测试覆盖重排、跨卷同号互换、tombstone、复活、正文/sidecar 更新与无变化行，逐行断言一次逻辑发布最多 `+1`；若 schema 12 canonical trigger SQL 因此变化，必须同步更新 Task 2 v2 descriptor/inspector 与三方 expected digest，同时保持 schema 11 的 trigger SQL、digest 与运行行为逐字节不变。
+- [ ] 本任务先扩展 Task 2 的 v2 descriptor/inspector，再由 schema 12 candidate builder 重建 `chapter_revisions` 的 status CHECK，正式加入 literal `stale`，并逐行保留全部既有 revision、主键、`sqlite_sequence`、外键和 `idx_chapter_revisions_active`；schema 11 的表定义与允许值保持不变。真实 `publishProjectionTarget` 只执行 Task 5 从重验 basis 与 candidate 派生并冻结在 exact target 中的 literal `pending → stale` 集：正文变化/删除和 sidecar `status` 变化与完整 projection 同 commit，纯移动/重排或其他 metadata 变化不更新 proposal，accepted/rejected/superseded/stale 行不被重写；caller 不能另传、删减或扩大 invalidations。
+- [ ] 在 Task 2 的 v2 descriptor/inspector 上只建立一套 schema 12 candidate builder/installer。它接收已冻结且独立保留完整本机业务行的 source contract、完整 compact canonical dependency basis、Task 12 铸造并验证的 `bind_legacy` local identity plan、完整 target projection 与 `sourceKind = schema11 | empty`；migration 分支必须在唯一离线 candidate 上逐列保留业务行、整数 ID、`sqlite_sequence`、外键、视图与非冲突索引，重建 RESTRICT、物理 DELETE barrier、两个活跃编号部分唯一索引及全部 v2 canonical triggers，禁止 `CREATE TABLE AS SELECT`。UID、positions、raw hashes、ignored/容量快照和伏笔位置只能来自 frozen input，不得在 builder 内随机生成或从旧 `num` 猜测；`projectedAt` 必须是 target 已冻结且 round-trip exact 的 `YYYY-MM-DDTHH:mm:ss.sssZ`，恢复/重放不得重取时钟。
 - [ ] builder 对 schema11 source 先做 v1 instance/seq/gate/digest 精确 preflight，再在事务外关闭 foreign keys、按依赖图于事务内重建、完成 `integrity_check`/`foreign_key_check`/ID 集合/行数/sequence/schema 指纹/v2 三方 digest 后提交并恢复 foreign keys；未知依赖返回 `SCHEMA_SWAP_UNSUPPORTED`。任一注入失败都恢复 PRAGMA 并只留下未发布 candidate，source DB 与 ControlStore 字节不变。
 - [ ] 将 `PROJECT_SCHEMA_VERSION` 从 11 提升到 12，但 `SQLJS_PROJECT_SCHEMA_VERSION` 继续为 10。`db.js` 与 NativeProjectStore 必须显式分支：schema11 仍逐次验证原 native activation evidence 与 v1 contract；schema12 必须同时验证原 activation/creation basis、v2 inspector，以及规范 `database_candidate_ready → activation_intent → activated` transition proof；schema13+ 在 open、事务 preflight 和 DML 前零修改返回 `PROJECT_SCHEMA_TOO_NEW`。live schema 或调用者参数不能自证 transition。
 - [ ] transition proof 精确绑定 kind=`migration | new_creation`、before/after schema 与 trigger digest、project instance、before/final commit seq、candidate identity、parent journal ID/digest 和 target generation。Task 12 实现并消费 `migration` kind；同时把 verifier/builder 作为 Task 13 的唯一 `new_creation` 接口，不新增平行 ControlStore 事件链。
@@ -790,11 +873,11 @@ unprovable state: RECOVERY_REQUIRED
 - [ ] 运行并提交：
 
 ```powershell
-bun test server/tests/manuscript-schema-12.test.js server/tests/durability-schema.test.js
-bun test --test-name-pattern "schema 12|transition proof|manuscript project_meta" server/tests/native-project-store.test.js server/tests/native-project-store-crash.test.js
+bun test server/tests/manuscript-route-store.test.js server/tests/manuscript-schema-12.test.js server/tests/durability-schema.test.js
+bun test --test-name-pattern "schema 12|transition proof|manuscript project_meta|projection target|literal stale|data_version" server/tests/native-project-store.test.js server/tests/native-project-store-crash.test.js
 bun test --timeout 120000 server/tests/manuscript-uid-reservation.test.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-migration.test.js server/tests/manuscript-migration-crash.test.js
 git diff --check
-git add server/native/durability-schema.js server/native/native-project-store.js server/native/native-sql-authorization.js server/testing/native-stage-b-fixture.js server/testing/native-stage-b-store.js server/db.js server/manuscript-sql-guard.js server/manuscript/uid-reservation.js server/manuscript/migration-journal.js server/manuscript/migration-service.js server/manuscript-service.js server/tests/durability-schema.test.js server/tests/manuscript-schema-12.test.js server/tests/native-project-store.test.js server/tests/native-project-store-crash.test.js server/tests/manuscript-uid-reservation.test.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-migration.test.js server/tests/manuscript-migration-crash.test.js server/tests/fixtures/manuscript-migration-crash.js
+git add server/native/durability-schema.js server/native/native-project-store.js server/native/native-sql-authorization.js server/testing/native-stage-b-fixture.js server/testing/native-stage-b-store.js server/db.js server/manuscript-sql-guard.js server/manuscript/uid-reservation.js server/manuscript/route-store.js server/manuscript/migration-journal.js server/manuscript/migration-service.js server/manuscript-service.js server/tests/durability-schema.test.js server/tests/manuscript-schema-12.test.js server/tests/native-project-store.test.js server/tests/native-project-store-crash.test.js server/tests/manuscript-uid-reservation.test.js server/tests/manuscript-service-l2.test.js server/tests/manuscript-route-store.test.js server/tests/manuscript-migration.test.js server/tests/manuscript-migration-crash.test.js server/tests/fixtures/manuscript-migration-crash.js
 git commit -m "feat: migrate projects to file authority"
 ```
 
@@ -892,6 +975,8 @@ git commit -m "feat: retire file-authority projects safely"
 - Modify: `server/cli.js`
 - Modify: `server/ai-continue-save.js`
 - Modify: `server/chapter-revisions.js`
+- Modify: `src/lib/api.ts`
+- Modify: `server/prompts/context.js`
 - Modify: `server/manuscript-service.js`
 - Modify: `server/storage-migration.js`
 - Modify: `server/recent-projects.js`
@@ -905,29 +990,34 @@ git commit -m "feat: retire file-authority projects safely"
 - Modify: `server/tests/project-delete-api.test.js`
 - Modify: `server/tests/storage-migration.test.js`
 - Modify: `server/tests/cli.test.js`
+- Modify: `server/tests/recent-projects.test.js`
 - Create: `server/tests/manuscript-product-routing.test.js`
 - Create: `server/tests/manuscript-recovery-api.test.js`
 - Create: `tests/manuscriptMigrationAdmission.test.ts`
 
 - [ ] 为正文、标题、大纲、状态、摘要、五个叙事字段、卷创建/改名/移动/重排/删除分别写 route/tool 失败测试，断言 `files` route 不执行文章真值 SQL 直写；REST、自动保存、AI 工具、续写和提案接受统一调用 Task 9B 写 turn。
 - [ ] 最终写 turn 固定为 Task 8 session admission → writer lease → Task 9 `ensureProjectionCurrent()` → Task 11 基于完整 dirty registry 的真实 conflict gate → Task 7 `execute()`；任何前置失败不得创建 FilePublicationJournal candidate。`sqlite` 继续走 L1，`migrating` 返回 `PROJECT_MIGRATION_BUSY`，`retired` 拒绝普通入口。
+- [ ] 产品 composition root 构造 Task 12 的真实 `ManuscriptRouteStore({ journalAuthority })`，并把同一实例作为 Task 8 必填 `routeAdmissionVerifier` 注入；生产不得注入 Task 8 fake、caller callback 或 live-schema verifier。`manuscript-product-routing.test.js` 注入 route-admission 拒绝，断言读取、写入、导出和 AI context 都不进入后续 query/operation，且原始 admission error code/cause 原样向调用方传播。
 - [ ] 列表、详情、导出、统计、角色关联、AI 上下文和只读工具统一走 Task 9B readable wrapper + ActiveManuscriptProjection；消除产品路径 tombstone、旧 generation 和 `MAX(num)` 读取。
+- [ ] `server/prompts/context.js` 不再直接打开项目数据库或用 broad catch 把 admission/freshness/route 错误降级成 `项目: <name>`；它通过同一 readable wrapper + ActiveManuscriptProjection 取得 active metadata context，admission 错误必须原样抛出并中止本次 AI 调用。该覆盖写入既有 `server/tests/manuscript-product-routing.test.js`，不新增无对应实现边界的 prompt 测试文件。
+- [ ] `recent-projects.js` 只消费 Task 12 的 route cache；缓存缺失、损坏、缺项或陈旧时调用同一 `rebuildConfigCache()` 从项目数据库真值重建，不能从 config/caller 值反写项目 route。产品 progress/overdue 只使用活跃行的 `manuscript_position`，并以 `currentMax(manuscript_position) >= expected_resolve_manuscript_position` 判定 overdue；不得读取 `MAX(num)` 或旧 `expected_resolve_chapter`。
 - [ ] API 完整接线 Task 10 四个动作：就地忽略、撤销忽略、保留并转为未分卷、解除不透明引用；请求只接受规范 UID/动作枚举，不接受路径，响应返回 generation/ledger 状态。API 集成测试逐字节证明四条路径都不移动或删除用户资源 bytes。
 - [ ] API/CLI 调用 Task 12 同一个 MigrationService；项目创建调用 Task 13 ProjectCreationService；旧物理删除、退役/重激活和数据根入口调用 Task 14 policy。不得在 route/CLI 内复制 journal 状态机、UID reservation、目录创建或锁文件创建逻辑。
 - [ ] 建立 host-only migration admission seam `beginMigrationAfterHostPreflight(frozenSnapshot, request)`：只接受同一 project/window set 的不可变 snapshot 且每个 dirty resource 均为 `persisted | explicitly_resolved`、全部 save queue 已 `cancelled_and_drained`、所有窗口均已响应；否则在调用 migration API 之前 fail-closed。服务端 route 明确不能独立验证 host dirty registry，也不得把“收到 API 请求”误写成 host preflight 证明；它只在 host seam 真正发起请求后调用 Task 12 service。
 - [ ] call-order integration test 用可观察 fake host admission、真实 route/MigrationService fixture 与目录字节快照证明：freeze 未完成、任一 dirty resource 未解决、save queue 未 drain、snapshot/window set 改变或任一窗口无响应时，migration API/MigrationService 调用次数为 0，`migration_reserved`、route/project DB、ControlStore 和全部目标路径 bytes/存在性逐字节不变；只有完整 resolved snapshot 可恰好调用一次。Task 15 的 coordinator 必须调用这一 seam，不得直接调用 route。
 - [ ] API 完整接线 Task 11 冲突列表、backup 复制、`accept_external`、`apply_saved_draft` 与 stale/epoch 结果；只有 `backup_durable` 后可对客户端声明 backup 可用，迟到 epoch 永久拒绝。
+- [ ] 将 `src/lib/api.ts` 的 `ChapterRevision.status` 精确扩展为包含 literal `stale`，并让提案列表、接受/拒绝入口与客户端状态处理明确把 `stale` 视为不可继续处理的历史语义状态，绝不能把它回退、别名化或筛选成 `pending`；现有 `pending | accepted | rejected | superseded` 语义保持不变。
 - [ ] 在本任务第一次建立完整静态扫描 RED：文章真值 SQL/受控文件直写、caller-supplied controlled path、跳过 freshness 的活跃读取、tombstone 读取、章节/卷物理 DELETE、`MAX(num)` 分配/overdue 与 `expected_resolve_chapter` 旧语义逐类使用最小 fixture 失败；随后把全部产品文件纳入同一扫描，删除 API/tools 六条物理 DELETE 并消除其余旧语义，最终扫描必须零债务。全程不建立临时、逐项、目录级或整文件 allowlist；只有持有精确内部 capability 的 schema/projection/recovery 语句由结构化 owner 规则排除。
 - [ ] 两进程与请求乱序测试证明 session/writer/freshness/conflict 的释放顺序稳定，失败、取消和 stale response 不清 dirty/conflict evidence；migration/creation/retirement 尚未终结时产品入口 fail-closed。
 - [ ] 运行并提交：
 
 ```powershell
-bun test --timeout 120000 server/tests/manuscript-product-routing.test.js server/tests/manuscript-recovery-api.test.js server/tests/chapter-update-api.test.js server/tests/chapter-tools-identity.test.js server/tests/project-export.test.js server/tests/project-delete-api.test.js server/tests/storage-migration.test.js server/tests/cli.test.js
+bun test --timeout 120000 server/tests/manuscript-product-routing.test.js server/tests/manuscript-recovery-api.test.js server/tests/chapter-update-api.test.js server/tests/chapter-tools-identity.test.js server/tests/project-export.test.js server/tests/project-delete-api.test.js server/tests/storage-migration.test.js server/tests/cli.test.js server/tests/recent-projects.test.js
 node --test --test-concurrency=1 tests/manuscriptMigrationAdmission.test.ts
 node --test scripts/tests/manuscript-write-scan.test.mjs
 pnpm test:contracts
 git diff --check
-git add server/routes/api.js server/tools.js server/project-export.js server/index.js server/cli.js server/ai-continue-save.js server/chapter-revisions.js server/manuscript-service.js server/storage-migration.js server/recent-projects.js server/manuscript-sql-guard.js scripts/manuscript-write-scan.mjs scripts/tests/manuscript-write-scan.test.mjs src/lib/manuscriptMigrationAdmission.ts server/tests/chapter-update-api.test.js server/tests/chapter-tools-identity.test.js server/tests/project-export.test.js server/tests/project-delete-api.test.js server/tests/storage-migration.test.js server/tests/cli.test.js server/tests/manuscript-product-routing.test.js server/tests/manuscript-recovery-api.test.js tests/manuscriptMigrationAdmission.test.ts
+git add server/routes/api.js server/tools.js server/project-export.js server/index.js server/cli.js server/ai-continue-save.js server/chapter-revisions.js src/lib/api.ts server/prompts/context.js server/manuscript-service.js server/storage-migration.js server/recent-projects.js server/manuscript-sql-guard.js scripts/manuscript-write-scan.mjs scripts/tests/manuscript-write-scan.test.mjs src/lib/manuscriptMigrationAdmission.ts server/tests/chapter-update-api.test.js server/tests/chapter-tools-identity.test.js server/tests/project-export.test.js server/tests/project-delete-api.test.js server/tests/storage-migration.test.js server/tests/cli.test.js server/tests/recent-projects.test.js server/tests/manuscript-product-routing.test.js server/tests/manuscript-recovery-api.test.js tests/manuscriptMigrationAdmission.test.ts
 git commit -m "refactor: route manuscript products through complete L2 gates"
 ```
 
@@ -1040,7 +1130,7 @@ git commit -m "feat: expose file-authority recovery workflows"
 - Create: `server/tests/fixtures/create-l2-benchmark-project.js`
 
 - [ ] 汇总规范 15.1–15.7 为逐行可追踪矩阵，记录 test ID、命令、产物、退出码和结论，不使用“同类情况已覆盖”。格式/安全矩阵覆盖 case alias、reparse、hard link、未知文件、journal candidate、孤儿、外部 UID 四出口、容量边界/超限和外部连续改写；Markdown 专项覆盖精确可视方言每一构造、合法 out-of-dialect UTF-8 只读透传、元数据写仍成功、自动保存/AI/提案等语义正文写拒绝、U+0000 投影 content 置空但 raw hash/word count/generation 正确，以及 Task 15 UI 只读状态。
-- [ ] DDL/投影矩阵覆盖 ID/sequence 保留、tombstone/复活、两阶段 position、部分唯一索引、overdue、schema/digest 三方检查和 schema too new 零修改；普通 publication、draft conflict、migration、creation 的每个指定阶段前后都做强杀并核对完整 before/after。migration acceptance 必须由 Task 15 的 `desktop-manuscript-migration-preflight-smoke.ps1` 驱动 fresh compiled debug host，实际经过 coordinator/admission/route 链运行固定 7 负 + 1 正 matrix，证明负例 seam/API 未调用且 reservation/route/ControlStore/target bytes 不变、全部 resolved 后只允许一次迁移；source-only client test 或泛称“compiled host”不能替代这个命令。
+- [ ] DDL/投影矩阵覆盖 ID/sequence 保留、tombstone/复活、真实两阶段 position/活跃编号更新、部分唯一索引、章节 `data_version` 每次逻辑 projection 最多 `+1`、`chapter_revisions` literal `stale` CHECK 与 rows/ID/sequence/index 保留、proposal invalidation 原子性、物理 DELETE barrier、overdue、schema/digest 三方检查和 schema too new 零修改；同时锁定 schema 11 的 revision CHECK、data-version trigger 与 v1 digest 逐字节不变。普通 publication、draft conflict、migration、creation 的每个指定阶段前后都做强杀并核对完整 before/after。migration acceptance 必须由 Task 15 的 `desktop-manuscript-migration-preflight-smoke.ps1` 驱动 fresh compiled debug host，实际经过 coordinator/admission/route 链运行固定 7 负 + 1 正 matrix，证明负例 seam/API 未调用且 reservation/route/ControlStore/target bytes 不变、全部 resolved 后只允许一次迁移；source-only client test 或泛称“compiled host”不能替代这个命令。
 - [ ] 两进程矩阵运行 writer/refresh/session/retire 竞争，验证 lease 顺序、false-clean 不变量、强杀释放与 admission 后 route/identity 复核。容量矩阵用 10,000 章节身份、2,000 卷身份、25,000 文件、20,000 chapter dir entries、16 MiB md、256 KiB json、1 GiB 累计边界 fixture，并读取 Task 3 observer/counter seam，逐维证明第一次超限后枚举数、身份 probe 数和内容打开数不再增长；超限现场不读全树、不清 dirty、不改外部字节。
 - [ ] 冻结两个不可缩小的**本地** fixture（3,000 章/30–40 MiB 与 10,000 章/1 GiB），记录 seed、文件数、字节数和 manifest hash；Task 16 只验证 fixture/harness 的确定性、容量短路和 correctness case 集，不构建或接纳 production artifact。
 - [ ] 在源码态跑一次本地 join；全部通过后只提交 correctness/performance harness 与 fixture。此提交不是 production evidence source freeze：
