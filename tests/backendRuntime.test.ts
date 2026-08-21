@@ -17,6 +17,8 @@ const SESSION_A: SidecarSession = {
     nativeActivationMode: 'off',
     sourceCommit: '1'.repeat(40),
     targetTriple: 'x86_64-pc-windows-msvc',
+    manuscriptLifecycleLease: false,
+    manuscriptChangeNotification: false,
   },
 }
 
@@ -99,6 +101,56 @@ test('Tauri transport fails closed before fetch while session is unavailable', a
     assert.equal(fetchCalls, 0)
     resetBackendSession()
   }
+})
+
+test('manuscript capability build-info source contract', async (t) => {
+  t.after(resetBackendRuntimeForTests)
+  const productionSession = {
+    ...SESSION_A,
+    buildInfo: {
+      nativeActivationMode: 'production',
+      sourceCommit: '3'.repeat(40),
+      targetTriple: 'x86_64-pc-windows-msvc',
+      manuscriptLifecycleLease: true,
+      manuscriptChangeNotification: true,
+    },
+  } as unknown as SidecarSession
+  let fetchCalls = 0
+  configureBackendRuntimeForTests({
+    mode: 'tauri',
+    invoke: async () => productionSession,
+    fetch: async () => {
+      fetchCalls++
+      return okResponse()
+    },
+  })
+  await backendFetch('/health')
+  assert.equal(fetchCalls, 1)
+
+  const invalidBuildInfo = [
+    { ...productionSession.buildInfo, manuscriptLifecycleLease: false },
+    { ...productionSession.buildInfo, manuscriptChangeNotification: 'true' },
+    { ...productionSession.buildInfo, nativeActivationMode: 'off' },
+    (() => {
+      const value = { ...productionSession.buildInfo } as Record<string, unknown>
+      delete value.manuscriptChangeNotification
+      return value
+    })(),
+    { ...productionSession.buildInfo, extra: false },
+  ]
+  for (const buildInfo of invalidBuildInfo) {
+    resetBackendSession()
+    configureBackendRuntimeForTests({
+      mode: 'tauri',
+      invoke: async () => ({ ...productionSession, buildInfo }) as unknown as SidecarSession,
+      fetch: async () => {
+        fetchCalls++
+        return okResponse()
+      },
+    })
+    await assert.rejects(backendFetch('/health'), BackendRuntimeUnavailableError)
+  }
+  assert.equal(fetchCalls, 1)
 })
 
 test('Tauri transport uses the dynamic port and overwrites a caller nonce exactly once', async (t) => {

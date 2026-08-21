@@ -2653,7 +2653,7 @@ test('existing-file range lease uses the exact OPEN_EXISTING one-byte Win32 ABI'
   assert.equal(loadCalls, 1);
   assert.deepEqual(calls.open, {
     source: filePath,
-    desiredAccess: 0xc0000000,
+    desiredAccess: 0x80000080,
     shareMode: 0x00000003,
     security: 0,
     disposition: 3,
@@ -2701,7 +2701,10 @@ test('existing-file range lease adds exclusive locking without broadening its fi
   const expectedIdentity = { dev: '521', ino: '523' };
   const backend = createWin32Backend(durabilityErrors, {
     kernel32: {
-      CreateFileW: () => 153n,
+      CreateFileW(_source, desiredAccess, shareMode) {
+        calls.open = { desiredAccess, shareMode };
+        return 153n;
+      },
       GetFileInformationByHandle(handle, information) {
         writeWin32FileInformation(information, expectedIdentity);
         return 1;
@@ -2727,6 +2730,10 @@ test('existing-file range lease adds exclusive locking without broadening its fi
     expectedIdentity,
     exclusive: true,
   }).release();
+  assert.deepEqual(calls.open, {
+    desiredAccess: 0xc0000000,
+    shareMode: 0x00000003,
+  });
   assert.deepEqual(calls.lock, {
     handle: 153n,
     flags: 0x00000003,

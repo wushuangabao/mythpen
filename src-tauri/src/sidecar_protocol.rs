@@ -189,6 +189,8 @@ pub(crate) enum ChildControlFrame {
         native_activation_mode: String,
         source_commit: String,
         target_triple: String,
+        manuscript_lifecycle_lease: bool,
+        manuscript_change_notification: bool,
     },
     BuildInfo {
         child_pid: u32,
@@ -196,6 +198,8 @@ pub(crate) enum ChildControlFrame {
         native_activation_mode: String,
         source_commit: String,
         target_triple: String,
+        manuscript_lifecycle_lease: bool,
+        manuscript_change_notification: bool,
     },
     ShutdownState {
         child_pid: u32,
@@ -254,6 +258,13 @@ fn required_u64(object: &BTreeMap<String, Value>, key: &str) -> Result<u64, Prot
         .ok_or_else(ProtocolError::invalid_frame)
 }
 
+fn required_bool(object: &BTreeMap<String, Value>, key: &str) -> Result<bool, ProtocolError> {
+    object
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(ProtocolError::invalid_frame)
+}
+
 fn required_pid(object: &BTreeMap<String, Value>) -> Result<u32, ProtocolError> {
     u32::try_from(required_u64(object, "childPid")?).map_err(|_| ProtocolError::invalid_frame())
 }
@@ -278,16 +289,24 @@ fn valid_target_triple(value: &str) -> bool {
 
 fn parse_build_fields(
     object: &BTreeMap<String, Value>,
-) -> Result<(u32, String, String, String, String), ProtocolError> {
+) -> Result<(u32, String, String, String, String, bool, bool), ProtocolError> {
     let child_pid = required_pid(object)?;
     let nonce_digest = required_string(object, "nonceDigest")?;
     let native_activation_mode = required_string(object, "nativeActivationMode")?;
     let source_commit = required_string(object, "sourceCommit")?;
     let target_triple = required_string(object, "targetTriple")?;
+    let manuscript_lifecycle_lease = required_bool(object, "manuscriptLifecycleLease")?;
+    let manuscript_change_notification = required_bool(object, "manuscriptChangeNotification")?;
+    let expected_manuscript_capability = native_activation_mode == "production";
     if !valid_lower_hex(&nonce_digest, &[64])
-        || native_activation_mode != "off"
+        || !matches!(
+            native_activation_mode.as_str(),
+            "off" | "fixture_only" | "production"
+        )
         || !valid_lower_hex(&source_commit, &[40, 64])
         || !valid_target_triple(&target_triple)
+        || manuscript_lifecycle_lease != expected_manuscript_capability
+        || manuscript_change_notification != expected_manuscript_capability
     {
         return Err(ProtocolError::invalid_frame());
     }
@@ -297,6 +316,8 @@ fn parse_build_fields(
         native_activation_mode,
         source_commit,
         target_triple,
+        manuscript_lifecycle_lease,
+        manuscript_change_notification,
     ))
 }
 
@@ -327,11 +348,14 @@ fn parse_control_object(
                     "nativeActivationMode",
                     "sourceCommit",
                     "targetTriple",
+                    "manuscriptLifecycleLease",
+                    "manuscriptChangeNotification",
                 ],
             ) {
                 return Err(ProtocolError::invalid_frame());
             }
-            let (child_pid, nonce_digest, mode, commit, triple) = parse_build_fields(&object)?;
+            let (child_pid, nonce_digest, mode, commit, triple, lease, notification) =
+                parse_build_fields(&object)?;
             let host = required_string(&object, "host")?;
             let port = u16::try_from(required_u64(&object, "port")?)
                 .map_err(|_| ProtocolError::invalid_frame())?;
@@ -346,6 +370,8 @@ fn parse_control_object(
                 native_activation_mode: mode,
                 source_commit: commit,
                 target_triple: triple,
+                manuscript_lifecycle_lease: lease,
+                manuscript_change_notification: notification,
             })
         }
         "build.info" => {
@@ -359,17 +385,22 @@ fn parse_control_object(
                     "nativeActivationMode",
                     "sourceCommit",
                     "targetTriple",
+                    "manuscriptLifecycleLease",
+                    "manuscriptChangeNotification",
                 ],
             ) {
                 return Err(ProtocolError::invalid_frame());
             }
-            let (child_pid, nonce_digest, mode, commit, triple) = parse_build_fields(&object)?;
+            let (child_pid, nonce_digest, mode, commit, triple, lease, notification) =
+                parse_build_fields(&object)?;
             Ok(ChildControlFrame::BuildInfo {
                 child_pid,
                 nonce_digest,
                 native_activation_mode: mode,
                 source_commit: commit,
                 target_triple: triple,
+                manuscript_lifecycle_lease: lease,
+                manuscript_change_notification: notification,
             })
         }
         "shutdown.state" | "shutdown.soft_deadline" => {
@@ -499,6 +530,8 @@ pub(crate) struct SidecarBuildInfo {
     pub(crate) native_activation_mode: String,
     pub(crate) source_commit: String,
     pub(crate) target_triple: String,
+    pub(crate) manuscript_lifecycle_lease: bool,
+    pub(crate) manuscript_change_notification: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -516,6 +549,8 @@ struct ReadyCandidate {
     native_activation_mode: String,
     source_commit: String,
     target_triple: String,
+    manuscript_lifecycle_lease: bool,
+    manuscript_change_notification: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -561,6 +596,8 @@ impl SidecarSessionHandshake {
                 native_activation_mode,
                 source_commit,
                 target_triple,
+                manuscript_lifecycle_lease,
+                manuscript_change_notification,
             } => {
                 if self.ready.is_some()
                     || self.session.is_some()
@@ -575,6 +612,8 @@ impl SidecarSessionHandshake {
                     native_activation_mode,
                     source_commit,
                     target_triple,
+                    manuscript_lifecycle_lease,
+                    manuscript_change_notification,
                 });
                 Ok(HandshakeEffect::RequestBuildInfo)
             }
@@ -584,6 +623,8 @@ impl SidecarSessionHandshake {
                 native_activation_mode,
                 source_commit,
                 target_triple,
+                manuscript_lifecycle_lease,
+                manuscript_change_notification,
             } => {
                 let ready = self
                     .ready
@@ -595,6 +636,8 @@ impl SidecarSessionHandshake {
                     || native_activation_mode != ready.native_activation_mode
                     || source_commit != ready.source_commit
                     || target_triple != ready.target_triple
+                    || manuscript_lifecycle_lease != ready.manuscript_lifecycle_lease
+                    || manuscript_change_notification != ready.manuscript_change_notification
                 {
                     return Err(ProtocolError::authentication_failed());
                 }
@@ -606,6 +649,8 @@ impl SidecarSessionHandshake {
                         native_activation_mode,
                         source_commit,
                         target_triple,
+                        manuscript_lifecycle_lease,
+                        manuscript_change_notification,
                     },
                 });
                 Ok(HandshakeEffect::Published)
@@ -638,14 +683,57 @@ mod tests {
 
     fn ready_line(digest: &str) -> String {
         format!(
-            "{{\"channel\":\"mythpen.sidecar.v1\",\"type\":\"ready\",\"childPid\":{PID},\"host\":\"127.0.0.1\",\"port\":54321,\"nonceDigest\":\"{digest}\",\"nativeActivationMode\":\"off\",\"sourceCommit\":\"{COMMIT}\",\"targetTriple\":\"{TRIPLE}\"}}"
+            "{{\"channel\":\"mythpen.sidecar.v1\",\"type\":\"ready\",\"childPid\":{PID},\"host\":\"127.0.0.1\",\"port\":54321,\"nonceDigest\":\"{digest}\",\"nativeActivationMode\":\"off\",\"sourceCommit\":\"{COMMIT}\",\"targetTriple\":\"{TRIPLE}\",\"manuscriptLifecycleLease\":false,\"manuscriptChangeNotification\":false}}"
         )
     }
 
     fn build_info_line(digest: &str) -> String {
         format!(
-            "{{\"channel\":\"mythpen.sidecar.v1\",\"type\":\"build.info\",\"childPid\":{PID},\"nonceDigest\":\"{digest}\",\"nativeActivationMode\":\"off\",\"sourceCommit\":\"{COMMIT}\",\"targetTriple\":\"{TRIPLE}\"}}"
+            "{{\"channel\":\"mythpen.sidecar.v1\",\"type\":\"build.info\",\"childPid\":{PID},\"nonceDigest\":\"{digest}\",\"nativeActivationMode\":\"off\",\"sourceCommit\":\"{COMMIT}\",\"targetTriple\":\"{TRIPLE}\",\"manuscriptLifecycleLease\":false,\"manuscriptChangeNotification\":false}}"
         )
+    }
+
+    #[test]
+    fn manuscript_capability_build_info_source_contract() {
+        let secret = NonceSecret::from_bytes([7u8; 32]);
+        let digest = secret.digest_hex();
+        let production_ready = format!(
+            "{{\"channel\":\"mythpen.sidecar.v1\",\"type\":\"ready\",\"childPid\":{PID},\"host\":\"127.0.0.1\",\"port\":54321,\"nonceDigest\":\"{digest}\",\"nativeActivationMode\":\"production\",\"sourceCommit\":\"{COMMIT}\",\"targetTriple\":\"{TRIPLE}\",\"manuscriptLifecycleLease\":true,\"manuscriptChangeNotification\":true}}"
+        );
+        let production_build = production_ready
+            .replace("\"type\":\"ready\",", "\"type\":\"build.info\",")
+            .replace("\"host\":\"127.0.0.1\",\"port\":54321,", "");
+        let mut handshake = SidecarSessionHandshake::new(PID, secret.expose_for_renderer(), digest);
+        let ready = match classify_stdout_line(production_ready.as_bytes()).unwrap() {
+            StdoutLine::Control(frame) => frame,
+            StdoutLine::Log => unreachable!(),
+        };
+        assert_eq!(
+            handshake.accept(ready).unwrap(),
+            HandshakeEffect::RequestBuildInfo
+        );
+        let build = match classify_stdout_line(production_build.as_bytes()).unwrap() {
+            StdoutLine::Control(frame) => frame,
+            StdoutLine::Log => unreachable!(),
+        };
+        assert_eq!(handshake.accept(build).unwrap(), HandshakeEffect::Published);
+        let info = &handshake.session().unwrap().build_info;
+        assert!(info.manuscript_lifecycle_lease);
+        assert!(info.manuscript_change_notification);
+
+        for invalid in [
+            production_ready.replace("\"manuscriptLifecycleLease\":true,", ""),
+            production_ready.replace(
+                "\"manuscriptLifecycleLease\":true",
+                "\"manuscriptLifecycleLease\":\"true\"",
+            ),
+            production_ready.replace(
+                "\"nativeActivationMode\":\"production\"",
+                "\"nativeActivationMode\":\"off\"",
+            ),
+        ] {
+            assert!(classify_stdout_line(invalid.as_bytes()).is_err());
+        }
     }
 
     #[test]

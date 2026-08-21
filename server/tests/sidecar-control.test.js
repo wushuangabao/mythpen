@@ -110,11 +110,59 @@ test('build info is compile-time shaped and runtime activation env cannot change
     'nativeActivationMode',
     'sourceCommit',
     'targetTriple',
+    'manuscriptLifecycleLease',
+    'manuscriptChangeNotification',
   ]);
   assert.equal(info.nativeActivationMode, 'off');
   assert.match(info.sourceCommit, /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
   assert.match(info.targetTriple, /^[A-Za-z0-9_]+(?:-[A-Za-z0-9_.]+){2,}$/);
   assert.equal(Object.isFrozen(info), true);
+});
+
+test('manuscript capability build-info source contract', () => {
+  const { getBuildInfo } = require('../build-info');
+  const { encodeControlFrame } = require('../sidecar-control');
+  const base = {
+    childPid: 123,
+    nonceDigest: 'b'.repeat(64),
+    sourceCommit: 'a'.repeat(40),
+    targetTriple: 'x86_64-pc-windows-msvc',
+  };
+  const payloadFor = (nativeActivationMode, capability) => ({
+    ...base,
+    nativeActivationMode,
+    manuscriptLifecycleLease: capability,
+    manuscriptChangeNotification: capability,
+  });
+
+  assert.deepEqual(getBuildInfo(), {
+    nativeActivationMode: 'off',
+    sourceCommit: '0'.repeat(40),
+    targetTriple: 'unknown-unknown-unknown',
+    manuscriptLifecycleLease: false,
+    manuscriptChangeNotification: false,
+  });
+  assert.doesNotThrow(() => encodeControlFrame('build.info', payloadFor('off', false)));
+  assert.doesNotThrow(() => encodeControlFrame('build.info', payloadFor('fixture_only', false)));
+  assert.doesNotThrow(() => encodeControlFrame('build.info', payloadFor('production', true)));
+
+  for (const invalid of [
+    { ...payloadFor('off', false), manuscriptLifecycleLease: true },
+    { ...payloadFor('fixture_only', false), manuscriptChangeNotification: true },
+    { ...payloadFor('production', true), manuscriptLifecycleLease: false },
+    { ...payloadFor('production', true), manuscriptChangeNotification: 'true' },
+  ]) {
+    assertControlError(
+      () => encodeControlFrame('build.info', invalid),
+      'CONTROL_INVALID_FRAME',
+    );
+  }
+  const missing = payloadFor('production', true);
+  delete missing.manuscriptChangeNotification;
+  assertControlError(
+    () => encodeControlFrame('build.info', missing),
+    'CONTROL_INVALID_FRAME',
+  );
 });
 
 test('direct dev port accepts only canonical decimal loopback ports', () => {
@@ -239,6 +287,8 @@ test('outbound frames are exact NDJSON and never accept unlisted payload fields'
     nativeActivationMode: 'off',
     sourceCommit: 'a'.repeat(40),
     targetTriple: 'x86_64-pc-windows-msvc',
+    manuscriptLifecycleLease: false,
+    manuscriptChangeNotification: false,
   };
 
   assert.equal(
@@ -265,19 +315,26 @@ test('sidecar build metadata accepts exactly the compile-time native activation 
     nativeActivationMode: 'off',
     sourceCommit: 'a'.repeat(40),
     targetTriple: 'x86_64-pc-windows-msvc',
+    manuscriptLifecycleLease: false,
+    manuscriptChangeNotification: false,
   };
   const buildInfo = { ...ready };
   delete buildInfo.host;
   delete buildInfo.port;
 
   for (const nativeActivationMode of ['off', 'fixture_only', 'production']) {
+    const capability = nativeActivationMode === 'production';
     assert.doesNotThrow(() => encodeControlFrame('ready', {
       ...ready,
       nativeActivationMode,
+      manuscriptLifecycleLease: capability,
+      manuscriptChangeNotification: capability,
     }));
     assert.doesNotThrow(() => encodeControlFrame('build.info', {
       ...buildInfo,
       nativeActivationMode,
+      manuscriptLifecycleLease: capability,
+      manuscriptChangeNotification: capability,
     }));
   }
   for (const payload of [ready, buildInfo]) {
@@ -451,6 +508,8 @@ test('desktop runtime has zero startup side effects before bootstrap and then re
       nonceDigest: buildInfo.nonceDigest,
       sourceCommit: buildInfo.sourceCommit,
       targetTriple: buildInfo.targetTriple,
+      manuscriptLifecycleLease: buildInfo.manuscriptLifecycleLease,
+      manuscriptChangeNotification: buildInfo.manuscriptChangeNotification,
     },
     {
       childPid: ready.childPid,
@@ -458,6 +517,8 @@ test('desktop runtime has zero startup side effects before bootstrap and then re
       nonceDigest: ready.nonceDigest,
       sourceCommit: ready.sourceCommit,
       targetTriple: ready.targetTriple,
+      manuscriptLifecycleLease: ready.manuscriptLifecycleLease,
+      manuscriptChangeNotification: ready.manuscriptChangeNotification,
     },
   );
 

@@ -1700,7 +1700,9 @@ function createWin32Backend({
     verifyExistingLockLstat(absoluteLockPath, options.expectedIdentity);
     const opened = openHandle(
       absoluteLockPath.length >= 248 ? path.toNamespacedPath(absoluteLockPath) : absoluteLockPath,
-      GENERIC_READ_WRITE,
+      options.exclusive
+        ? GENERIC_READ_WRITE
+        : (GENERIC_READ | FILE_READ_ATTRIBUTES) >>> 0,
       FILE_SHARE_READ_WRITE,
       OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,

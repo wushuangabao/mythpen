@@ -11,15 +11,30 @@ const targetTriple = typeof __MYTHPEN_TARGET_TRIPLE__ === 'string'
 const nativeActivationMode = typeof __MYTHPEN_NATIVE_ACTIVATION_MODE__ === 'string'
   ? __MYTHPEN_NATIVE_ACTIVATION_MODE__
   : 'off';
+const manuscriptLifecycleLease = typeof __MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__ === 'boolean'
+  ? __MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__
+  : false;
+const manuscriptChangeNotification = typeof __MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__ === 'boolean'
+  ? __MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__
+  : false;
 
 if (!NATIVE_ACTIVATION_MODES.has(nativeActivationMode)) {
   throw new Error('Invalid compile-time native activation mode');
+}
+const expectedManuscriptCapability = nativeActivationMode === 'production';
+if (
+  manuscriptLifecycleLease !== expectedManuscriptCapability
+  || manuscriptChangeNotification !== expectedManuscriptCapability
+) {
+  throw new Error('Invalid compile-time manuscript capability profile');
 }
 
 const BUILD_INFO = Object.freeze({
   nativeActivationMode,
   sourceCommit,
   targetTriple,
+  manuscriptLifecycleLease,
+  manuscriptChangeNotification,
 });
 
 function getBuildInfo() {

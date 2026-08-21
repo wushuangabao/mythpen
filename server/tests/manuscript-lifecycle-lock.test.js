@@ -20,6 +20,9 @@ const {
   ensureMigrationDirectories,
   verifyCreationDirectories,
 } = require('../manuscript/production-project-roots');
+const {
+  createWindowsManuscriptLifecycleLeaseAdapter,
+} = require('../platform/windows-manuscript-lifecycle-lease');
 
 const EMPTY_SHA256 = crypto.createHash('sha256').update(Buffer.alloc(0)).digest('hex');
 
@@ -163,6 +166,22 @@ test('ready lifecycle receipt verifies the existing lock without creating or rep
   const after = fs.lstatSync(lockPath, { bigint: true });
   assert.equal(after.dev, before.dev);
   assert.equal(after.ino, before.ino);
+});
+
+test('ready lifecycle receipt remains durably verifiable while its shared lifecycle lease is held', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const current = fixture(t);
+  const owner = createProductionManuscriptLifecycleLockOwner();
+  const receipt = owner.createFresh(current.canonicalRealControlDirectory);
+  const lease = createWindowsManuscriptLifecycleLeaseAdapter()
+    .acquireShared(receipt.lifecyclePlatformIdentity);
+  t.after(() => {
+    if (lease.state === 'HELD') lease.release();
+  });
+
+  assert.equal(owner.verifyExisting(receipt), receipt.lifecyclePlatformIdentity);
+  assert.equal(lease.state, 'HELD');
 });
 
 test('ready lifecycle verification fails closed when the lock is missing and never backfills it', (t) => {

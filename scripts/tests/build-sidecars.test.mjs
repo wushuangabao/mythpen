@@ -71,6 +71,34 @@ test('production build uses only the production entry and deterministic reviewed
   )
 })
 
+test('manuscript capability build-info source contract', () => {
+  const sourceCommit = 'a'.repeat(40)
+  const targetTriple = 'x86_64-pc-windows-msvc'
+  const production = compileProductionSidecarArguments(
+    'server/production-sidecar.js',
+    'production.exe',
+    sourceCommit,
+    targetTriple,
+    reviewedManifest(),
+  )
+  const ordinary = compileSidecarArguments(
+    'server/index.js', 'ordinary.exe', sourceCommit, targetTriple,
+  )
+  const fixture = compileFixtureOnlySidecarArguments(
+    'server/index.js', 'fixture.exe', sourceCommit, targetTriple,
+  )
+
+  for (const capability of [
+    '__MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__',
+    '__MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__',
+  ]) {
+    assert.ok(production.includes(`${capability}=true`))
+    assert.ok(ordinary.includes(`${capability}=false`))
+    assert.ok(fixture.includes(`${capability}=false`))
+    assert.equal(production.filter((value) => value.startsWith(`${capability}=`)).length, 1)
+  }
+})
+
 test('Windows PowerShell SelfTest child environment removes every PSModulePath alias only', () => {
   const sourceEnvironment = {
     PATH: 'sentinel-path',
@@ -176,6 +204,10 @@ test('Windows rollback capability probe is a fixture-only compiled target outsid
       `__MYTHPEN_TARGET_TRIPLE__=${JSON.stringify(triple)}`,
       '--define',
       '__MYTHPEN_NATIVE_ACTIVATION_MODE__="fixture_only"',
+      '--define',
+      '__MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__=false',
+      '--define',
+      '__MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__=false',
       '--outfile',
       output,
     ],
@@ -194,7 +226,9 @@ test('Windows directory capability probe is a fixture-only compiled target outsi
       'build', '--compile', 'server/testing/windows-native-directory-probe.js', '--define',
       `__MYTHPEN_SOURCE_COMMIT__=${JSON.stringify(sourceCommit)}`, '--define',
       `__MYTHPEN_TARGET_TRIPLE__=${JSON.stringify(triple)}`, '--define',
-      '__MYTHPEN_NATIVE_ACTIVATION_MODE__="fixture_only"', '--outfile', output,
+      '__MYTHPEN_NATIVE_ACTIVATION_MODE__="fixture_only"', '--define',
+      '__MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__=false', '--define',
+      '__MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__=false', '--outfile', output,
     ],
   )
 })
@@ -225,6 +259,10 @@ test('injects only a full source commit and the actual target triple as compile 
       `__MYTHPEN_TARGET_TRIPLE__=${JSON.stringify(targetTriple)}`,
       '--define',
       '__MYTHPEN_NATIVE_ACTIVATION_MODE__="off"',
+      '--define',
+      '__MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__=false',
+      '--define',
+      '__MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__=false',
       '--outfile',
       'server.exe',
     ],
@@ -247,6 +285,10 @@ test('injects only a full source commit and the actual target triple as compile 
       `__MYTHPEN_TARGET_TRIPLE__=${JSON.stringify(targetTriple)}`,
       '--define',
       '__MYTHPEN_NATIVE_ACTIVATION_MODE__="fixture_only"',
+      '--define',
+      '__MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__=false',
+      '--define',
+      '__MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__=false',
       '--outfile',
       'fixture-server.exe',
     ],

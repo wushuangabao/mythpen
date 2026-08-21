@@ -115,9 +115,11 @@ test('desktop dev has one sidecar owner and renderer has no spawn authority', ()
   )
   const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const about = readFileSync(new URL('../src/pages/About.tsx', import.meta.url), 'utf8')
+  const host = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
 
   assert.equal(tauri.build.beforeDevCommand, 'pnpm dev')
-  assert.equal(capability.permissions.includes('shell:allow-open'), true)
+  assert.equal(capability.permissions.includes('shell:allow-open'), false)
   assert.equal(
     capability.permissions.some((permission: unknown) =>
       typeof permission === 'object' && permission !== null && 'identifier' in permission
@@ -126,6 +128,22 @@ test('desktop dev has one sidecar owner and renderer has no spawn authority', ()
     ),
     false,
   )
+  assert.doesNotMatch(about, /@tauri-apps\/plugin-shell/)
+  assert.doesNotMatch(about, /window\.open/)
+  assert.match(about, /invoke\('open_external_https'/)
+  assert.match(about, /href=\{ABOUT_SOURCE_URL\}/)
+  assert.match(about, /if \(!\('__TAURI_INTERNALS__' in window\)\) return/)
+  assert.match(host, /open_manuscript_resource/)
+  assert.match(host, /reveal_manuscript_project/)
+  assert.match(host, /open_external_https/)
+  assert.match(host, /launch_with_current_sidecar_session/)
+  const openCommand = host.match(/fn open_manuscript_resource\(([\s\S]*?)\) -> Result<\(\), String>/)?.[1]
+  assert.ok(openCommand)
+  assert.match(openCommand, /project_uid: String/)
+  assert.match(openCommand, /project_instance_uid: String/)
+  assert.match(openCommand, /resource_kind: String/)
+  assert.match(openCommand, /resource_uid: String/)
+  assert.doesNotMatch(openCommand, /(?:absolute_)?path|project_name|route:/)
   assert.doesNotMatch(main, /ServerStatusGate/)
   assert.match(app, /function WorkspaceApp\(/)
   assert.match(app, /<ServerStatusGate>/)

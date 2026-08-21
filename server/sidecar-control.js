@@ -207,6 +207,8 @@ function validReadyPayload(payload) {
     'nativeActivationMode',
     'sourceCommit',
     'targetTriple',
+    'manuscriptLifecycleLease',
+    'manuscriptChangeNotification',
   ])
     && Number.isSafeInteger(payload.childPid) && payload.childPid > 0
     && payload.host === '127.0.0.1'
@@ -214,7 +216,8 @@ function validReadyPayload(payload) {
     && NONCE_PATTERN.test(payload.nonceDigest)
     && NATIVE_ACTIVATION_MODES.has(payload.nativeActivationMode)
     && SOURCE_COMMIT_PATTERN.test(payload.sourceCommit)
-    && TARGET_TRIPLE_PATTERN.test(payload.targetTriple);
+    && TARGET_TRIPLE_PATTERN.test(payload.targetTriple)
+    && validManuscriptCapabilityProfile(payload);
 }
 
 function validBuildInfoPayload(payload) {
@@ -224,12 +227,23 @@ function validBuildInfoPayload(payload) {
     'nativeActivationMode',
     'sourceCommit',
     'targetTriple',
+    'manuscriptLifecycleLease',
+    'manuscriptChangeNotification',
   ])
     && Number.isSafeInteger(payload.childPid) && payload.childPid > 0
     && NONCE_PATTERN.test(payload.nonceDigest)
     && NATIVE_ACTIVATION_MODES.has(payload.nativeActivationMode)
     && SOURCE_COMMIT_PATTERN.test(payload.sourceCommit)
-    && TARGET_TRIPLE_PATTERN.test(payload.targetTriple);
+    && TARGET_TRIPLE_PATTERN.test(payload.targetTriple)
+    && validManuscriptCapabilityProfile(payload);
+}
+
+function validManuscriptCapabilityProfile(payload) {
+  const expected = payload.nativeActivationMode === 'production';
+  return typeof payload.manuscriptLifecycleLease === 'boolean'
+    && typeof payload.manuscriptChangeNotification === 'boolean'
+    && payload.manuscriptLifecycleLease === expected
+    && payload.manuscriptChangeNotification === expected;
 }
 
 function validShutdownStatePayload(payload) {

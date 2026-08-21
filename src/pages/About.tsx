@@ -1,9 +1,10 @@
-import { open } from '@tauri-apps/plugin-shell'
+import { invoke } from '@tauri-apps/api/core'
 import { Info, Mail } from 'lucide-react'
-import { useCallback } from 'react'
+import { type MouseEvent, useCallback } from 'react'
 import { useT } from '@/hooks/useT'
 
 declare const __APP_VERSION__: string
+const ABOUT_SOURCE_URL = 'https://github.com/niyongsheng/mythpen'
 
 function GithubIcon({ className }: { className?: string }) {
   return (
@@ -21,10 +22,12 @@ function GithubIcon({ className }: { className?: string }) {
 
 export function About() {
   const { t } = useT()
-  const handleOpenGithub = useCallback(() => {
-    open('https://github.com/niyongsheng/mythpen').catch(() => {
-      window.open('https://github.com/niyongsheng/mythpen', '_blank')
-    })
+  const handleOpenGithub = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
+    if (!('__TAURI_INTERNALS__' in window)) return
+    event.preventDefault()
+    void invoke('open_external_https', {
+      url: ABOUT_SOURCE_URL,
+    }).catch(() => {})
   }, [])
 
   return (
@@ -51,8 +54,10 @@ export function About() {
             </div>
 
             {/* GitHub */}
-            <button
-              type="button"
+            <a
+              href={ABOUT_SOURCE_URL}
+              target="_blank"
+              rel="noreferrer"
               className="flex w-full items-center gap-3 rounded-lg border border-[var(--hairline)] bg-[var(--canvas-card)] p-4 text-left no-underline transition-colors cursor-pointer hover:bg-[var(--canvas-mid)]"
               onClick={handleOpenGithub}
             >
@@ -62,7 +67,7 @@ export function About() {
                 <div className="text-[12px] text-[var(--ink-tertiary)] truncate">github.com/niyongsheng/mythpen</div>
               </div>
               <span className="text-[12px] text-[var(--accent-gold)]">{t('about.openLink')} →</span>
-            </button>
+            </a>
 
             {/* Contact */}
             <div className="bg-[var(--canvas-card)] border border-[var(--hairline)] rounded-lg p-4 flex items-center gap-3">

@@ -1,9 +1,11 @@
 export const INSTANCE_NONCE_HEADER = 'X-Mythpen-Instance-Nonce'
 
 export interface SidecarBuildInfo {
-  nativeActivationMode: 'off'
+  nativeActivationMode: 'off' | 'fixture_only' | 'production'
   sourceCommit: string
   targetTriple: string
+  manuscriptLifecycleLease: boolean
+  manuscriptChangeNotification: boolean
 }
 
 export interface SidecarSession {
@@ -46,12 +48,31 @@ function validLowerHex(value: unknown, lengths: number[]): value is string {
   return typeof value === 'string' && lengths.includes(value.length) && /^[0-9a-f]+$/.test(value)
 }
 
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const required = [...expected].sort()
+  return actual.length === required.length && actual.every((key, index) => key === required[index])
+}
+
 function isSidecarSession(value: unknown): value is SidecarSession {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const session = value as Record<string, unknown>
   const buildInfo = session.buildInfo
   if (buildInfo === null || typeof buildInfo !== 'object' || Array.isArray(buildInfo)) return false
   const build = buildInfo as Record<string, unknown>
+  if (!hasExactKeys(session, ['port', 'nonce', 'childPid', 'buildInfo'])) return false
+  if (
+    !hasExactKeys(build, [
+      'nativeActivationMode',
+      'sourceCommit',
+      'targetTriple',
+      'manuscriptLifecycleLease',
+      'manuscriptChangeNotification',
+    ])
+  )
+    return false
+  const activationMode = build.nativeActivationMode
+  const expectedManuscriptCapability = activationMode === 'production'
   return (
     Number.isInteger(session.port) &&
     Number(session.port) > 0 &&
@@ -59,10 +80,14 @@ function isSidecarSession(value: unknown): value is SidecarSession {
     Number.isSafeInteger(session.childPid) &&
     Number(session.childPid) > 0 &&
     validLowerHex(session.nonce, [64]) &&
-    build.nativeActivationMode === 'off' &&
+    (activationMode === 'off' || activationMode === 'fixture_only' || activationMode === 'production') &&
     validLowerHex(build.sourceCommit, [40, 64]) &&
     typeof build.targetTriple === 'string' &&
-    build.targetTriple.length > 0
+    /^[A-Za-z0-9_]+(?:-[A-Za-z0-9_.]+){2,}$/.test(build.targetTriple) &&
+    typeof build.manuscriptLifecycleLease === 'boolean' &&
+    typeof build.manuscriptChangeNotification === 'boolean' &&
+    build.manuscriptLifecycleLease === expectedManuscriptCapability &&
+    build.manuscriptChangeNotification === expectedManuscriptCapability
   )
 }
 

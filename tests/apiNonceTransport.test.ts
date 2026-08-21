@@ -18,6 +18,8 @@ const SESSION: SidecarSession = {
     nativeActivationMode: 'off',
     sourceCommit: '2'.repeat(40),
     targetTriple: 'x86_64-pc-windows-msvc',
+    manuscriptLifecycleLease: false,
+    manuscriptChangeNotification: false,
   },
 }
 

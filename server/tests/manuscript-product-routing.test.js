@@ -726,7 +726,7 @@ test('production runtime source has one brokered gate path and validates the pro
   assert.doesNotMatch(source, /\.createFresh\(/u);
   assert.match(source, /bindL2Command/u);
   assert.match(source, /productWriteIntents\.execute/u);
-  assert.doesNotMatch(source, /entry\.l2\.execute/u);
+  assert.doesNotMatch(source, /entry\.l2\.execute\s*\(/u);
   assert.doesNotMatch(source, /files\.prime\(/u);
   const entryShell = source.slice(
     source.indexOf('function entryFor(admission)'),

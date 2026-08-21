@@ -45,6 +45,7 @@ export function validateTargetTriple(value) {
 }
 
 function compileSidecarArgumentsForMode(entry, output, sourceCommit, targetTriple, mode) {
+  const manuscriptCapability = mode === 'production'
   return [
     'build',
     '--compile',
@@ -55,6 +56,10 @@ function compileSidecarArgumentsForMode(entry, output, sourceCommit, targetTripl
     `__MYTHPEN_TARGET_TRIPLE__=${JSON.stringify(validateTargetTriple(targetTriple))}`,
     '--define',
     `__MYTHPEN_NATIVE_ACTIVATION_MODE__=${JSON.stringify(mode)}`,
+    '--define',
+    `__MYTHPEN_MANUSCRIPT_LIFECYCLE_LEASE__=${manuscriptCapability}`,
+    '--define',
+    `__MYTHPEN_MANUSCRIPT_CHANGE_NOTIFICATION__=${manuscriptCapability}`,
     '--outfile',
     output,
   ]
@@ -280,6 +285,8 @@ export function smokeCompiledServer({
       nativeActivationMode,
       sourceCommit: validateSourceCommit(sourceCommit),
       targetTriple: validateTargetTriple(targetTriple),
+      manuscriptLifecycleLease: nativeActivationMode === 'production',
+      manuscriptChangeNotification: nativeActivationMode === 'production',
     }
     const nonceDigest = createHash('sha256').update(Buffer.from(nonce, 'hex')).digest('hex')
     if (!ready || ready.host !== '127.0.0.1' || !Number.isSafeInteger(ready.port) || ready.port < 1) {
@@ -290,6 +297,8 @@ export function smokeCompiledServer({
         || frame.nativeActivationMode !== expected.nativeActivationMode
         || frame.sourceCommit !== expected.sourceCommit
         || frame.targetTriple !== expected.targetTriple
+        || frame.manuscriptLifecycleLease !== expected.manuscriptLifecycleLease
+        || frame.manuscriptChangeNotification !== expected.manuscriptChangeNotification
         || frame.nonceDigest !== nonceDigest) {
         throw new Error('Packaged sidecar build metadata did not match the compiled target.')
       }
